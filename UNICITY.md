@@ -43,13 +43,24 @@ divergence surface is currently **empty**. Keep it as close to that as the profi
 Measured against stock upstream at this exact commit by bft-core F1
 (`docs/design/f1-baseline.md` §4, reproducible with `scripts/reth-baseline.sh`):
 
-- **D-1: the base fee has no floor.** `baseFeePerGas` decays exactly 7/8 per empty block; from a
-  1 gwei genesis it reaches 1 wei in 156 empty blocks. Since system-only blocks are empty by
-  construction, an idle shard drives it there continuously. Setting the genesis base fee is
-  demonstrably not a fix. Owner: bft-core F5 (#13).
-- **D-2: the gas limit is not pinned.** The builder walks `gasLimit` up by 1/1024 per block toward
-  its own default target (30,000,000 → 31,224,868 over 41 blocks), unbounded, so any capacity split
-  computed from "the configured total" silently inflates. Owner: bft-core F5 (#13).
+- **D-1: the genesis base fee is not preserved, and there is no *configurable* floor.** For an empty
+  block the update is the integer recurrence `next = parent - floor(parent/8)`. From a 1 gwei
+  genesis it descends to **7 wei by block 145 and stays there** — 7 is a fixed point because
+  `floor(7/8) == 0`. Note carefully: that fixed point is an artefact of integer division, **not** a
+  fee floor. Nothing configures it and it derives from no policy. A configurable protocol floor is
+  still needed. Owner: bft-core F5 (#13).
+- **D-2: only *our* builder's gas limit is unpinned by default, and a standard flag fixes that.**
+  Under the default builder `gasLimit` drifts up ~1/1024 per block (30,000,000 → 35,070,622 over
+  160 blocks) as it walks toward its own target via `gas_limit_with_target` →
+  `calculate_block_gas_limit`. But `--builder.gaslimit 30000000` holds every block at exactly
+  30,000,000 **with no client change**, so this is a configuration default, not a client defect,
+  and it is not by itself a reason to diverge. What is unevidenced — and may need a validity rule
+  here — is whether a follower rejects a *peer's* block carrying a different gas limit or exceeding
+  the configured capacity. A flag on our own builder constrains only blocks we build. Owner:
+  bft-core F5 (#13), with builder/follower/import/replay evidence from F3 (#11).
+
+An earlier revision of this file claimed the base fee reaches 1 wei and that the gas-limit growth
+was unbounded and required a client fix. Both were wrong; see bft-core PR #84 review 5131229148.
 
 Relevant crates: `crates/ethereum/evm`, `crates/engine`, `crates/payload`, `crates/chainspec`.
 
