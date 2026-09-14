@@ -10786,6 +10786,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "reth-unicity-payload"
+version = "2.5.0"
+dependencies = [
+ "alloy-consensus",
+ "alloy-eips",
+ "alloy-primitives",
+ "alloy-rpc-types-engine",
+ "reth-basic-payload-builder",
+ "reth-chainspec",
+ "reth-ethereum-payload-builder",
+ "reth-ethereum-primitives",
+ "reth-evm",
+ "reth-evm-ethereum",
+ "reth-payload-builder",
+ "reth-payload-builder-primitives",
+ "reth-payload-primitives",
+ "reth-primitives-traits",
+ "reth-provider",
+ "reth-storage-api",
+ "reth-transaction-pool",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "reth-zstd-compressors"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
