@@ -18,8 +18,10 @@ This is a private mirror rather than a GitHub fork: GitHub forks inherit the par
 a fork of public `paradigmxyz/reth` cannot itself be private. `upstream` is configured as a remote,
 so `git fetch upstream` and ordinary rebases onto a later tag work exactly as they would in a fork.
 
-`unicity/main` is byte-identical to upstream `v2.5.0` at this commit. Nothing has diverged yet — the
-first divergence will be F3's privileged system call.
+At the fork point `unicity/main` was byte-identical to upstream `v2.5.0`. The first code divergence is
+the inactive U2 crate `crates/unicity/payload`, recorded with its exact upstream delta in the U2 section
+below. Execution semantics are still unchanged: the privileged system call and its import checks (F3) have
+not been implemented.
 
 ## What this fork is allowed to change
 

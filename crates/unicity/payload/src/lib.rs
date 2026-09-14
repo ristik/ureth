@@ -1,21 +1,22 @@
 //! Unicity per-payload `extraData` commitment provision (U2, bft-core #11).
 //!
-//! The stock Ethereum payload builder copies one per-process value, `EthereumBuilderConfig::extra_data`,
-//! into every block it builds, and the stock payload id hashes only the standard attribute fields. This
-//! crate adds, without editing any upstream crate:
+//! The stock Ethereum payload builder copies one per-process value,
+//! `EthereumBuilderConfig::extra_data`, into every block it builds, and the stock payload id hashes
+//! only the standard attribute fields. This crate adds, without editing any upstream crate:
 //!
-//! - [`UnicityPayloadAttributes`]: the standard attributes plus the 32-byte D1 commitment the block's
-//!   header `extraData` must carry. The commitment has no default and is refused unless it is exactly 32
-//!   bytes.
+//! - [`UnicityPayloadAttributes`]: the standard attributes plus the 32-byte D1 commitment the
+//!   block's header `extraData` must carry. The commitment has no default and is refused unless it
+//!   is exactly 32 bytes.
 //! - A payload id that also covers the commitment, so two build jobs that differ only in their
 //!   commitment are different jobs.
-//! - [`UnicityPayloadBuilder`]: the stock `EthereumPayloadBuilder`, constructed for each job with that
-//!   job's commitment as `extra_data`. Nothing is shared or mutated between jobs.
+//! - [`UnicityPayloadBuilder`]: the stock `EthereumPayloadBuilder`, constructed for each job with
+//!   that job's commitment as `extra_data`. Nothing is shared or mutated between jobs.
 //!
-//! INACTIVE. Nothing registers these types with an `EngineTypes`, a node, an RPC module or a capability,
-//! so no Engine API method accepts them and normal node operation cannot reach them. This is provision
-//! only: no system call, no import or validation hook, no companion data, and no `WithSealV1` semantics.
-//! The commitment is copied verbatim; computing or checking it is not this crate's job.
+//! INACTIVE. Nothing registers these types with an `EngineTypes`, a node, an RPC module or a
+//! capability, so no Engine API method accepts them and normal node operation cannot reach them.
+//! This is provision only: no system call, no import or validation hook, no companion data, and no
+//! `WithSealV1` semantics. The commitment is copied verbatim; computing or checking it is not this
+//! crate's job.
 
 use alloy_eips::eip4895::Withdrawal;
 use alloy_primitives::B256;
@@ -35,8 +36,11 @@ use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-/// Domain separation for the payload id: the stock id and the commitment are hashed under this tag, so
-/// the result cannot equal a stock id computed from the same attributes.
+/// Domain separation for the payload id. The stock id and the commitment are hashed under this tag,
+/// so the derivation is distinct from the stock one and a job cannot alias another merely because
+/// the commitment was left out. It does not make collisions impossible: like the stock id, the
+/// result is a hash truncated to eight bytes, and payload ids are job handles, not cryptographic
+/// bindings.
 pub const PAYLOAD_ID_DOMAIN: &[u8] = b"UNICITY_PAYLOAD_ID_EXTRADATA_COMMITMENT_V1";
 
 /// Payload attributes with the per-payload header commitment.
@@ -46,8 +50,9 @@ pub struct UnicityPayloadAttributes {
     /// The standard Engine API V3 attributes, unchanged.
     #[serde(flatten)]
     pub inner: EthPayloadAttributes,
-    /// The 32-byte value the built block's header `extraData` must carry. Required: deserialization
-    /// refuses a missing field and any value that is not exactly 32 bytes of hex.
+    /// The 32-byte value the built block's header `extraData` must carry. Required:
+    /// deserialization refuses a missing field and any value that is not exactly 32 bytes of
+    /// hex.
     pub commitment: B256,
 }
 
@@ -94,9 +99,9 @@ impl PayloadAttributes for UnicityPayloadAttributes {
 
 /// A payload builder that writes each job's commitment into its block's header `extraData`.
 ///
-/// It holds the parts of a stock `EthereumPayloadBuilder` and constructs one per job, with that job's
-/// commitment as `extra_data`. `base_config.extra_data` is therefore never used: every block built here
-/// carries the commitment of the job that built it.
+/// It holds the parts of a stock `EthereumPayloadBuilder` and constructs one per job, with that
+/// job's commitment as `extra_data`. `base_config.extra_data` is therefore never used: every block
+/// built here carries the commitment of the job that built it.
 #[derive(Debug, Clone)]
 pub struct UnicityPayloadBuilder<Pool, Client, EvmConfig> {
     client: Client,
@@ -123,7 +128,8 @@ where
     Client: Clone,
     EvmConfig: Clone,
 {
-    /// The stock builder for one job: the base configuration with this job's commitment as extraData.
+    /// The stock builder for one job: the base configuration with this job's commitment as
+    /// extraData.
     fn for_job(&self, commitment: B256) -> EthereumPayloadBuilder<Pool, Client, EvmConfig> {
         EthereumPayloadBuilder::new(
             self.client.clone(),
@@ -233,8 +239,9 @@ mod tests {
         parent: Arc<SealedHeader>,
     }
 
-    /// A post-Shanghai, pre-Cancun chain with one parent header, an empty pool and mock state. Cancun is
-    /// left inactive so the test needs no parent beacon root or blob fields: extraData is all it checks.
+    /// A post-Shanghai, pre-Cancun chain with one parent header, an empty pool and mock state.
+    /// Cancun is left inactive so the test needs no parent beacon root or blob fields:
+    /// extraData is all it checks.
     fn fixture() -> Fixture {
         let spec = ChainSpecBuilder::mainnet()
             .london_activated()
@@ -322,7 +329,8 @@ mod tests {
         let (ida, idb) = (a.payload_id(&f.parent.hash()), bb.payload_id(&f.parent.hash()));
         assert_ne!(ida, idb, "a commitment difference alone must change the payload id");
 
-        // Interleaved: A empty, B full, A full, B empty. Each block carries its own job's commitment.
+        // Interleaved: A empty, B full, A full, B empty. Each block carries its own job's
+        // commitment.
         let a_empty = b.build_empty_payload(config(&f, a.clone())).expect("a empty");
         let b_full = build_full(&b, config(&f, bb.clone()));
         let a_full = build_full(&b, config(&f, a));
@@ -348,7 +356,7 @@ mod tests {
         assert_ne!(
             a.payload_id(&f.parent.hash()),
             PayloadAttributes::payload_id(&a.inner, &f.parent.hash()),
-            "even a zero commitment must not reproduce the stock id"
+            "for this input the derivation differs from the stock id; an eight-byte collision is not excluded in general"
         );
     }
 
@@ -358,7 +366,8 @@ mod tests {
         let c = B256::repeat_byte(0x5a);
         let a = attrs(c);
         let stock = PayloadAttributes::payload_id(&a.inner, &f.parent.hash());
-        // The domain tag is written out rather than taken from the constant, so changing either fails here.
+        // The domain tag is written out rather than taken from the constant, so changing either
+        // fails here.
         let mut h = Sha256::new();
         h.update(b"UNICITY_PAYLOAD_ID_EXTRADATA_COMMITMENT_V1");
         h.update(stock.0.as_slice());
