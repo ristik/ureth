@@ -1,0 +1,43 @@
+[package]
+name = "reth-unicity-payload"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Unicity per-payload extraData commitment provision (U2, inactive: not wired into any node)."
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# reth
+reth-basic-payload-builder.workspace = true
+reth-chainspec.workspace = true
+reth-ethereum-payload-builder.workspace = true
+reth-ethereum-primitives.workspace = true
+reth-evm.workspace = true
+reth-payload-builder.workspace = true
+reth-payload-builder-primitives.workspace = true
+reth-payload-primitives.workspace = true
+reth-storage-api.workspace = true
+reth-transaction-pool.workspace = true
+
+# alloy
+alloy-eips.workspace = true
+alloy-primitives = { workspace = true, features = ["serde"] }
+alloy-rpc-types-engine = { workspace = true, features = ["serde"] }
+
+# misc
+serde = { workspace = true, features = ["derive"] }
+sha2.workspace = true
+
+[dev-dependencies]
+alloy-consensus.workspace = true
+reth-evm-ethereum = { workspace = true, features = ["std"] }
+reth-primitives-traits.workspace = true
+reth-provider = { workspace = true, features = ["test-utils"] }
+reth-transaction-pool = { workspace = true, features = ["test-utils"] }
+serde_json = { workspace = true, features = ["std"] }

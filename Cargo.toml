@@ -40,6 +40,7 @@ members = [
     "crates/ethereum/evm",
     "crates/ethereum/node",
     "crates/ethereum/payload/",
+    "crates/unicity/payload/",
     "crates/ethereum/primitives/",
     "crates/ethereum/reth/",
     "crates/etl/",
