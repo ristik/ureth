@@ -9,14 +9,15 @@
 //!   is exactly 32 bytes.
 //! - A payload id that also covers the commitment, so two build jobs that differ only in their
 //!   commitment are different jobs.
-//! - [`UnicityPayloadBuilder`]: the stock `EthereumPayloadBuilder`, constructed for each job with
-//!   that job's commitment as `extra_data`. Nothing is shared or mutated between jobs.
+//! - [`UnicityPayloadBuilder`]: the U2 commitment-only stock builder wrapper.
+//! - [`UnicityExecutionPayloadBuilder`]: an execution-aware wrapper which resolves every build,
+//!   empty-build and missing-payload path to an immutable [`UnicityEvmConfig`].
 //!
 //! INACTIVE. Nothing registers these types with an `EngineTypes`, a node, an RPC module or a
 //! capability, so no Engine API method accepts them and normal node operation cannot reach them.
-//! This is provision only: no system call, no import or validation hook, no companion data, and no
-//! `WithSealV1` semantics. The commitment is copied verbatim; computing or checking it is not this
-//! crate's job.
+//! The execution-aware path remains inactive too. Its resolver performs structural binding, while
+//! certificate/JWT authentication and exact-parent state provenance remain caller prerequisites.
+//! No Engine API method supplies the companion data yet.
 
 use alloy_eips::eip4895::Withdrawal;
 use alloy_primitives::B256;
@@ -33,8 +34,10 @@ use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_payload_primitives::PayloadAttributes;
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
+use reth_unicity_execution::block_executor::UnicityEvmConfig;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::{error::Error, fmt, sync::Arc};
 
 /// Domain separation for the payload id. The stock id and the commitment are hashed under this tag,
 /// so the derivation is distinct from the stock one and a job cannot alias another merely because
@@ -214,6 +217,243 @@ where
     ) -> Result<Self::BuiltPayload, PayloadBuilderError> {
         let (commitment, config) = split_config(config);
         self.for_job(commitment).build_empty_payload(config)
+    }
+}
+
+/// A resolver that selects one immutable execution configuration for an exact payload job.
+///
+/// Resolution is structural. The party populating the resolver must authenticate the Unicity
+/// certificate and bind the supplied state snapshot to the exact parent; this crate does not
+/// deserialize or verify that authentication verdict.
+pub trait ExecutionPayloadJobResolver: Clone + Send + Sync {
+    /// Resolves `config`, refusing absent jobs or any changed parent/attributes.
+    fn resolve(
+        &self,
+        config: &PayloadConfig<UnicityPayloadAttributes>,
+    ) -> Result<UnicityEvmConfig, PayloadJobResolutionError>;
+}
+
+/// One immutable payload-job binding installed by the external authenticated-input path.
+#[derive(Clone, Debug)]
+pub struct ResolvedPayloadJob {
+    parent: Arc<reth_primitives_traits::SealedHeader>,
+    attributes: UnicityPayloadAttributes,
+    payload_id: PayloadId,
+    evm_config: UnicityEvmConfig,
+}
+
+impl ResolvedPayloadJob {
+    /// Creates and checks an exact job binding before it can be installed in a resolver.
+    pub fn new(
+        parent: Arc<reth_primitives_traits::SealedHeader>,
+        attributes: UnicityPayloadAttributes,
+        evm_config: UnicityEvmConfig,
+        builder_config: &EthereumBuilderConfig,
+    ) -> Result<Self, PayloadJobResolutionError> {
+        if builder_config.skip_state_root {
+            return Err(PayloadJobResolutionError(
+                "Unicity payload jobs require state-root computation",
+            ));
+        }
+        let payload_id = attributes.payload_id(&parent.hash());
+        evm_config
+            .validate_payload_job(
+                &parent,
+                &next_block_attributes(&parent, &attributes, builder_config),
+            )
+            .map_err(|_| PayloadJobResolutionError("execution configuration does not match job"))?;
+        Ok(Self { parent, attributes, payload_id, evm_config })
+    }
+}
+
+/// A fixed set of independently prepared payload jobs. It has no mutable current-job state.
+#[derive(Clone, Debug, Default)]
+pub struct FixedPayloadJobResolver {
+    jobs: Arc<[ResolvedPayloadJob]>,
+}
+
+impl FixedPayloadJobResolver {
+    /// Installs immutable jobs and refuses duplicate payload ids.
+    pub fn new(jobs: Vec<ResolvedPayloadJob>) -> Result<Self, PayloadJobResolutionError> {
+        for (index, job) in jobs.iter().enumerate() {
+            if jobs[index + 1..].iter().any(|other| other.payload_id == job.payload_id) {
+                return Err(PayloadJobResolutionError("duplicate payload job"));
+            }
+        }
+        Ok(Self { jobs: jobs.into() })
+    }
+}
+
+impl ExecutionPayloadJobResolver for FixedPayloadJobResolver {
+    fn resolve(
+        &self,
+        config: &PayloadConfig<UnicityPayloadAttributes>,
+    ) -> Result<UnicityEvmConfig, PayloadJobResolutionError> {
+        let job = self
+            .jobs
+            .iter()
+            .find(|job| job.payload_id == config.payload_id)
+            .ok_or(PayloadJobResolutionError("payload job is absent"))?;
+        let parent_mismatch = job.parent.as_ref() != config.parent_header.as_ref();
+        let attributes_mismatch = job.attributes != config.attributes;
+        let id_mismatch =
+            config.attributes.payload_id(&config.parent_header.hash()) != config.payload_id;
+        if parent_mismatch || attributes_mismatch || id_mismatch {
+            return Err(PayloadJobResolutionError("payload job binding mismatch"));
+        }
+        Ok(job.evm_config.clone())
+    }
+}
+
+/// Failure to select the exact immutable execution companion for a payload job.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PayloadJobResolutionError(&'static str);
+
+impl PayloadJobResolutionError {
+    /// Creates a resolver failure with a stable static description.
+    pub const fn new(message: &'static str) -> Self {
+        Self(message)
+    }
+}
+
+impl fmt::Display for PayloadJobResolutionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl Error for PayloadJobResolutionError {}
+
+/// Payload builder that resolves every job to the shared Unicity block executor.
+#[derive(Clone, Debug)]
+pub struct UnicityExecutionPayloadBuilder<Pool, Client, Resolver> {
+    client: Client,
+    pool: Pool,
+    resolver: Resolver,
+    base_config: EthereumBuilderConfig,
+}
+
+impl<Pool, Client, Resolver> UnicityExecutionPayloadBuilder<Pool, Client, Resolver> {
+    /// Creates an execution-aware payload builder. No stock EVM fallback is retained.
+    pub const fn new(
+        client: Client,
+        pool: Pool,
+        resolver: Resolver,
+        base_config: EthereumBuilderConfig,
+    ) -> Self {
+        Self { client, pool, resolver, base_config }
+    }
+}
+
+impl<Pool, Client, Resolver> UnicityExecutionPayloadBuilder<Pool, Client, Resolver>
+where
+    Pool: Clone,
+    Client: Clone,
+    Resolver: ExecutionPayloadJobResolver,
+{
+    fn resolve_job(
+        &self,
+        config: &PayloadConfig<UnicityPayloadAttributes>,
+    ) -> Result<UnicityEvmConfig, PayloadBuilderError> {
+        let evm_config = self.resolver.resolve(config).map_err(PayloadBuilderError::other)?;
+        evm_config
+            .validate_payload_job(
+                &config.parent_header,
+                &next_block_attributes(
+                    &config.parent_header,
+                    &config.attributes,
+                    &self.base_config,
+                ),
+            )
+            .map_err(PayloadBuilderError::other)?;
+        if self.base_config.skip_state_root {
+            return Err(PayloadBuilderError::other(PayloadJobResolutionError(
+                "Unicity payload jobs require state-root computation",
+            )));
+        }
+        Ok(evm_config)
+    }
+
+    fn for_resolved_job(
+        &self,
+        config: &PayloadConfig<UnicityPayloadAttributes>,
+        evm_config: UnicityEvmConfig,
+    ) -> EthereumPayloadBuilder<Pool, Client, UnicityEvmConfig> {
+        EthereumPayloadBuilder::new(
+            self.client.clone(),
+            self.pool.clone(),
+            evm_config,
+            self.base_config
+                .clone()
+                .with_extra_data(config.attributes.commitment.0.to_vec().into()),
+        )
+    }
+}
+
+impl<Pool, Client, Resolver> PayloadBuilder
+    for UnicityExecutionPayloadBuilder<Pool, Client, Resolver>
+where
+    Client: StateProviderFactory + ChainSpecProvider<ChainSpec: EthereumHardforks> + Clone,
+    Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TransactionSigned>>,
+    Resolver: ExecutionPayloadJobResolver,
+{
+    type Attributes = UnicityPayloadAttributes;
+    type BuiltPayload = EthBuiltPayload;
+
+    fn try_build(
+        &self,
+        args: BuildArguments<Self::Attributes, Self::BuiltPayload>,
+    ) -> Result<BuildOutcome<Self::BuiltPayload>, PayloadBuilderError> {
+        let evm_config = self.resolve_job(&args.config)?;
+        if let Some(best) = &args.best_payload {
+            evm_config
+                .validate_payload_candidate(best.block())
+                .map_err(PayloadBuilderError::other)?;
+        }
+        let builder = self.for_resolved_job(&args.config, evm_config);
+        let (_, args) = split_args(args);
+        builder.try_build(args)
+    }
+
+    fn on_missing_payload(
+        &self,
+        args: BuildArguments<Self::Attributes, Self::BuiltPayload>,
+    ) -> MissingPayloadBehaviour<Self::BuiltPayload> {
+        let evm_config = match self.resolve_job(&args.config) {
+            Ok(config) => config,
+            Err(error) => return MissingPayloadBehaviour::RacePayload(Box::new(|| Err(error))),
+        };
+        let builder = self.for_resolved_job(&args.config, evm_config);
+        let (_, args) = split_args(args);
+        builder.on_missing_payload(args)
+    }
+
+    fn build_empty_payload(
+        &self,
+        config: PayloadConfig<Self::Attributes>,
+    ) -> Result<Self::BuiltPayload, PayloadBuilderError> {
+        let evm_config = self.resolve_job(&config)?;
+        let builder = self.for_resolved_job(&config, evm_config);
+        let (_, config) = split_config(config);
+        builder.build_empty_payload(config)
+    }
+}
+
+fn next_block_attributes(
+    parent: &reth_primitives_traits::SealedHeader,
+    attributes: &UnicityPayloadAttributes,
+    builder_config: &EthereumBuilderConfig,
+) -> NextBlockEnvAttributes {
+    NextBlockEnvAttributes {
+        timestamp: attributes.inner.timestamp,
+        suggested_fee_recipient: attributes.inner.suggested_fee_recipient,
+        prev_randao: attributes.inner.prev_randao,
+        gas_limit: builder_config
+            .gas_limit_with_target(parent.gas_limit, attributes.inner.target_gas_limit),
+        parent_beacon_block_root: attributes.inner.parent_beacon_block_root,
+        withdrawals: attributes.inner.withdrawals.clone().map(Into::into),
+        extra_data: attributes.commitment.0.to_vec().into(),
+        slot_number: attributes.inner.slot_number,
     }
 }
 

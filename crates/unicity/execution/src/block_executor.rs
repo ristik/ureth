@@ -12,15 +12,15 @@ use alloy_eips::eip2718::Encodable2718;
 use alloy_evm::{
     block::{
         BlockExecutionError, BlockExecutionResult, BlockExecutor, BlockExecutorFactory,
-        ExecutableTx, GasOutput, StateDB, TxResult,
+        BlockValidationError, ExecutableTx, GasOutput, StateDB, TxResult,
     },
     eth::{
         receipt_builder::ReceiptBuilder, spec::EthExecutorSpec, EthBlockExecutionCtx,
         EthBlockExecutor, EthBlockExecutorFactory, EthTxResult,
     },
-    Database, Evm, EvmFactory, FromRecoveredTx, FromTxWithEncoded, RecoveredTx,
+    Database, Evm, EvmFactory, FromRecoveredTx, FromTxWithEncoded, InvalidTxError, RecoveredTx,
 };
-use alloy_primitives::{Address, Log};
+use alloy_primitives::{keccak256, Address, Log};
 use reth_chainspec::ChainSpec;
 use reth_consensus::HeaderValidator;
 use reth_consensus_common::validation::validate_block_pre_execution;
@@ -264,6 +264,23 @@ impl fmt::Display for BindingError {
 }
 impl Error for BindingError {}
 
+#[derive(Debug)]
+struct UnsupportedPoolTransaction(&'static str);
+
+impl fmt::Display for UnsupportedPoolTransaction {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.0)
+    }
+}
+
+impl Error for UnsupportedPoolTransaction {}
+
+impl InvalidTxError for UnsupportedPoolTransaction {
+    fn as_invalid_tx_err(&self) -> Option<&revm::context_interface::result::InvalidTransaction> {
+        None
+    }
+}
+
 /// Concrete Ethereum EVM configuration bound to one authenticated companion.
 #[derive(Clone, Debug)]
 pub struct UnicityEvmConfig {
@@ -281,8 +298,33 @@ impl UnicityEvmConfig {
         Self { inner, executor_factory, bound }
     }
 
+    /// Checks that payload-builder inputs select this configuration's exact immutable job.
+    ///
+    /// This is a structural check only. Authentication of the root input and consistency of the
+    /// supplied parent state remain prerequisites of the caller that created this configuration.
+    pub fn validate_payload_job(
+        &self,
+        parent: &SealedHeader<Header>,
+        attributes: &NextBlockEnvAttributes,
+    ) -> Result<(), BindingError> {
+        self.validate_parent(parent)?;
+        self.validate_next_attributes(attributes)
+    }
+
+    /// Checks that a previously validated candidate belongs to this exact job.
+    ///
+    /// This checks structural job fields only; it does not validate the block body or execution.
+    pub fn validate_payload_candidate(
+        &self,
+        block: &SealedBlock<Block>,
+    ) -> Result<(), BindingError> {
+        self.context_for_block(block).map(|_| ())
+    }
+
     fn validate_parent(&self, parent: &SealedHeader<Header>) -> Result<(), BindingError> {
-        if parent.hash() != self.bound.parent_hash || self.bound.input.parent_hash != parent.hash()
+        if parent.header().hash_slow() != parent.hash() ||
+            parent.hash() != self.bound.parent_hash ||
+            self.bound.input.parent_hash != parent.hash()
         {
             return Err(BindingError("bound parent hash mismatch"));
         }
@@ -421,10 +463,18 @@ where
             return Err(BlockExecutionError::msg("ordinary transaction before system prefix"));
         }
         if *recovered.signer() == SYSTEM_CALLER {
-            return Err(BlockExecutionError::msg("reserved sender"));
+            return Err(BlockValidationError::InvalidTx {
+                hash: keccak256(recovered.tx().encoded_2718()),
+                error: Box::new(UnsupportedPoolTransaction("reserved sender")),
+            }
+            .into());
         }
         if recovered.tx().blob_gas_used().unwrap_or_default() != 0 {
-            return Err(BlockExecutionError::msg("blob transactions are unsupported"));
+            return Err(BlockValidationError::InvalidTx {
+                hash: keccak256(recovered.tx().encoded_2718()),
+                error: Box::new(UnsupportedPoolTransaction("blob transactions are unsupported")),
+            }
+            .into());
         }
         let available = self
             .bound
@@ -434,7 +484,11 @@ where
             .checked_sub(self.inner.cumulative_tx_gas_used)
             .ok_or_else(|| BlockExecutionError::msg("ordinary gas capacity exceeded"))?;
         if recovered.tx().gas_limit() > available {
-            return Err(BlockExecutionError::msg("transaction gas limit exceeds ordinary capacity"));
+            return Err(BlockValidationError::TransactionGasLimitMoreThanAvailableBlockGas {
+                transaction_gas_limit: recovered.tx().gas_limit(),
+                block_available_gas: available,
+            }
+            .into());
         }
         let result = self.inner.execute_transaction_without_commit((env, recovered))?;
         if result.result().result.gas().tx_gas_used() > available {
