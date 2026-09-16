@@ -1,0 +1,916 @@
+{
+  "format": "unicity-evm-root-input-v2-reference-vectors",
+  "profileVersion": 2,
+  "hash": "SHA-256",
+  "domain": "SHA-256(CBOR); no additional tuple tag or domain is encoded",
+  "note": "Byte-level reference vectors only; they do not assert certificate signatures or trust validity.",
+  "encoding": {
+    "cbor": "RFC 8949 deterministic, shortest integers, definite lengths",
+    "null": "0xf6",
+    "emptyBytes": "0x40",
+    "technicalRecordHash": "SHA-256(CBOR([round, epoch, leader, statHash, feeHash]))",
+    "originOrder": [
+      "networkId",
+      "rootRound",
+      "rootEpoch",
+      "referenceTime",
+      "unicityTreeRoot",
+      "inputRecord",
+      "trHash",
+      "shardConfHash"
+    ],
+    "rootInputOrder": [
+      "version",
+      "networkId",
+      "partitionId",
+      "shardId",
+      "authorizedRound",
+      "certifiedEpoch",
+      "authorizedEpoch",
+      "parentHash",
+      "origin",
+      "technical",
+      "transitions"
+    ],
+    "syscallWordOrder": [
+      "certifiedRound",
+      "stateHash",
+      "hasBlockHash",
+      "blockHash"
+    ]
+  },
+  "vectors": [
+    {
+      "name": "bootstrap_authorized_1",
+      "class": "bootstrap",
+      "source": {
+        "version": 2,
+        "networkId": 3,
+        "partitionId": 1163283712,
+        "shardId": "0x",
+        "authorizedRound": 1,
+        "certifiedEpoch": 0,
+        "authorizedEpoch": 0,
+        "parentHash": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+        "rootRound": 1,
+        "rootEpoch": 1,
+        "referenceTime": 1681971084,
+        "unicityTreeRoot": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        "inputRecord": {
+          "round": 0,
+          "epoch": 0,
+          "previousHash": null,
+          "hash": null,
+          "timestamp": 0,
+          "blockHash": null
+        },
+        "trHash": "0x9d820253aaeb57437ff7124b9cd7752d0629df3aec6eb97c1941b41c7d59ef54",
+        "shardConfHash": "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "technical": {
+          "round": 1,
+          "epoch": 0,
+          "leader": "evm-node-1",
+          "statHash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+          "feeHash": "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+        },
+        "transitions": []
+      },
+      "origin": {
+        "fields": [
+          3,
+          1,
+          1,
+          1681971084,
+          "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+          [
+            0,
+            0,
+            null,
+            null,
+            0,
+            null
+          ],
+          "0x9d820253aaeb57437ff7124b9cd7752d0629df3aec6eb97c1941b41c7d59ef54",
+          "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+        ],
+        "cbor": "0x880301011a6440d78c5820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0860000f6f600f658209d820253aaeb57437ff7124b9cd7752d0629df3aec6eb97c1941b41c7d59ef545820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "identity": "0x96bfced429a0a443ea6e7fb37f52f8fe37d4cf5e479c0fc85f786da0f9fde089"
+      },
+      "rootInput": {
+        "fields": [
+          2,
+          3,
+          1163283712,
+          "0x",
+          1,
+          0,
+          0,
+          "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+          [
+            3,
+            1,
+            1,
+            1681971084,
+            "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            [
+              0,
+              0,
+              null,
+              null,
+              0,
+              null
+            ],
+            "0x9d820253aaeb57437ff7124b9cd7752d0629df3aec6eb97c1941b41c7d59ef54",
+            "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+          ],
+          [
+            1,
+            0,
+            "evm-node-1",
+            "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+            "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+          ],
+          []
+        ],
+        "cbor": "0x8b02031a45564d00400100005820b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0880301011a6440d78c5820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0860000f6f600f658209d820253aaeb57437ff7124b9cd7752d0629df3aec6eb97c1941b41c7d59ef545820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08501006a65766d2d6e6f64652d315820e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e05820f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f080",
+        "commitment": "0x87461a88adaec89377e69645adb16d6afc6b4ad2729dfab44bdb4fb662c13785"
+      },
+      "encodingAssertions": {
+        "nullFields": {
+          "origin.inputRecord.previousHash": "0xf6",
+          "origin.inputRecord.hash": "0xf6",
+          "origin.inputRecord.blockHash": "0xf6"
+        },
+        "shardIdEmptyBytes": "0x40"
+      },
+      "syscallWords": {
+        "certifiedRound": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "stateHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "hasBlockHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "bootstrap_after_timeout_nonconsecutive_assignment",
+      "class": "bootstrap",
+      "source": {
+        "version": 2,
+        "networkId": 3,
+        "partitionId": 1163283712,
+        "shardId": "0x",
+        "authorizedRound": 7,
+        "certifiedEpoch": 0,
+        "authorizedEpoch": 0,
+        "parentHash": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+        "rootRound": 4,
+        "rootEpoch": 1,
+        "referenceTime": 1681971099,
+        "unicityTreeRoot": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        "inputRecord": {
+          "round": 0,
+          "epoch": 0,
+          "previousHash": null,
+          "hash": null,
+          "timestamp": 0,
+          "blockHash": null
+        },
+        "trHash": "0x8a7829964fff096dd3022525c9f0411cd1b85a4a58bc4af1aae75af78e64cc03",
+        "shardConfHash": "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "technical": {
+          "round": 7,
+          "epoch": 0,
+          "leader": "evm-node-2",
+          "statHash": "0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+          "feeHash": "0xf1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
+        },
+        "transitions": []
+      },
+      "origin": {
+        "fields": [
+          3,
+          4,
+          1,
+          1681971099,
+          "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+          [
+            0,
+            0,
+            null,
+            null,
+            0,
+            null
+          ],
+          "0x8a7829964fff096dd3022525c9f0411cd1b85a4a58bc4af1aae75af78e64cc03",
+          "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+        ],
+        "cbor": "0x880304011a6440d79b5820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0860000f6f600f658208a7829964fff096dd3022525c9f0411cd1b85a4a58bc4af1aae75af78e64cc035820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "identity": "0x7ab007bb2d88637e1d9b3ad565ca69c152d4657ecc0bb5407525a07144187a33"
+      },
+      "rootInput": {
+        "fields": [
+          2,
+          3,
+          1163283712,
+          "0x",
+          7,
+          0,
+          0,
+          "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0",
+          [
+            3,
+            4,
+            1,
+            1681971099,
+            "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            [
+              0,
+              0,
+              null,
+              null,
+              0,
+              null
+            ],
+            "0x8a7829964fff096dd3022525c9f0411cd1b85a4a58bc4af1aae75af78e64cc03",
+            "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+          ],
+          [
+            7,
+            0,
+            "evm-node-2",
+            "0xe1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1",
+            "0xf1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1"
+          ],
+          []
+        ],
+        "cbor": "0x8b02031a45564d00400700005820b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0880304011a6440d79b5820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0860000f6f600f658208a7829964fff096dd3022525c9f0411cd1b85a4a58bc4af1aae75af78e64cc035820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08507006a65766d2d6e6f64652d325820e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e1e15820f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f180",
+        "commitment": "0x05a33e345d3c933a0774129a807b6bd75c3c33dd2d57d8ec3c61c74aa04d8153"
+      },
+      "encodingAssertions": {
+        "nullFields": {
+          "origin.inputRecord.previousHash": "0xf6",
+          "origin.inputRecord.hash": "0xf6",
+          "origin.inputRecord.blockHash": "0xf6"
+        },
+        "shardIdEmptyBytes": "0x40"
+      },
+      "syscallWords": {
+        "certifiedRound": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "stateHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "hasBlockHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "first_certified",
+      "class": "first-certified",
+      "source": {
+        "version": 2,
+        "networkId": 3,
+        "partitionId": 1163283712,
+        "shardId": "0x",
+        "authorizedRound": 2,
+        "certifiedEpoch": 0,
+        "authorizedEpoch": 0,
+        "parentHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "rootRound": 5,
+        "rootEpoch": 1,
+        "referenceTime": 1681971104,
+        "unicityTreeRoot": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        "inputRecord": {
+          "round": 1,
+          "epoch": 0,
+          "previousHash": null,
+          "hash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "timestamp": 1681971104,
+          "blockHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+        },
+        "trHash": "0x20e001bb716e4940c80c85d48d5f5c9adcb796504d71f3542bbfdb00e8f26920",
+        "shardConfHash": "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "technical": {
+          "round": 2,
+          "epoch": 0,
+          "leader": "evm-node-1",
+          "statHash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+          "feeHash": "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+        },
+        "transitions": []
+      },
+      "origin": {
+        "fields": [
+          3,
+          5,
+          1,
+          1681971104,
+          "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+          [
+            1,
+            0,
+            null,
+            "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            1681971104,
+            "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+          ],
+          "0x20e001bb716e4940c80c85d48d5f5c9adcb796504d71f3542bbfdb00e8f26920",
+          "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+        ],
+        "cbor": "0x880305011a6440d7a05820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0860100f65820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a11a6440d7a05820b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1582020e001bb716e4940c80c85d48d5f5c9adcb796504d71f3542bbfdb00e8f269205820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "identity": "0xb11d328b1dca3d5e7b3fd9c5c0ad659530bd4e315a06dae1ce23094a0f3ae454"
+      },
+      "rootInput": {
+        "fields": [
+          2,
+          3,
+          1163283712,
+          "0x",
+          2,
+          0,
+          0,
+          "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+          [
+            3,
+            5,
+            1,
+            1681971104,
+            "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            [
+              1,
+              0,
+              null,
+              "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              1681971104,
+              "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+            ],
+            "0x20e001bb716e4940c80c85d48d5f5c9adcb796504d71f3542bbfdb00e8f26920",
+            "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+          ],
+          [
+            2,
+            0,
+            "evm-node-1",
+            "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+            "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+          ],
+          []
+        ],
+        "cbor": "0x8b02031a45564d00400200005820b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1880305011a6440d7a05820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0860100f65820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a11a6440d7a05820b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1582020e001bb716e4940c80c85d48d5f5c9adcb796504d71f3542bbfdb00e8f269205820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08502006a65766d2d6e6f64652d315820e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e05820f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f080",
+        "commitment": "0xed9d545fe4e55f6061ab5390456ff32eea2d8ebb71df462318373ab71567cf00"
+      },
+      "encodingAssertions": {
+        "nullFields": {
+          "origin.inputRecord.previousHash": "0xf6"
+        },
+        "shardIdEmptyBytes": "0x40"
+      },
+      "syscallWords": {
+        "certifiedRound": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "stateHash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "hasBlockHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "blockHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+      }
+    },
+    {
+      "name": "first_certified_repeat_later_root_new_assignment",
+      "class": "first-certified",
+      "source": {
+        "version": 2,
+        "networkId": 3,
+        "partitionId": 1163283712,
+        "shardId": "0x",
+        "authorizedRound": 5,
+        "certifiedEpoch": 0,
+        "authorizedEpoch": 0,
+        "parentHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "rootRound": 8,
+        "rootEpoch": 1,
+        "referenceTime": 1681971119,
+        "unicityTreeRoot": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        "inputRecord": {
+          "round": 1,
+          "epoch": 0,
+          "previousHash": null,
+          "hash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "timestamp": 1681971104,
+          "blockHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+        },
+        "trHash": "0x2a10269bbec876206744d51a99f0cee29d1688e510778d94026a214cba5413ae",
+        "shardConfHash": "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "technical": {
+          "round": 5,
+          "epoch": 0,
+          "leader": "evm-node-2",
+          "statHash": "0xe2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+          "feeHash": "0xf2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2"
+        },
+        "transitions": []
+      },
+      "origin": {
+        "fields": [
+          3,
+          8,
+          1,
+          1681971119,
+          "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+          [
+            1,
+            0,
+            null,
+            "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            1681971104,
+            "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+          ],
+          "0x2a10269bbec876206744d51a99f0cee29d1688e510778d94026a214cba5413ae",
+          "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+        ],
+        "cbor": "0x880308011a6440d7af5820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0860100f65820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a11a6440d7a05820b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b158202a10269bbec876206744d51a99f0cee29d1688e510778d94026a214cba5413ae5820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "identity": "0x12fac1cc595fb1d403e26dfead10f12033ac26666ee3ffec213f96ddaabbb725"
+      },
+      "rootInput": {
+        "fields": [
+          2,
+          3,
+          1163283712,
+          "0x",
+          5,
+          0,
+          0,
+          "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+          [
+            3,
+            8,
+            1,
+            1681971119,
+            "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            [
+              1,
+              0,
+              null,
+              "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              1681971104,
+              "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+            ],
+            "0x2a10269bbec876206744d51a99f0cee29d1688e510778d94026a214cba5413ae",
+            "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+          ],
+          [
+            5,
+            0,
+            "evm-node-2",
+            "0xe2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2",
+            "0xf2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2"
+          ],
+          []
+        ],
+        "cbor": "0x8b02031a45564d00400500005820b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1880308011a6440d7af5820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0860100f65820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a11a6440d7a05820b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b158202a10269bbec876206744d51a99f0cee29d1688e510778d94026a214cba5413ae5820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08505006a65766d2d6e6f64652d325820e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e2e25820f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f2f280",
+        "commitment": "0x61801104144df038762af2e0e59deadfda9c678ca8c301fbf25ad5840f7fe594"
+      },
+      "encodingAssertions": {
+        "nullFields": {
+          "origin.inputRecord.previousHash": "0xf6"
+        },
+        "shardIdEmptyBytes": "0x40"
+      },
+      "syscallWords": {
+        "certifiedRound": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "stateHash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "hasBlockHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "blockHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+      }
+    },
+    {
+      "name": "first_certified_same_as_genesis_state",
+      "class": "first-certified",
+      "source": {
+        "version": 2,
+        "networkId": 3,
+        "partitionId": 1163283712,
+        "shardId": "0x",
+        "authorizedRound": 3,
+        "certifiedEpoch": 0,
+        "authorizedEpoch": 0,
+        "parentHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "rootRound": 6,
+        "rootEpoch": 1,
+        "referenceTime": 1681971109,
+        "unicityTreeRoot": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        "inputRecord": {
+          "round": 1,
+          "epoch": 0,
+          "previousHash": null,
+          "hash": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+          "timestamp": 1681971109,
+          "blockHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+        },
+        "trHash": "0xcf118203dc89766a4ed399097a90e31e3ae2c6af52b6a70307a36dff4b208974",
+        "shardConfHash": "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "technical": {
+          "round": 3,
+          "epoch": 0,
+          "leader": "evm-node-1",
+          "statHash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+          "feeHash": "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+        },
+        "transitions": []
+      },
+      "origin": {
+        "fields": [
+          3,
+          6,
+          1,
+          1681971109,
+          "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+          [
+            1,
+            0,
+            null,
+            "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+            1681971109,
+            "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+          ],
+          "0xcf118203dc89766a4ed399097a90e31e3ae2c6af52b6a70307a36dff4b208974",
+          "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+        ],
+        "cbor": "0x880306011a6440d7a55820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0860100f65820a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a01a6440d7a55820b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b15820cf118203dc89766a4ed399097a90e31e3ae2c6af52b6a70307a36dff4b2089745820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "identity": "0xebca3cec0d642621a976656cfe36b6e256e9ab8c3fca253459b62f937fde3c79"
+      },
+      "rootInput": {
+        "fields": [
+          2,
+          3,
+          1163283712,
+          "0x",
+          3,
+          0,
+          0,
+          "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+          [
+            3,
+            6,
+            1,
+            1681971109,
+            "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            [
+              1,
+              0,
+              null,
+              "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+              1681971109,
+              "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+            ],
+            "0xcf118203dc89766a4ed399097a90e31e3ae2c6af52b6a70307a36dff4b208974",
+            "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+          ],
+          [
+            3,
+            0,
+            "evm-node-1",
+            "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+            "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+          ],
+          []
+        ],
+        "cbor": "0x8b02031a45564d00400300005820b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1880306011a6440d7a55820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0860100f65820a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a01a6440d7a55820b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b15820cf118203dc89766a4ed399097a90e31e3ae2c6af52b6a70307a36dff4b2089745820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08503006a65766d2d6e6f64652d315820e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e05820f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f080",
+        "commitment": "0x98d96404b98dffaa54e0d2e69aedeea377315a98a521e81ea4b81a97865b948f"
+      },
+      "encodingAssertions": {
+        "nullFields": {
+          "origin.inputRecord.previousHash": "0xf6"
+        },
+        "shardIdEmptyBytes": "0x40"
+      },
+      "syscallWords": {
+        "certifiedRound": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "stateHash": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+        "hasBlockHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "blockHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+      }
+    },
+    {
+      "name": "ordinary_quiet",
+      "class": "ordinary",
+      "source": {
+        "version": 2,
+        "networkId": 3,
+        "partitionId": 1163283712,
+        "shardId": "0x",
+        "authorizedRound": 3,
+        "certifiedEpoch": 0,
+        "authorizedEpoch": 0,
+        "parentHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+        "rootRound": 9,
+        "rootEpoch": 1,
+        "referenceTime": 1681971124,
+        "unicityTreeRoot": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        "inputRecord": {
+          "round": 2,
+          "epoch": 0,
+          "previousHash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "hash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "timestamp": 1681971124,
+          "blockHash": null
+        },
+        "trHash": "0xcf118203dc89766a4ed399097a90e31e3ae2c6af52b6a70307a36dff4b208974",
+        "shardConfHash": "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "technical": {
+          "round": 3,
+          "epoch": 0,
+          "leader": "evm-node-1",
+          "statHash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+          "feeHash": "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+        },
+        "transitions": []
+      },
+      "origin": {
+        "fields": [
+          3,
+          9,
+          1,
+          1681971124,
+          "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+          [
+            2,
+            0,
+            "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            1681971124,
+            null
+          ],
+          "0xcf118203dc89766a4ed399097a90e31e3ae2c6af52b6a70307a36dff4b208974",
+          "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+        ],
+        "cbor": "0x880309011a6440d7b45820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c08602005820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a15820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a11a6440d7b4f65820cf118203dc89766a4ed399097a90e31e3ae2c6af52b6a70307a36dff4b2089745820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "identity": "0x61772ce404148ecc761bd01c6bbc516b472a1f7d2363e12f185f6fc483156dd5"
+      },
+      "rootInput": {
+        "fields": [
+          2,
+          3,
+          1163283712,
+          "0x",
+          3,
+          0,
+          0,
+          "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1",
+          [
+            3,
+            9,
+            1,
+            1681971124,
+            "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            [
+              2,
+              0,
+              "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              1681971124,
+              null
+            ],
+            "0xcf118203dc89766a4ed399097a90e31e3ae2c6af52b6a70307a36dff4b208974",
+            "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+          ],
+          [
+            3,
+            0,
+            "evm-node-1",
+            "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+            "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+          ],
+          []
+        ],
+        "cbor": "0x8b02031a45564d00400300005820b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1880309011a6440d7b45820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c08602005820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a15820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a11a6440d7b4f65820cf118203dc89766a4ed399097a90e31e3ae2c6af52b6a70307a36dff4b2089745820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08503006a65766d2d6e6f64652d315820e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e05820f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f080",
+        "commitment": "0xcd986fe4cb298d2f7dc0ede4dce2fb4d07e12b9c9c145ef724d4a161972b9c2c"
+      },
+      "encodingAssertions": {
+        "nullFields": {
+          "origin.inputRecord.blockHash": "0xf6"
+        },
+        "shardIdEmptyBytes": "0x40"
+      },
+      "syscallWords": {
+        "certifiedRound": "0x0000000000000000000000000000000000000000000000000000000000000002",
+        "stateHash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+        "hasBlockHash": "0x0000000000000000000000000000000000000000000000000000000000000000",
+        "blockHash": "0x0000000000000000000000000000000000000000000000000000000000000000"
+      }
+    },
+    {
+      "name": "ordinary_successful",
+      "class": "ordinary",
+      "source": {
+        "version": 2,
+        "networkId": 3,
+        "partitionId": 1163283712,
+        "shardId": "0x",
+        "authorizedRound": 4,
+        "certifiedEpoch": 0,
+        "authorizedEpoch": 0,
+        "parentHash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+        "rootRound": 10,
+        "rootEpoch": 1,
+        "referenceTime": 1681971129,
+        "unicityTreeRoot": "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+        "inputRecord": {
+          "round": 3,
+          "epoch": 0,
+          "previousHash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "hash": "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+          "timestamp": 1681971129,
+          "blockHash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+        },
+        "trHash": "0x9e75abd3e5e56fdd236e99645a55e99fbc768a9c7b02e51537df274340e482cc",
+        "shardConfHash": "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "technical": {
+          "round": 4,
+          "epoch": 0,
+          "leader": "evm-node-2",
+          "statHash": "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+          "feeHash": "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+        },
+        "transitions": []
+      },
+      "origin": {
+        "fields": [
+          3,
+          10,
+          1,
+          1681971129,
+          "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+          [
+            3,
+            0,
+            "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+            "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+            1681971129,
+            "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+          ],
+          "0x9e75abd3e5e56fdd236e99645a55e99fbc768a9c7b02e51537df274340e482cc",
+          "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+        ],
+        "cbor": "0x88030a011a6440d7b95820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c08603005820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a15820a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a21a6440d7b95820b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b258209e75abd3e5e56fdd236e99645a55e99fbc768a9c7b02e51537df274340e482cc5820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0",
+        "identity": "0x28a79c76cff4a3dd072d4b58c639380835816c5489efa38fcbfb99a7a569bb86"
+      },
+      "rootInput": {
+        "fields": [
+          2,
+          3,
+          1163283712,
+          "0x",
+          4,
+          0,
+          0,
+          "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2",
+          [
+            3,
+            10,
+            1,
+            1681971129,
+            "0xc0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0",
+            [
+              3,
+              0,
+              "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+              "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+              1681971129,
+              "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+            ],
+            "0x9e75abd3e5e56fdd236e99645a55e99fbc768a9c7b02e51537df274340e482cc",
+            "0xd0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0"
+          ],
+          [
+            4,
+            0,
+            "evm-node-2",
+            "0xe0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0",
+            "0xf0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0"
+          ],
+          []
+        ],
+        "cbor": "0x8b02031a45564d00400400005820b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b288030a011a6440d7b95820c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c0c08603005820a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a15820a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a21a6440d7b95820b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b258209e75abd3e5e56fdd236e99645a55e99fbc768a9c7b02e51537df274340e482cc5820d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d0d08504006a65766d2d6e6f64652d325820e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e0e05820f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f080",
+        "commitment": "0x9d8bf4c594422b8b6f6192dc1e8721870f69a2d7b1d78bba8418443f644e2a53"
+      },
+      "encodingAssertions": {
+        "nullFields": {},
+        "shardIdEmptyBytes": "0x40"
+      },
+      "syscallWords": {
+        "certifiedRound": "0x0000000000000000000000000000000000000000000000000000000000000003",
+        "stateHash": "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+        "hasBlockHash": "0x0000000000000000000000000000000000000000000000000000000000000001",
+        "blockHash": "0xb2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2b2"
+      }
+    }
+  ],
+  "invalidShapes": [
+    {
+      "name": "bootstrap_empty_bytes_are_not_null",
+      "reason": "present empty bytes are not canonical absence",
+      "source": {
+        "inputRecord": {
+          "round": 0,
+          "epoch": 0,
+          "previousHash": "0x",
+          "hash": null,
+          "timestamp": 0,
+          "blockHash": null
+        }
+      }
+    },
+    {
+      "name": "bootstrap_fabricated_state",
+      "reason": "bootstrap must retain the genuine nil/nil/nil input record",
+      "source": {
+        "inputRecord": {
+          "round": 0,
+          "epoch": 0,
+          "previousHash": null,
+          "hash": "0xa0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0a0",
+          "timestamp": 0,
+          "blockHash": null
+        }
+      }
+    },
+    {
+      "name": "bootstrap_with_block",
+      "reason": "bootstrap cannot name an executed block",
+      "source": {
+        "inputRecord": {
+          "round": 0,
+          "epoch": 0,
+          "previousHash": null,
+          "hash": null,
+          "timestamp": 0,
+          "blockHash": "0xb0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0"
+        }
+      }
+    },
+    {
+      "name": "first_certified_without_state",
+      "reason": "first-certified state must be exactly 32 bytes",
+      "source": {
+        "inputRecord": {
+          "round": 1,
+          "epoch": 0,
+          "previousHash": null,
+          "hash": null,
+          "timestamp": 0,
+          "blockHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+        }
+      }
+    },
+    {
+      "name": "first_certified_without_block",
+      "reason": "first-certified must name B1",
+      "source": {
+        "inputRecord": {
+          "round": 1,
+          "epoch": 0,
+          "previousHash": null,
+          "hash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "timestamp": 0,
+          "blockHash": null
+        }
+      }
+    },
+    {
+      "name": "ordinary_null_previous",
+      "reason": "ordinary previous state must be exactly 32 bytes",
+      "source": {
+        "inputRecord": {
+          "round": 2,
+          "epoch": 0,
+          "previousHash": null,
+          "hash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "timestamp": 0,
+          "blockHash": null
+        }
+      }
+    },
+    {
+      "name": "ordinary_quiet_with_block",
+      "reason": "ordinary equal states require a null block hash",
+      "source": {
+        "inputRecord": {
+          "round": 2,
+          "epoch": 0,
+          "previousHash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "hash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "timestamp": 0,
+          "blockHash": "0xb1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1b1"
+        }
+      }
+    },
+    {
+      "name": "ordinary_changed_without_block",
+      "reason": "ordinary unequal states require a 32-byte block hash",
+      "source": {
+        "inputRecord": {
+          "round": 3,
+          "epoch": 0,
+          "previousHash": "0xa1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1a1",
+          "hash": "0xa2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2a2",
+          "timestamp": 0,
+          "blockHash": null
+        }
+      }
+    }
+  ]
+}

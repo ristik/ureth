@@ -1,0 +1,24 @@
+[package]
+name = "reth-unicity-execution"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Inactive bounded SealRegistry execution kernel for Unicity."
+readme = "README.md"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives = { workspace = true, features = ["serde"] }
+alloy-sol-types.workspace = true
+revm.workspace = true
+sha2.workspace = true
+
+[dev-dependencies]
+serde_json = { workspace = true, features = ["std"] }
+serde = { workspace = true, features = ["derive"] }
