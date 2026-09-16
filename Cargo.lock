@@ -10800,7 +10800,6 @@ dependencies = [
  "reth-consensus",
  "reth-consensus-common",
  "reth-ethereum-consensus",
- "reth-ethereum-forks",
  "reth-ethereum-primitives",
  "reth-evm",
  "reth-evm-ethereum",
