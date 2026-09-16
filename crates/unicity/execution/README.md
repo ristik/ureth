@@ -17,9 +17,12 @@ error. The standalone registry kernel keeps its clone-on-success behavior and ne
 supplied parent cache.
 
 Authentication remains outside this crate. Its caller must authenticate the certificate,
-transition bodies, configuration, genesis origin and exact parent snapshot. The adapter checks the
-local structural bindings but does not prove that external authentication. Node, RPC and Engine API
-activation remain separate work.
+transition bodies, configuration, genesis origin and exact parent snapshot. Supplied `State` and
+`StateProvider` values must be consistent views of that immutable exact parent. The caller must also
+verify the recovered senders attached to transactions and replay blocks. The adapter checks the
+listed structural, header, receipt, gas and state-root bindings; it does not independently perform
+certificate authentication, sender recovery or whole-database authentication. Node, RPC and Engine
+API activation remain separate work.
 
 The test fixture contents are copied from bft-core at design merge `77d47511` (the vendored JSON
 files add a final newline): `evmroot/testdata/v2-vectors.json`

@@ -1,11 +1,12 @@
-//! Inactive bounded `SealRegistry` execution kernel.
+//! Inactive bounded `SealRegistry` kernel and shared Reth block-execution adapter.
 //!
 //! Authentication of the structured input is an external prerequisite. This crate deliberately
 //! accepts no caller authentication verdict. It derives the input and origin commitments locally,
 //! checks the technical-record hash against the structured record, and derives the ABI projection
 //! before executing the two privileged calls. Certificate authentication, configuration binding,
-//! and binding `parent_hash` to the supplied parent state remain caller prerequisites. This is not
-//! a block-builder, import, replay, node, or RPC activation.
+//! and binding `parent_hash` to the supplied parent state remain caller prerequisites. The shared
+//! adapter supplies build and replay primitives, but is not wired into a node, RPC, Engine API, or
+//! live import path.
 
 use alloy_primitives::{b256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall};

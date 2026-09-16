@@ -129,7 +129,7 @@ pub struct CompletedBuild {
     pub parent: CompletedParent,
 }
 
-/// Fully checked replay output plus the opaque token required by its child.
+/// Locally validated replay output plus the opaque token required by its child.
 #[derive(Debug)]
 pub struct CompletedReplay {
     /// Standard execution result and post-state bundle.
@@ -139,6 +139,10 @@ pub struct CompletedReplay {
 }
 
 /// Builds and fully assembles one block through the shared Unicity configuration.
+///
+/// `state` and `state_provider` must be consistent views of the immutable exact parent bound by
+/// `config`. Every [`Recovered`] transaction must carry a sender independently verified by the
+/// caller; this boundary does not perform sender recovery.
 pub fn build_complete<DB, P>(
     config: &UnicityEvmConfig,
     parent: &SealedHeader<Header>,
@@ -179,8 +183,12 @@ where
     Ok(CompletedBuild { outcome, parent: CompletedParent(accounting) })
 }
 
-/// Replays one block, verifies header gas/receipts/bloom and the real post-state root, then mints
-/// the same opaque child token as [`build_complete`].
+/// Replays one block, verifies the listed header/body fields, gas, receipts, bloom and real
+/// post-state root, then mints the same opaque child token as [`build_complete`].
+///
+/// `db` and `state_provider` must be consistent views of the immutable exact parent bound by
+/// `config`. The recovered senders attached to `block` must be independently verified by the
+/// caller; this boundary does not perform sender recovery or certificate authentication.
 pub fn replay_complete<DB, P>(
     config: &UnicityEvmConfig,
     db: DB,
