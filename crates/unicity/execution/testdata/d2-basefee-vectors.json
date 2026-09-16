@@ -1,0 +1,231 @@
+{
+  "source": "independent Python integer implementation of accepted D2 formula; example profile, not a deployment choice",
+  "maxBaseFee": 4611686018427387904,
+  "vectors": [
+    {
+      "parentBaseFee": 7,
+      "ordinaryGasUsed": 0,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 7
+    },
+    {
+      "parentBaseFee": 7,
+      "ordinaryGasUsed": 1,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 7
+    },
+    {
+      "parentBaseFee": 7,
+      "ordinaryGasUsed": 14000000,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 7
+    },
+    {
+      "parentBaseFee": 7,
+      "ordinaryGasUsed": 14000001,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 8
+    },
+    {
+      "parentBaseFee": 7,
+      "ordinaryGasUsed": 28000000,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 8
+    },
+    {
+      "parentBaseFee": 8,
+      "ordinaryGasUsed": 0,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 7
+    },
+    {
+      "parentBaseFee": 8,
+      "ordinaryGasUsed": 1,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 8
+    },
+    {
+      "parentBaseFee": 8,
+      "ordinaryGasUsed": 14000000,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 8
+    },
+    {
+      "parentBaseFee": 8,
+      "ordinaryGasUsed": 14000001,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 9
+    },
+    {
+      "parentBaseFee": 8,
+      "ordinaryGasUsed": 28000000,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 9
+    },
+    {
+      "parentBaseFee": 1000000000,
+      "ordinaryGasUsed": 0,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 875000000
+    },
+    {
+      "parentBaseFee": 1000000000,
+      "ordinaryGasUsed": 1,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 875000009
+    },
+    {
+      "parentBaseFee": 1000000000,
+      "ordinaryGasUsed": 14000000,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 1000000000
+    },
+    {
+      "parentBaseFee": 1000000000,
+      "ordinaryGasUsed": 14000001,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 1000000008
+    },
+    {
+      "parentBaseFee": 1000000000,
+      "ordinaryGasUsed": 28000000,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 1125000000
+    },
+    {
+      "parentBaseFee": 10000000000000,
+      "ordinaryGasUsed": 0,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 8750000000000
+    },
+    {
+      "parentBaseFee": 10000000000000,
+      "ordinaryGasUsed": 1,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 8750000089286
+    },
+    {
+      "parentBaseFee": 10000000000000,
+      "ordinaryGasUsed": 14000000,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 10000000000000
+    },
+    {
+      "parentBaseFee": 10000000000000,
+      "ordinaryGasUsed": 14000001,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 10000000089285
+    },
+    {
+      "parentBaseFee": 10000000000000,
+      "ordinaryGasUsed": 28000000,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 11250000000000
+    },
+    {
+      "parentBaseFee": 4611686018427387904,
+      "ordinaryGasUsed": 0,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 4035225266123964416
+    },
+    {
+      "parentBaseFee": 4611686018427387904,
+      "ordinaryGasUsed": 1,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 4035225307299732438
+    },
+    {
+      "parentBaseFee": 4611686018427387904,
+      "ordinaryGasUsed": 14000000,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 4611686018427387904
+    },
+    {
+      "parentBaseFee": 4611686018427387904,
+      "ordinaryGasUsed": 14000001,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 4611686018427387904
+    },
+    {
+      "parentBaseFee": 4611686018427387904,
+      "ordinaryGasUsed": 28000000,
+      "ordinaryCapacity": 28000000,
+      "baseFeeFloor": 7,
+      "elasticity": 2,
+      "changeDenominator": 8,
+      "nextBaseFee": 4611686018427387904
+    }
+  ]
+}

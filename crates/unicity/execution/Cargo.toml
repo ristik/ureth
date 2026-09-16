@@ -15,10 +15,27 @@ workspace = true
 
 [dependencies]
 alloy-primitives = { workspace = true, features = ["serde"] }
+alloy-consensus.workspace = true
+alloy-eips.workspace = true
+alloy-evm.workspace = true
 alloy-sol-types.workspace = true
 revm.workspace = true
+reth-chainspec.workspace = true
+reth-consensus.workspace = true
+reth-consensus-common.workspace = true
+reth-ethereum-consensus.workspace = true
+reth-ethereum-forks.workspace = true
+reth-ethereum-primitives.workspace = true
+reth-evm.workspace = true
+reth-evm-ethereum.workspace = true
+reth-primitives-traits.workspace = true
+reth-storage-api.workspace = true
 sha2.workspace = true
 
 [dev-dependencies]
+alloy-genesis.workspace = true
+alloy-trie = { workspace = true, features = ["std"] }
+reth-storage-errors.workspace = true
+reth-trie-common = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
 serde = { workspace = true, features = ["derive"] }

@@ -6,10 +6,20 @@ pinned registry code hash, then executes `open` followed by `finalize` with revm
 semantics. The two calls share one gross, pre-refund gas cap. Only a fully finalized cloned state is
 returned; errors publish no state.
 
-Authentication and context remain outside this crate. Its caller must authenticate the certificate,
-transition bodies, configuration, and genesis origin, and supply an immutable parent snapshot that
-is independently bound to `RootInputV2.parent_hash`. A later adapter must perform those checks and
-integrate ordinary transactions, block/header accounting, import/replay, and node/RPC paths.
+The shared adapter wraps Reth's real Ethereum block executor for build and replay. One immutable job
+configuration binds the structured companion, actual parent header, gas profile, fee collector and
+ordinary-only parent accounting. It executes the bounded registry pair, then the retained Cancun
+EIP-4788 call, then ordinary paid transactions. Standard receipts remain ordinary-only while the
+header records gross system gas plus ordinary receipt gas. Successful completion computes real
+state roots and mints an opaque accounting token for the next job.
+The completion functions mutate disposable candidate state; callers must discard that candidate on
+error. The standalone registry kernel keeps its clone-on-success behavior and never mutates its
+supplied parent cache.
+
+Authentication remains outside this crate. Its caller must authenticate the certificate,
+transition bodies, configuration, genesis origin and exact parent snapshot. The adapter checks the
+local structural bindings but does not prove that external authentication. Node, RPC and Engine API
+activation remain separate work.
 
 The test fixture contents are copied from bft-core at design merge `77d47511` (the vendored JSON
 files add a final newline): `evmroot/testdata/v2-vectors.json`
@@ -19,3 +29,9 @@ genesis JSON whose pinned reth companion records genesis hash
 `0x8936f379e65d90577242c6333f644cd0716325117e5bb064a2a32c08ba8afdf0`.
 `system-outcome-vectors.json` was generated independently through bft-core
 `evmroot.SealRegistryCommitment` at `c9beef6c`.
+
+`signed-beacon-genesis.json` is a test-only standard-JSON variant generated with geth 1.14.11. It
+adds the stock beacon-roots code and funds the public secp256k1 scalar-1 test signer; it is never a
+deployment default. Its independent oracle pins genesis hash
+`0x82430ee9e534f0e454399cdaa06042c5dcc52b0378f48609e9c45c3cc1ae01f0` and state root
+`0xcc17df719a9c043b34c3b5c0297775feb4c9ff8cfecf3b77ffe29bee9b0fe40a`.
