@@ -1,13 +1,14 @@
-//! Inactive bounded `SealRegistry` execution kernel.
+//! Inactive bounded `SealRegistry` kernel and shared Reth block-execution adapter.
 //!
 //! Authentication of the structured input is an external prerequisite. This crate deliberately
 //! accepts no caller authentication verdict. It derives the input and origin commitments locally,
 //! checks the technical-record hash against the structured record, and derives the ABI projection
 //! before executing the two privileged calls. Certificate authentication, configuration binding,
-//! and binding `parent_hash` to the supplied parent state remain caller prerequisites. This is not
-//! a block-builder, import, replay, node, or RPC activation.
+//! and binding `parent_hash` to the supplied parent state remain caller prerequisites. The shared
+//! adapter supplies build and replay primitives, but is not wired into a node, RPC, Engine API, or
+//! live import path.
 
-use alloy_primitives::{b256, Address, B256, U256};
+use alloy_primitives::{b256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use revm::{
     context::TxEnv,
@@ -15,9 +16,12 @@ use revm::{
     database::{CacheDB, DatabaseRef},
     handler::{EvmTr, Handler, MainnetHandler, SystemCallTx},
     primitives::hardfork::SpecId,
-    Context, DatabaseCommit, MainBuilder, MainContext,
+    Context, Database, DatabaseCommit, MainBuilder, MainContext,
 };
 use sha2::{Digest, Sha256};
+
+pub mod block;
+pub mod block_executor;
 
 sol! {
     function open(
@@ -285,33 +289,17 @@ pub fn technical_record_hash(record: &TechnicalRecordV2) -> B256 {
     sha256(&out)
 }
 
-/// Executes open then finalize on a disposable clone of the supplied parent cache.
-///
-/// The caller must hold that cache and its backing database as an immutable, consistent snapshot of
-/// the actual parent named by `input.parent_hash`, and must independently authenticate and bind the
-/// origin and configuration. This function checks only the registry account's recorded code hash,
-/// not a cryptographic commitment to the whole database. The returned cache is the only publishable
-/// state; every error leaves `parent` untouched.
-pub fn execute_registry_transition<ExtDB>(
+pub(crate) struct PreparedTransition {
+    pub n: u64,
+    pub open_data: Bytes,
+    pub input_commitment: B256,
+    pub origin_identity: B256,
+    pub technical_record_hash: B256,
+}
+
+pub(crate) fn prepare_transition(
     input: &RootInputV2,
-    parent: &CacheDB<ExtDB>,
-    config: ExecutionConfig,
-) -> Result<(ExecutionResult, CacheDB<ExtDB>), ExecutionError>
-where
-    ExtDB: DatabaseRef + Clone,
-{
-    if config.system_gas_limit == 0 {
-        return Err(ExecutionError::InvalidInput("system gas limit must be positive"));
-    }
-    let registry = parent
-        .basic_ref(SEAL_REGISTRY)
-        .map_err(|e| ExecutionError::Database(format!("{e:?}")))?
-        .ok_or(ExecutionError::InvalidInput("SealRegistry account missing from parent state"))?;
-    if registry.code_hash != SEAL_REGISTRY_CODE_HASH {
-        return Err(ExecutionError::InvalidInput(
-            "SealRegistry parent code hash does not match pinned artifact",
-        ));
-    }
+) -> Result<PreparedTransition, ExecutionError> {
     let class = input.origin_class()?;
     if !input.transitions.is_empty() {
         return Err(ExecutionError::InvalidInput("transitions unsupported in bounded profile"));
@@ -349,16 +337,72 @@ where
     }
     .abi_encode()
     .into();
+    Ok(PreparedTransition {
+        n: input.authorized_round,
+        open_data,
+        input_commitment,
+        origin_identity,
+        technical_record_hash,
+    })
+}
+
+/// Executes open then finalize on a disposable clone of the supplied parent cache.
+///
+/// The caller must hold that cache and its backing database as an immutable, consistent snapshot of
+/// the actual parent named by `input.parent_hash`, and must independently authenticate and bind the
+/// origin and configuration. This function checks only the registry account's recorded code hash,
+/// not a cryptographic commitment to the whole database. The returned cache is the only publishable
+/// state; every error leaves `parent` untouched.
+pub fn execute_registry_transition<ExtDB>(
+    input: &RootInputV2,
+    parent: &CacheDB<ExtDB>,
+    config: ExecutionConfig,
+) -> Result<(ExecutionResult, CacheDB<ExtDB>), ExecutionError>
+where
+    ExtDB: DatabaseRef + Clone,
+{
+    let mut candidate = parent.clone();
+    let result = execute_registry_transition_on_db(input, &mut candidate, config)?;
+    Ok((result, candidate))
+}
+
+/// Runs the bounded pair against a disposable block candidate database.
+///
+/// The caller must discard the whole candidate on error. This is crate-visible so the shared
+/// block executor uses exactly the same remaining-gas limits and post-state checks as the public
+/// clone-on-success kernel.
+pub(crate) fn execute_registry_transition_on_db<DB>(
+    input: &RootInputV2,
+    db: &mut DB,
+    config: ExecutionConfig,
+) -> Result<ExecutionResult, ExecutionError>
+where
+    DB: Database + DatabaseCommit,
+{
+    if config.system_gas_limit == 0 {
+        return Err(ExecutionError::InvalidInput("system gas limit must be positive"));
+    }
+    let registry = db
+        .basic(SEAL_REGISTRY)
+        .map_err(|e| ExecutionError::Database(format!("{e:?}")))?
+        .ok_or(ExecutionError::InvalidInput("SealRegistry account missing from parent state"))?;
+    if registry.code_hash != SEAL_REGISTRY_CODE_HASH {
+        return Err(ExecutionError::InvalidInput(
+            "SealRegistry parent code hash does not match pinned artifact",
+        ));
+    }
+    let prepared = prepare_transition(input)?;
     let mut evm = Context::mainnet()
         .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecId::CANCUN))
-        .with_db(parent.clone())
+        .with_db(db)
         .build_mainnet();
-    let mut open_tx = TxEnv::new_system_tx_with_caller(SYSTEM_CALLER, SEAL_REGISTRY, open_data);
+    let mut open_tx =
+        TxEnv::new_system_tx_with_caller(SYSTEM_CALLER, SEAL_REGISTRY, prepared.open_data);
     open_tx.gas_limit = config.system_gas_limit;
     evm.ctx_mut().set_tx(open_tx);
     let open_result = MainnetHandler::<
         _,
-        revm::context_interface::result::EVMError<<ExtDB as DatabaseRef>::Error>,
+        revm::context_interface::result::EVMError<<DB as Database>::Error>,
         _,
     >::default()
     .run_system_call(&mut evm)
@@ -370,21 +414,20 @@ where
     let open_gas_refunded = open_result.gas().inner_refunded();
     let open_state = evm.ctx_mut().journal_mut().finalize();
     evm.ctx_mut().db_mut().commit(open_state);
-    let registry_commitment = system_outcome_commitment(open_gas_spent, input_commitment);
+    let registry_commitment = system_outcome_commitment(open_gas_spent, prepared.input_commitment);
     let remaining = config.system_gas_limit.checked_sub(open_gas_spent).ok_or(
         ExecutionError::GasBudgetExceeded { spent: open_gas_spent, limit: config.system_gas_limit },
     )?;
-    let finalize_data =
-        finalizeCall { n: input.authorized_round, sealRegistryCommitment: registry_commitment }
-            .abi_encode()
-            .into();
+    let finalize_data = finalizeCall { n: prepared.n, sealRegistryCommitment: registry_commitment }
+        .abi_encode()
+        .into();
     let mut finalize_tx =
         TxEnv::new_system_tx_with_caller(SYSTEM_CALLER, SEAL_REGISTRY, finalize_data);
     finalize_tx.gas_limit = remaining;
     evm.ctx_mut().set_tx(finalize_tx);
     let finalize_result = MainnetHandler::<
         _,
-        revm::context_interface::result::EVMError<<ExtDB as DatabaseRef>::Error>,
+        revm::context_interface::result::EVMError<<DB as Database>::Error>,
         _,
     >::default()
     .run_system_call(&mut evm)
@@ -405,15 +448,15 @@ where
             limit: config.system_gas_limit,
         });
     }
-    let candidate = evm.ctx.journaled_state.db().clone();
+    let candidate = evm.ctx.journaled_state.db_mut();
     let stored_round = candidate
-        .storage_ref(SEAL_REGISTRY, U256::from_be_bytes(OUTCOMES_ROUND_SLOT.0))
+        .storage(SEAL_REGISTRY, U256::from_be_bytes(OUTCOMES_ROUND_SLOT.0))
         .map_err(|e| ExecutionError::Database(format!("{e:?}")))?;
     let stored_commitment = candidate
-        .storage_ref(SEAL_REGISTRY, U256::from_be_bytes(OUTCOMES_COMMITMENT_SLOT.0))
+        .storage(SEAL_REGISTRY, U256::from_be_bytes(OUTCOMES_COMMITMENT_SLOT.0))
         .map_err(|e| ExecutionError::Database(format!("{e:?}")))?;
     let stored_phase = candidate
-        .storage_ref(SEAL_REGISTRY, U256::from_be_bytes(PHASE_SLOT.0))
+        .storage(SEAL_REGISTRY, U256::from_be_bytes(PHASE_SLOT.0))
         .map_err(|e| ExecutionError::Database(format!("{e:?}")))?;
     if stored_round != U256::from(input.authorized_round) ||
         stored_commitment != U256::from_be_bytes(registry_commitment.0) ||
@@ -424,20 +467,17 @@ where
                 .into(),
         ));
     }
-    Ok((
-        ExecutionResult {
-            open_gas_spent,
-            open_gas_refunded,
-            finalize_gas_spent,
-            finalize_gas_refunded,
-            total_gas_spent,
-            input_commitment,
-            origin_identity,
-            technical_record_hash,
-            registry_commitment,
-        },
-        candidate,
-    ))
+    Ok(ExecutionResult {
+        open_gas_spent,
+        open_gas_refunded,
+        finalize_gas_spent,
+        finalize_gas_refunded,
+        total_gas_spent,
+        input_commitment: prepared.input_commitment,
+        origin_identity: prepared.origin_identity,
+        technical_record_hash: prepared.technical_record_hash,
+        registry_commitment,
+    })
 }
 
 /// Derives `SHA-256(CBOR([["system", openGas, 1, "", inputCommitment]]))`.
@@ -450,6 +490,30 @@ pub fn system_outcome_commitment(open_gas_spent: u64, input_commitment: B256) ->
     uint(&mut out, 1);
     text(&mut out, "");
     bytes(&mut out, input_commitment.as_slice());
+    sha256(&out)
+}
+
+/// Derives D1 `prevRandao = SHA-256(CBOR(["UNICITY_EVM_RANDAO", r, n]))`.
+pub fn derive_prev_randao(root_round: u64, shard_round: u64) -> B256 {
+    derive_round_domain("UNICITY_EVM_RANDAO", root_round, shard_round)
+}
+
+/// Derives the D1 argument for the retained Cancun EIP-4788 system call.
+pub fn derive_beacon_root(root_round: u64, shard_round: u64) -> B256 {
+    derive_round_domain("UNICITY_EVM_BEACON", root_round, shard_round)
+}
+
+/// Derives the strictly increasing EVM timestamp from authenticated root time.
+pub fn derive_timestamp(reference_time: u64, parent_timestamp: u64) -> Option<u64> {
+    Some(reference_time.max(parent_timestamp.checked_add(1)?))
+}
+
+fn derive_round_domain(domain: &str, root_round: u64, shard_round: u64) -> B256 {
+    let mut out = Vec::new();
+    array(&mut out, 3);
+    text(&mut out, domain);
+    uint(&mut out, root_round);
+    uint(&mut out, shard_round);
     sha256(&out)
 }
 
