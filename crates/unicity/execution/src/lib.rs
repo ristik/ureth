@@ -551,21 +551,21 @@ fn nullable_word(out: &mut Vec<u8>, value: Option<B256>) {
         out.push(0xf6)
     }
 }
-pub(crate) fn array(out: &mut Vec<u8>, len: u64) {
+fn array(out: &mut Vec<u8>, len: u64) {
     major(out, 4, len);
 }
-pub(crate) fn bytes(out: &mut Vec<u8>, value: &[u8]) {
+fn bytes(out: &mut Vec<u8>, value: &[u8]) {
     major(out, 2, value.len() as u64);
     out.extend_from_slice(value);
 }
-pub(crate) fn text(out: &mut Vec<u8>, value: &str) {
+fn text(out: &mut Vec<u8>, value: &str) {
     major(out, 3, value.len() as u64);
     out.extend_from_slice(value.as_bytes());
 }
 fn uint(out: &mut Vec<u8>, value: u64) {
     major(out, 0, value);
 }
-pub(crate) fn major(out: &mut Vec<u8>, kind: u8, value: u64) {
+fn major(out: &mut Vec<u8>, kind: u8, value: u64) {
     match value {
         0..=23 => out.push((kind << 5) | value as u8),
         24..=0xff => out.extend_from_slice(&[(kind << 5) | 24, value as u8]),
