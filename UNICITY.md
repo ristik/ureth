@@ -132,17 +132,19 @@ Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface
 | Ten upstream Rust source files formatted by the current nightly rustfmt | repairs hosted formatting drift only |
 | `crates/trie/sparse/src/arena/mod.rs` | removes one redundant clone rejected by current Clippy |
 | `crates/net/network/src/config.rs` | removes one redundant rustdoc link target rejected by current rustdoc |
-| `.github/workflows/lint.yml` | drops the `wasm` job and its entry in the `lint success` gate |
+| `.github/workflows/lint.yml` | drops the `wasm` and `riscv` jobs, and the `wasm` entry in the `lint success` gate |
 | `UNICITY.md` | this record |
 
-## The wasm target is not built
+## The wasm and RISC-V targets are not built
 
-The owner's decision on 2026-09-19: no Unicity component targets WebAssembly, so the fork does not
-carry a wasm build. The `wasm` job and its entry in the `lint success` gate are removed.
+The owner's decision on 2026-09-19: no Unicity component targets WebAssembly or RISC-V, so the fork
+carries neither build. The `wasm` and `riscv` jobs are removed, along with the `wasm` entry in the
+`lint success` gate. `riscv` was never in that gate.
 
-Upstream's `.github/scripts/check_wasm.sh` is left in place, unreferenced, deliberately. Deleting it
-would be a larger edit to upstream for no gain, and keeping it means re-enabling the target later is
-restoring one job block rather than reconstructing the script. Nothing runs it.
+Upstream's `.github/scripts/check_wasm.sh` and `check_rv32imac.sh` are left in place, unreferenced,
+deliberately. Deleting them would be larger edits to upstream for no gain, and keeping them means
+re-enabling a target later is restoring one job block rather than reconstructing a script. Nothing
+runs either.
 
 This also settles a failure that neither open pull request could fix alone: the job failed on
 `reth-unicity-payload`, whose dependency on `secp256k1-sys` does not build for `wasm32-wasip1`. With
