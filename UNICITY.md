@@ -142,7 +142,7 @@ Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface
 | Ten upstream Rust source files formatted by the current nightly rustfmt | repairs hosted formatting drift only |
 | `crates/trie/sparse/src/arena/mod.rs` | removes one redundant clone rejected by current Clippy |
 | `crates/net/network/src/config.rs` | removes one redundant rustdoc link target rejected by current rustdoc |
-| `.github/workflows/lint.yml` | drops the `wasm` and `riscv` jobs and the `wasm` gate entry; pins the lint toolchains |
+| `.github/workflows/lint.yml` | drops the `wasm` and `riscv` jobs and the `wasm` gate entry; pins the lint toolchains and the `deny` reusable workflow |
 | `.github/scripts/check_wasm.sh` | one exclusion entry, now in a script nothing invokes; see below |
 | `UNICITY.md` | this record |
 
@@ -189,6 +189,16 @@ job in this same workflow already uses, rather than a new mechanism.
 
 Updating a pin is then a deliberate commit: raise the date, run CI, and fix what it reports, at a
 moment of our choosing rather than whenever a toolchain ships.
+
+The `deny` job is pinned for the same reason and by a sharper lesson. It called
+`tempoxyz/ci/.github/workflows/deny.yml@main`, and on 2026-09-18 that workflow began requiring
+`id-token: write` for a new "secure runner" step. This caller grants only `contents: read`, so the
+call became invalid and **the entire `lint` workflow stopped starting**, taking `clippy`, `fmt`,
+`docs`, `typos`, `udeps` and `book` down with it for two days without a single commit here. A
+floating reference to someone else's workflow is a floating reference to their permission
+requirements too. It is pinned to `400fd3f4`, the last revision that needs no token. Granting
+`id-token: write`, which would let that workflow mint an OIDC identity for this repository, is a
+decision for the owner and not a way to make CI green.
 
 No upstream runtime behavior and no dependency requirement is changed. Every upstream file this fork
 touches is listed above, formatting and lint repairs included. Check:
