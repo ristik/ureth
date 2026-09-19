@@ -10820,8 +10820,10 @@ version = "2.5.0"
 dependencies = [
  "alloy-consensus",
  "alloy-eips",
+ "alloy-genesis",
  "alloy-primitives",
  "alloy-rpc-types-engine",
+ "alloy-trie",
  "reth-basic-payload-builder",
  "reth-chainspec",
  "reth-ethereum-payload-builder",
@@ -10834,10 +10836,15 @@ dependencies = [
  "reth-primitives-traits",
  "reth-provider",
  "reth-storage-api",
+ "reth-storage-errors",
  "reth-transaction-pool",
+ "reth-trie-common",
+ "reth-unicity-execution",
+ "revm",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tokio",
 ]
 
 [[package]]

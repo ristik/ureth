@@ -117,7 +117,10 @@ derived ordinary work rather than a caller-provided scalar.
 Authentication and exact parent-state provenance are explicit caller prerequisites. The crate does
 not authenticate certificates or configuration, bind the supplied database cryptographically to
 the claimed parent, or activate node/RPC/Engine API paths. Its fixture provenance and bounded test inventory are recorded in
-`crates/unicity/execution/README.md`.
+`crates/unicity/execution/README.md`. The inactive payload crate also contains an execution-aware
+builder whose immutable resolver binds each job's full parent, attributes and commitment to that
+shared configuration. Resolution is structural; certificate/JWT authentication and exact-parent
+state provenance remain caller prerequisites, and no Engine API path is activated.
 
 ## Current total fork inventory
 
@@ -125,7 +128,7 @@ Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface
 
 | Change | Kind |
 | --- | --- |
-| `Cargo.toml`: two workspace member lines, `crates/unicity/payload/` and `crates/unicity/execution/` | makes the inactive crates workspace-visible |
+| `Cargo.toml`: two workspace member lines and one local dependency entry for `reth-unicity-execution` | makes the two inactive crates workspace-visible and lets payload reuse execution |
 | `Cargo.lock`: two added Unicity package entries; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
 | `crates/unicity/payload/` | inactive per-payload commitment provision |
 | `crates/unicity/execution/` | inactive bounded registry kernel, shared build/replay adapter and fixtures |
@@ -133,6 +136,7 @@ Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface
 | `crates/trie/sparse/src/arena/mod.rs` | removes one redundant clone rejected by current Clippy |
 | `crates/net/network/src/config.rs` | removes one redundant rustdoc link target rejected by current rustdoc |
 | `.github/workflows/lint.yml` | drops the `wasm` and `riscv` jobs and the `wasm` gate entry; pins the lint toolchains |
+| `.github/scripts/check_wasm.sh` | one exclusion entry, now in a script nothing invokes; see below |
 | `UNICITY.md` | this record |
 
 ## The wasm and RISC-V targets are not built
@@ -146,10 +150,11 @@ deliberately. Deleting them would be larger edits to upstream for no gain, and k
 re-enabling a target later is restoring one job block rather than reconstructing a script. Nothing
 runs either.
 
-This also settles a failure that neither open pull request could fix alone: the job failed on
-`reth-unicity-payload`, whose dependency on `secp256k1-sys` does not build for `wasm32-wasip1`. With
-the job gone, the crate needs no exclusion entry, and the one added by the payload work is harmless
-dead configuration in a script nothing invokes.
+The `wasm` job failed on `reth-unicity-payload`, whose dependency on `secp256k1-sys` does not build
+for `wasm32-wasip1`. The payload work added an exclusion entry for it, which is why that entry is
+still listed above: the line remains in the tree, in a script the workflow no longer invokes. It is
+retained rather than reverted so that re-enabling the target restores a working configuration in one
+step.
 
 ## The lint toolchains are pinned
 
@@ -178,11 +183,13 @@ job in this same workflow already uses, rather than a new mechanism.
 Updating a pin is then a deliberate commit: raise the date, run CI, and fix what it reports, at a
 moment of our choosing rather than whenever a toolchain ships.
 
-No runtime behavior or dependency requirement is changed by the CI-readiness repairs. Check:
+No upstream runtime behavior and no dependency requirement is changed. Every upstream file this fork
+touches is listed above, formatting and lint repairs included. Check:
 
 ```sh
 git diff --stat 189c0df32617afc488e0f091dbface1bd72cceb4 -- . ':!UNICITY.md' ':!crates/unicity'
 git diff 189c0df32617afc488e0f091dbface1bd72cceb4 -- Cargo.toml Cargo.lock
 ```
 
-The commands provide the exact auditable source, workspace and lock inventory.
+The first command must show exactly the upstream files listed above and nothing else; the second
+provides the exact workspace and lock changes.
