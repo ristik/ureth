@@ -295,7 +295,14 @@ jobs:
   deny:
     permissions:
       contents: read
-    uses: tempoxyz/ci/.github/workflows/deny.yml@main
+    # Pinned, not @main. On 2026-09-18 tempoxyz/ci added a "secure runner" step to this reusable
+    # workflow and with it a requirement for id-token: write. This caller grants only contents:
+    # read, so every lint run since has failed to start, which took the whole workflow down rather
+    # than just this job. 400fd3f4 is the last revision that needs no token, so pinning restores the
+    # check without granting a third-party workflow the ability to mint an OIDC identity for this
+    # repository. Raising the pin is a deliberate decision, and granting id-token: write to get the
+    # secure-runner feature is the owner's to make.
+    uses: tempoxyz/ci/.github/workflows/deny.yml@400fd3f4ee8c60dae645f7ea2c261aed6d66e5b5 # 2026-09-02
 
   lint-success:
     name: lint success
