@@ -132,7 +132,7 @@ Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface
 | Ten upstream Rust source files formatted by the current nightly rustfmt | repairs hosted formatting drift only |
 | `crates/trie/sparse/src/arena/mod.rs` | removes one redundant clone rejected by current Clippy |
 | `crates/net/network/src/config.rs` | removes one redundant rustdoc link target rejected by current rustdoc |
-| `.github/workflows/lint.yml` | drops the `wasm` and `riscv` jobs, and the `wasm` entry in the `lint success` gate |
+| `.github/workflows/lint.yml` | drops the `wasm` and `riscv` jobs and the `wasm` gate entry; pins the lint toolchains |
 | `UNICITY.md` | this record |
 
 ## The wasm and RISC-V targets are not built
@@ -150,6 +150,33 @@ This also settles a failure that neither open pull request could fix alone: the 
 `reth-unicity-payload`, whose dependency on `secp256k1-sys` does not build for `wasm32-wasip1`. With
 the job gone, the crate needs no exclusion entry, and the one added by the payload work is harmless
 dead configuration in a script nothing invokes.
+
+## The lint toolchains are pinned
+
+Upstream runs `fmt`, `clippy`, `docs`, `udeps` and `book` on a floating `@nightly`, and
+`clippy binaries` on a floating stable. For upstream that is the right default: it is the tree those
+lints are written against, and upstream fixes its own code when a new release tightens a lint.
+
+For a fork it inverts. A new toolchain can fail CI on a tree nobody touched, and the only way to
+make it green is to edit upstream source that this fork otherwise leaves alone, which spends
+divergence budget on the calendar rather than on the profile. That is the opposite of the constraint
+in "What this fork is allowed to change".
+
+So the lint jobs are pinned to toolchains contemporaneous with the fork point, `v2.5.0` of
+2026-08-12, where upstream's own CI was green against this exact source:
+
+- the five nightly jobs to `nightly-2026-08-12`;
+- `clippy binaries` to stable `1.97.1`, the stable series current at the fork point.
+
+`rustfmt.toml` uses nightly-only options (`imports_granularity`, `wrap_comments`,
+`format_code_in_doc_comments` among them), so `fmt` cannot move to stable without changing that file
+and reformatting the tree. Pinning is the option that leaves upstream source untouched.
+
+This uses `dtolnay/rust-toolchain@master` with an explicit `toolchain:`, which is the form the `msrv`
+job in this same workflow already uses, rather than a new mechanism.
+
+Updating a pin is then a deliberate commit: raise the date, run CI, and fix what it reports, at a
+moment of our choosing rather than whenever a toolchain ships.
 
 No runtime behavior or dependency requirement is changed by the CI-readiness repairs. Check:
 
