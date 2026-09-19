@@ -17,8 +17,9 @@ use reth_storage_api::{AccountReader, StateProvider};
 use reth_unicity_execution::{
     block::BlockProfile,
     block_executor::{build_complete, replay_complete, BoundExecutionInput, UnicityEvmConfig},
-    derive_beacon_root, derive_prev_randao, derive_timestamp, technical_record_hash, InputRecordV2,
-    RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY,
+    derive_beacon_root, derive_prev_randao, derive_timestamp, technical_record_hash,
+    wire::bind_completed_parent,
+    InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY,
 };
 use revm::database::State;
 use std::sync::{Arc, Mutex};
@@ -279,8 +280,8 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     )
     .is_err());
     let build_bound = Arc::new(
-        BoundExecutionInput::from_completed_parent(
-            second_input.clone(),
+        bind_completed_parent(
+            (*second_input).clone(),
             PROFILE,
             &first_header,
             built.parent,

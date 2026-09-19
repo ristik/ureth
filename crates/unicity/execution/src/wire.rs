@@ -1,14 +1,16 @@
-//! Canonical CBOR decoder for [`RootInputV2`].
+//! Wire types for the `engine_*WithSealV1` siblings and the canonical CBOR decoder for
+//! [`RootInputV2`].
 //!
-//! `input_commitment` is `SHA-256` over the canonical bytes of the structured root input, so the
-//! decoder must accept exactly one encoding per value. If two byte strings could decode to the same
-//! [`RootInputV2`], a caller could present one encoding and be bound to another.
+//! The D2 `sealBuildInput` and `sealCompanion` parameters carry a structured root input as an
+//! opaque CBOR byte string. `input_commitment` is `SHA-256` over the canonical bytes of that
+//! structure, so the decoder must accept exactly one encoding per value. If two byte strings could
+//! decode to the same [`RootInputV2`], a caller could present one encoding and be bound to another.
 //! [`RootInputV2::from_canonical_cbor`] therefore accepts only RFC 8949 deterministic encodings:
 //! definite lengths only, minimal-length integer and length heads, no indefinite-length items, no
 //! tags, no floats, no duplicate or unexpected fields, and exact array arities. Every refusal is
 //! named by [`CanonicalCborError`].
 //!
-//! The decoder is the exact inverse of [`RootInputV2::canonical_cbor`] in the crate root:
+//! The decoder is the exact inverse of [`RootInputV2::canonical_cbor`]:
 //!
 //! - `canonical_cbor(from_canonical_cbor(bytes)?)` equals `bytes` for every accepted `bytes`;
 //! - `from_canonical_cbor(canonical_cbor(&value)?)` equals `value` for every valid `value`.
@@ -16,9 +18,215 @@
 //! Decoding is not authentication. Certificate authentication, the authenticated transition
 //! sequence and the exact parent snapshot remain caller prerequisites as the crate docs state, and
 //! this module adds no verdict over them.
+//!
+//! Nothing here is registered, advertised or reachable from a node. The module is a library
+//! boundary only.
 
-use crate::{ExecutionError, InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2};
-use alloy_primitives::B256;
+use crate::{
+    array,
+    block::{BlockAccountingError, BlockProfile},
+    block_executor::{BoundExecutionInput, CompletedParent},
+    bytes, major, text, ExecutionError, InputRecordV2, RootInputV2, RootOriginV2,
+    TechnicalRecordV2,
+};
+use alloy_consensus::Header;
+use alloy_primitives::{Address, B256};
+use reth_primitives_traits::SealedHeader;
+
+/// Build-path parameter `sealBuildInput = { rootInput, transitions }`.
+///
+/// `root_input` is decoded canonical CBOR, so a caller never re-encodes raw bytes it received.
+/// `transitions` is the outer committed-body array the design carries alongside the structured
+/// root input; its relationship to the authenticated sequence remains the authentication
+/// boundary's concern.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealBuildInput {
+    /// Decoded canonical root input.
+    pub root_input: RootInputV2,
+    /// Outer byte-string array carried next to the root input.
+    pub transitions: Vec<Vec<u8>>,
+}
+
+impl SealBuildInput {
+    /// Decodes a canonical CBOR map with exactly the keys `rootInput` and `transitions`.
+    ///
+    /// `rootInput` is a byte string holding the canonical root input, decoded through
+    /// [`RootInputV2::from_canonical_cbor`]. `transitions` is an array of byte strings. Unknown or
+    /// duplicate keys, wrong value types and trailing bytes are refused. Key order is not
+    /// constrained here because this outer map is not hashed; only the root input it carries is
+    /// commitment-bound, and that value is re-checked against its own canonical encoding.
+    pub fn from_canonical_cbor(input: &[u8]) -> Result<Self, CanonicalCborError> {
+        let mut decoder = Decoder::new(input);
+        let keys = decoder.read_map()?;
+        let mut root_input = None;
+        let mut transitions = None;
+        for _ in 0..keys {
+            match decoder.read_text()? {
+                "rootInput" => {
+                    if root_input.is_some() {
+                        return Err(CanonicalCborError::DuplicateMapKey("rootInput"));
+                    }
+                    root_input = Some(RootInputV2::from_canonical_cbor(decoder.read_bytes()?)?);
+                }
+                "transitions" => {
+                    if transitions.is_some() {
+                        return Err(CanonicalCborError::DuplicateMapKey("transitions"));
+                    }
+                    transitions = Some(decode_byte_string_array(&mut decoder)?);
+                }
+                other => return Err(CanonicalCborError::UnexpectedMapKey(other.to_owned())),
+            }
+        }
+        decoder.finish()?;
+        Ok(Self {
+            root_input: root_input.ok_or(CanonicalCborError::MissingMapKey("rootInput"))?,
+            transitions: transitions.ok_or(CanonicalCborError::MissingMapKey("transitions"))?,
+        })
+    }
+
+    /// Encodes the canonical CBOR map for this build input.
+    ///
+    /// The map keys are emitted in RFC 8949 deterministic order: `rootInput` then `transitions`.
+    pub fn canonical_cbor(&self) -> Result<Vec<u8>, CanonicalCborError> {
+        let root_input = self.root_input.canonical_cbor().map_err(CanonicalCborError::from)?;
+        let mut out = Vec::new();
+        major(&mut out, 5, 2);
+        text(&mut out, "rootInput");
+        bytes(&mut out, &root_input);
+        text(&mut out, "transitions");
+        array(&mut out, self.transitions.len() as u64);
+        for transition in &self.transitions {
+            bytes(&mut out, transition);
+        }
+        Ok(out)
+    }
+}
+
+/// Import-path parameter `sealCompanion = { rootInput, witnesses, provenance }`.
+///
+/// `witnesses` is opaque to this crate: the certificate binding and the authenticated transition
+/// sequence are verified by the caller. `provenance` records where the companion came from as the
+/// design's `"build" | "newPayload" | "devp2p" | "reexec"` label; this type does not enforce that
+/// set because the label is not a commitment field.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealCompanion {
+    /// Decoded canonical root input.
+    pub root_input: RootInputV2,
+    /// Authentication witness byte strings; opaque to this crate.
+    pub witnesses: Vec<Vec<u8>>,
+    /// Companion provenance label.
+    pub provenance: String,
+}
+
+impl SealCompanion {
+    /// Decodes a canonical CBOR map with exactly the keys `provenance`, `rootInput` and
+    /// `witnesses`.
+    ///
+    /// `rootInput` decodes through [`RootInputV2::from_canonical_cbor`]. `witnesses` is an array of
+    /// byte strings and `provenance` is a text string. Unknown or duplicate keys, wrong value types
+    /// and trailing bytes are refused. Key order is not constrained for the same reason as
+    /// [`SealBuildInput::from_canonical_cbor`].
+    pub fn from_canonical_cbor(input: &[u8]) -> Result<Self, CanonicalCborError> {
+        let mut decoder = Decoder::new(input);
+        let keys = decoder.read_map()?;
+        let mut root_input = None;
+        let mut witnesses = None;
+        let mut provenance = None;
+        for _ in 0..keys {
+            match decoder.read_text()? {
+                "rootInput" => {
+                    if root_input.is_some() {
+                        return Err(CanonicalCborError::DuplicateMapKey("rootInput"));
+                    }
+                    root_input = Some(RootInputV2::from_canonical_cbor(decoder.read_bytes()?)?);
+                }
+                "witnesses" => {
+                    if witnesses.is_some() {
+                        return Err(CanonicalCborError::DuplicateMapKey("witnesses"));
+                    }
+                    witnesses = Some(decode_byte_string_array(&mut decoder)?);
+                }
+                "provenance" => {
+                    if provenance.is_some() {
+                        return Err(CanonicalCborError::DuplicateMapKey("provenance"));
+                    }
+                    provenance = Some(decoder.read_text()?.to_owned());
+                }
+                other => return Err(CanonicalCborError::UnexpectedMapKey(other.to_owned())),
+            }
+        }
+        decoder.finish()?;
+        Ok(Self {
+            root_input: root_input.ok_or(CanonicalCborError::MissingMapKey("rootInput"))?,
+            witnesses: witnesses.ok_or(CanonicalCborError::MissingMapKey("witnesses"))?,
+            provenance: provenance.ok_or(CanonicalCborError::MissingMapKey("provenance"))?,
+        })
+    }
+
+    /// Encodes the canonical CBOR map for this companion.
+    ///
+    /// The map keys are emitted in RFC 8949 deterministic order: `provenance`, `rootInput`,
+    /// `witnesses`.
+    pub fn canonical_cbor(&self) -> Result<Vec<u8>, CanonicalCborError> {
+        let root_input = self.root_input.canonical_cbor().map_err(CanonicalCborError::from)?;
+        let mut out = Vec::new();
+        major(&mut out, 5, 3);
+        text(&mut out, "provenance");
+        text(&mut out, &self.provenance);
+        text(&mut out, "rootInput");
+        bytes(&mut out, &root_input);
+        text(&mut out, "witnesses");
+        array(&mut out, self.witnesses.len() as u64);
+        for witness in &self.witnesses {
+            bytes(&mut out, witness);
+        }
+        Ok(out)
+    }
+}
+
+/// Binds a decoded root input to a parent whose execution accounting was locally minted.
+///
+/// This forwards to [`BoundExecutionInput::from_completed_parent`] without repeating any of its
+/// parent checks, so exactly the same parent requirements apply: the sealed header must hash to
+/// itself, the input and the completion token must name that parent, and the token's profile must
+/// equal `profile`.
+pub fn bind_completed_parent(
+    input: RootInputV2,
+    profile: BlockProfile,
+    parent: &SealedHeader<Header>,
+    completed: CompletedParent,
+    fee_collector: Address,
+) -> Result<BoundExecutionInput, BlockAccountingError> {
+    BoundExecutionInput::from_completed_parent(
+        std::sync::Arc::new(input),
+        profile,
+        parent,
+        completed,
+        fee_collector,
+    )
+}
+
+/// Binds a decoded root input to an already-validated genesis header.
+///
+/// This forwards to [`BoundExecutionInput::from_validated_genesis`] without repeating its checks,
+/// so the same requirements apply: the header must hash to itself and to
+/// `configured_genesis_hash`, the number and gas used must be zero, the input must name that
+/// parent, and the parent base fee must be valid for the profile.
+pub fn bind_validated_genesis(
+    input: RootInputV2,
+    profile: BlockProfile,
+    parent: &SealedHeader<Header>,
+    configured_genesis_hash: B256,
+    fee_collector: Address,
+) -> Result<BoundExecutionInput, BlockAccountingError> {
+    BoundExecutionInput::from_validated_genesis(
+        std::sync::Arc::new(input),
+        profile,
+        parent,
+        configured_genesis_hash,
+        fee_collector,
+    )
+}
 
 impl RootInputV2 {
     /// Decodes one canonical RFC 8949 root input and validates it through
@@ -215,7 +423,7 @@ impl std::fmt::Display for CanonicalCborError {
 
 impl std::error::Error for CanonicalCborError {}
 
-/// Minimal deterministic CBOR reader for the fixed root-input shape.
+/// Minimal deterministic CBOR reader for the fixed root-input and wire shapes.
 ///
 /// It intentionally exposes only the value kinds the profile uses, so anything else is a type
 /// error rather than something later code has to defend against.
@@ -343,6 +551,15 @@ impl<'a> Decoder<'a> {
         }
     }
 
+    fn read_map(&mut self) -> Result<usize, CanonicalCborError> {
+        match self.read_head()? {
+            (5, length) => {
+                usize::try_from(length).map_err(|_| CanonicalCborError::LengthOutOfRange)
+            }
+            (major, _) => Err(CanonicalCborError::UnexpectedItem { major, expected: "map" }),
+        }
+    }
+
     fn read_word(&mut self) -> Result<B256, CanonicalCborError> {
         let bytes = self.read_bytes()?;
         if bytes.len() != 32 {
@@ -367,7 +584,15 @@ impl<'a> Decoder<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::technical_record_hash;
+    use crate::{block::MAX_BASE_FEE, technical_record_hash};
+
+    const PROFILE: BlockProfile = BlockProfile {
+        max_gas: 30_000_000,
+        system_gas: 2_000_000,
+        base_fee_floor: 1_000_000,
+        elasticity: 2,
+        change_denominator: 8,
+    };
 
     fn sample() -> RootInputV2 {
         let technical = TechnicalRecordV2 {
@@ -559,5 +784,176 @@ mod tests {
             decode_error(&wrong_version),
             CanonicalCborError::InvalidRootInput("profile version must be 2")
         );
+    }
+
+    #[test]
+    fn seal_build_input_round_trips() {
+        let value = SealBuildInput { root_input: sample(), transitions: vec![vec![0xaa], vec![]] };
+        let encoded = value.canonical_cbor().unwrap();
+        assert_eq!(SealBuildInput::from_canonical_cbor(&encoded).unwrap(), value);
+    }
+
+    #[test]
+    fn seal_companion_round_trips() {
+        let value = SealCompanion {
+            root_input: sample(),
+            witnesses: vec![vec![0x0a, 0x0b], vec![]],
+            provenance: "newPayload".into(),
+        };
+        let encoded = value.canonical_cbor().unwrap();
+        assert_eq!(SealCompanion::from_canonical_cbor(&encoded).unwrap(), value);
+    }
+
+    fn bytes_value(value: &[u8]) -> Vec<u8> {
+        let mut out = Vec::new();
+        bytes(&mut out, value);
+        out
+    }
+
+    fn empty_array_value() -> Vec<u8> {
+        let mut out = Vec::new();
+        array(&mut out, 0);
+        out
+    }
+
+    fn manual_map(entries: &[(&str, Vec<u8>)]) -> Vec<u8> {
+        let mut out = Vec::new();
+        major(&mut out, 5, entries.len() as u64);
+        for (key, value) in entries {
+            text(&mut out, key);
+            out.extend_from_slice(value);
+        }
+        out
+    }
+
+    #[test]
+    fn seal_build_input_rejects_bad_maps() {
+        let root = bytes_value(&sample().canonical_cbor().unwrap());
+        let transitions = empty_array_value();
+
+        let duplicate = manual_map(&[("rootInput", root.clone()), ("rootInput", root.clone())]);
+        assert_eq!(
+            SealBuildInput::from_canonical_cbor(&duplicate),
+            Err(CanonicalCborError::DuplicateMapKey("rootInput"))
+        );
+
+        let unknown = manual_map(&[("rootInput", root.clone()), ("bogus", empty_array_value())]);
+        assert_eq!(
+            SealBuildInput::from_canonical_cbor(&unknown),
+            Err(CanonicalCborError::UnexpectedMapKey("bogus".into()))
+        );
+
+        let missing = manual_map(&[("rootInput", root.clone())]);
+        assert_eq!(
+            SealBuildInput::from_canonical_cbor(&missing),
+            Err(CanonicalCborError::MissingMapKey("transitions"))
+        );
+
+        let text_transitions =
+            manual_map(&[("rootInput", root.clone()), ("transitions", text_value())]);
+        assert_eq!(
+            SealBuildInput::from_canonical_cbor(&text_transitions),
+            Err(CanonicalCborError::UnexpectedItem { major: 3, expected: "array" })
+        );
+
+        let wrong_order = manual_map(&[("transitions", transitions), ("rootInput", root)]);
+        assert!(SealBuildInput::from_canonical_cbor(&wrong_order).is_ok());
+    }
+
+    fn text_value() -> Vec<u8> {
+        let mut out = Vec::new();
+        text(&mut out, "not-an-array");
+        out
+    }
+
+    #[test]
+    fn seal_companion_rejects_bad_maps() {
+        let root = bytes_value(&sample().canonical_cbor().unwrap());
+        let witnesses = empty_array_value();
+
+        let missing_provenance =
+            manual_map(&[("rootInput", root.clone()), ("witnesses", witnesses.clone())]);
+        assert_eq!(
+            SealCompanion::from_canonical_cbor(&missing_provenance),
+            Err(CanonicalCborError::MissingMapKey("provenance"))
+        );
+
+        let mut provenance = Vec::new();
+        text(&mut provenance, "build");
+        let nested_invalid = manual_map(&[
+            ("provenance", provenance.clone()),
+            ("rootInput", bytes_value(&[0x80])),
+            ("witnesses", witnesses.clone()),
+        ]);
+        assert_eq!(
+            SealCompanion::from_canonical_cbor(&nested_invalid),
+            Err(CanonicalCborError::WrongArity { expected: 11, found: 0 })
+        );
+
+        let duplicate = manual_map(&[
+            ("provenance", provenance.clone()),
+            ("rootInput", root.clone()),
+            ("provenance", provenance.clone()),
+        ]);
+        assert_eq!(
+            SealCompanion::from_canonical_cbor(&duplicate),
+            Err(CanonicalCborError::DuplicateMapKey("provenance"))
+        );
+
+        let good = manual_map(&[
+            ("witnesses", witnesses),
+            ("provenance", provenance),
+            ("rootInput", root),
+        ]);
+        assert!(SealCompanion::from_canonical_cbor(&good).is_ok());
+    }
+
+    #[test]
+    fn genesis_binding_forwards_to_the_existing_constructor() {
+        let mut header = Header {
+            number: 0,
+            gas_used: 0,
+            base_fee_per_gas: Some(PROFILE.base_fee_floor),
+            ..Default::default()
+        };
+        header.gas_limit = PROFILE.max_gas;
+        let genesis_hash = header.hash_slow();
+        let parent = SealedHeader::new(header, genesis_hash);
+
+        let mut input = sample();
+        input.parent_hash = genesis_hash;
+        bind_validated_genesis(input.clone(), PROFILE, &parent, genesis_hash, Address::ZERO)
+            .unwrap();
+
+        // The wrapper adds no checks of its own: the constructor still refuses a different
+        // configured genesis hash.
+        assert!(bind_validated_genesis(
+            input,
+            PROFILE,
+            &parent,
+            B256::repeat_byte(0x44),
+            Address::ZERO
+        )
+        .is_err());
+
+        // A base fee above the profile maximum is refused by the constructor, not here.
+        let mut high_fee = Header {
+            number: 0,
+            gas_used: 0,
+            base_fee_per_gas: Some(MAX_BASE_FEE + 1),
+            ..Default::default()
+        };
+        high_fee.gas_limit = PROFILE.max_gas;
+        let high_parent = SealedHeader::new(high_fee.clone(), high_fee.hash_slow());
+        let mut high_input = sample();
+        high_input.parent_hash = high_fee.hash_slow();
+        assert!(bind_validated_genesis(
+            high_input,
+            PROFILE,
+            &high_parent,
+            high_fee.hash_slow(),
+            Address::ZERO
+        )
+        .is_err());
     }
 }
