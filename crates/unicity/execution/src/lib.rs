@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 
 pub mod block;
 pub mod block_executor;
+pub mod wire;
 
 sol! {
     function open(
@@ -550,21 +551,21 @@ fn nullable_word(out: &mut Vec<u8>, value: Option<B256>) {
         out.push(0xf6)
     }
 }
-fn array(out: &mut Vec<u8>, len: u64) {
+pub(crate) fn array(out: &mut Vec<u8>, len: u64) {
     major(out, 4, len);
 }
-fn bytes(out: &mut Vec<u8>, value: &[u8]) {
+pub(crate) fn bytes(out: &mut Vec<u8>, value: &[u8]) {
     major(out, 2, value.len() as u64);
     out.extend_from_slice(value);
 }
-fn text(out: &mut Vec<u8>, value: &str) {
+pub(crate) fn text(out: &mut Vec<u8>, value: &str) {
     major(out, 3, value.len() as u64);
     out.extend_from_slice(value.as_bytes());
 }
 fn uint(out: &mut Vec<u8>, value: u64) {
     major(out, 0, value);
 }
-fn major(out: &mut Vec<u8>, kind: u8, value: u64) {
+pub(crate) fn major(out: &mut Vec<u8>, kind: u8, value: u64) {
     match value {
         0..=23 => out.push((kind << 5) | value as u8),
         24..=0xff => out.extend_from_slice(&[(kind << 5) | 24, value as u8]),
