@@ -22,6 +22,7 @@ use sha2::{Digest, Sha256};
 
 pub mod block;
 pub mod block_executor;
+pub mod wire;
 
 sol! {
     function open(

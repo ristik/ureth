@@ -122,6 +122,13 @@ builder whose immutable resolver binds each job's full parent, attributes and co
 shared configuration. Resolution is structural; certificate/JWT authentication and exact-parent
 state provenance remain caller prerequisites, and no Engine API path is activated.
 
+The execution crate also carries the inactive F3 `sealBuildInput` / `sealCompanion` wire types and
+the canonical CBOR decoder for the structured v2 input (bft-core #11, unit U3a). The envelopes are
+JSON; only the nested `rootInput` bytes are canonical CBOR, decoded through the single codec.
+Decoding is not authentication and the types add no verdict. No RPC module, node registration,
+`EngineTypes` or capability string references them; the reachability check for the new symbols
+still returns nothing outside `crates/unicity`.
+
 ## Current total fork inventory
 
 Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface1bd72cceb4`:

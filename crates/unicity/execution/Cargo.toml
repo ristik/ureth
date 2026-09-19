@@ -29,6 +29,7 @@ reth-evm.workspace = true
 reth-evm-ethereum.workspace = true
 reth-primitives-traits.workspace = true
 reth-storage-api.workspace = true
+serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 
 [dev-dependencies]
@@ -37,4 +38,3 @@ alloy-trie = { workspace = true, features = ["std"] }
 reth-storage-errors.workspace = true
 reth-trie-common = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
-serde = { workspace = true, features = ["derive"] }
