@@ -27,6 +27,7 @@ exclude_crates=(
   reth-eth-wire
   reth-ethereum-cli
   reth-ethereum-payload-builder
+  reth-unicity-payload # wraps the native transaction pool payload builder
   reth-etl
   reth-exex
   reth-exex-test-utils
