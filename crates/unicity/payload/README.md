@@ -99,12 +99,26 @@ canonical codec. That is byte-identical to what the caller supplied, because the
 only canonical encodings and its round-trip invariant is asserted in both directions, so
 re-encoding cannot differ from the caller's bytes. Its `provenance` is `"build"`.
 
-The companion's `witnesses` list is empty. `sealBuildInput` carries no witnesses, so this node holds
-none to put there, and a companion without them is not sufficient for a follower to authenticate
-from: D2 has `VerifyCompanionWitnesses` consume a `VerifiedCert`, check the technical record against
-`TRHash`, and require the transitions to equal the authenticated `ExpectedTransitions` byte for
-byte. bft-core holds the authenticated certificate and is the party that can populate the witnesses
-before dissemination. This is an open question on D2 rather than a decision made here; this crate
+The companion's `witnesses` list is empty, and that is correct rather than incomplete.
+
+D2 §2 "The authentication lifecycle" settles it. The witness is not a commitment-bound field: the
+header commits only to `SHA-256(CBOR(rootInput))`, and D2 states that witnesses authenticate
+`rootInput` and are "not re-hashed into the commitment". A receiver therefore cannot validate them
+by hashing, and D2's implementation boundary says `VerifiedCert` and `ExpectedTransitions` are
+"verifier-owned inputs, never trusted fields deserialized straight from a peer companion", with
+`VerifyCompanionWitnesses` being "the check, never the source of trust".
+
+D2's "Who runs it, per path" list assigns the work accordingly. On the build path the shard node is
+the leader, holds the verified certificate and emits `VerifiedCert` and `ExpectedTransitions` in the
+companion. On `newPayloadWithSealV1` the shard-node adapter derives both verified inputs and runs
+`VerifyCompanionWitnesses` before the call, and reth accepts that verdict only over the
+JWT-authenticated channel. On devp2p import and offline re-execution the importer re-derives both
+itself.
+
+The execution client is not the verifier on any path. It holds no trust base, no certificate and no
+committed cursor, and acquiring them would move the authentication boundary into the execution
+client, which is the surface this fork exists to keep small. So this method returns the companion
+fields the node owns, and bft-core supplies the verifier-owned part before dissemination. This crate
 invents no witnesses, synthesises nothing from material it does not have, and does not widen
 `sealBuildInput`.
 

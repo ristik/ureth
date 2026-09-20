@@ -91,8 +91,12 @@ pub trait UnicityEngineApi {
     ///
     /// Returns the built payload, its block value and the companion the leader disseminates. The
     /// companion's `rootInput` is re-encoded from the job's decoded input, and its `witnesses` list
-    /// is empty because `sealBuildInput` carries no witnesses. That is not sufficient for a
-    /// follower to authenticate from; see the crate README for the open D2 question.
+    /// is empty by design.
+    ///
+    /// Witnesses are verifier-owned. D2 §2 keeps `VerifiedCert` and `ExpectedTransitions` outside
+    /// the header commitment and out of the execution client: the shard node holds the verified
+    /// certificate on the build path and supplies them, and the execution client is not the
+    /// verifier on any path. This method therefore returns the fields the node owns.
     #[method(name = "getPayloadWithSealV1")]
     async fn get_payload_with_seal_v1(
         &self,

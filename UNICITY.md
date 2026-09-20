@@ -192,13 +192,14 @@ bytes; the decoder accepts only canonical encodings and its round-trip invariant
 both directions, so the re-encoded bytes equal what the caller supplied. Its `provenance` is
 `"build"`.
 
-The companion's `witnesses` list is empty, and this is a specification gap rather than a decision.
-`sealBuildInput` carries no witnesses, so the node holds none to put there, and D2's
-`VerifyCompanionWitnesses` needs a `VerifiedCert`, a `TRHash` check and the authenticated
-`ExpectedTransitions` before a follower can authenticate a companion. bft-core holds the
-authenticated certificate and is the party that can populate the witnesses before dissemination.
-This crate invents no witnesses, synthesises nothing from material it does not have, and does not
-widen `sealBuildInput`; the owner is raising the D2 question separately. Still no capability string,
+The companion's `witnesses` list is empty, which D2 §2 requires rather than merely permits. The
+header commits to `SHA-256(CBOR(rootInput))` only, witnesses are explicitly not re-hashed into that
+commitment, and `VerifiedCert` and `ExpectedTransitions` are verifier-owned inputs that are never
+trusted straight from a peer companion. The execution client is not the verifier on any path: the
+shard node supplies them on the build path, the adapter runs `VerifyCompanionWitnesses` before
+`newPayloadWithSealV1`, and a devp2p importer re-derives them. Putting witnesses in the fork would
+move the authentication boundary into the execution client. This crate invents no witnesses and does
+not widen `sealBuildInput`. Still no capability string,
 and no new package enters `Cargo.lock`.
 
 ## Current total fork inventory
