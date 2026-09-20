@@ -220,16 +220,41 @@ been seal-executed locally through this same path. This is what makes the seal c
 contiguous, and it is why U3e records the token for an imported block. The method does not
 re-execute the parent recursively and does not mint a token from a header.
 
-The import path validates the block, mints and records the parent token, and returns VALID, but it
-does NOT persist the block or its post-state and does NOT forward to the consensus engine. The node
-database and the engine tree are unchanged, so the seal chain does not yet run contiguously in
-production: a later import or build cannot resolve the imported block as a parent, and the stock
-executor would reject a seal block anyway because only the payload-builder job path is
-Unicity-aware. Closing that needs a Unicity-aware executor component that resolves a per-block bound
-input, planned as U3f. This unit does not attempt it.
+The import path originally validated the block, minted and recorded the parent token, and returned
+VALID without persisting or forwarding. U3e is the API; U3f changes the return to the engine's
+verdict and adds the executor component that lets the engine execute the block. That split is
+recorded in the U3f section below.
 
 This adds the method and one dependency edge from `reth-unicity-payload` to `reth-revm`. No upstream
 source file is edited.
+
+## U3f (bft-core #11): canonical insertion through a Unicity-aware node executor, not advertised
+
+`newPayloadWithSealV1` now registers the block's `BoundExecutionInput` in a bounded
+`UnicityBlockExecutionRegistry` keyed by the 32-byte `extraData` commitment, then forwards the
+payload to the consensus engine and returns the engine's `PayloadStatus`. The registry is shareable,
+capacity-bounded with oldest-first eviction, idempotent for an identical input, and refuses a
+different input declared under an existing commitment.
+
+`UnicityNodeEvmConfig` replaces the stock Ethereum executor component in `UnicityNode`. It resolves
+each block's bound input from the commitment in `extraData` and executes through the same bounded
+`UnicityBlockExecutor` as a locally built block. A block whose commitment is not registered fails
+with the named missing-input error rather than falling back to stock execution, which would accept a
+block nobody authenticated. `UnicityExecutorBuilder` supplies the config as the node EVM component.
+The stock build path is unchanged: the payload builder still resolves a per-job `UnicityEvmConfig`.
+Replacing the executor component did not break any existing test.
+
+`crates/unicity/execution` adds the `node_evm` module (registry, node EVM config and node executor
+factory), a `BoundExecutionInput::root_input` accessor, and a `UnicityBlockExecutor` that fails
+closed when the node did not resolve an input. `reth-unicity-execution` gains one dependency edge to
+`alloy-rpc-types-engine` for the `ConfigureEngineEvm` implementation; `reth-unicity-payload` reuses
+its existing `reth-revm` edge. No upstream source file is edited.
+
+Devp2p sync of seal blocks does not work: nothing populates the execution-input registry on that
+path, so a seal block received from a peer fails execution with the named missing-input error. D2
+expects a devp2p importer to re-derive the certificate and transitions and re-run the check, which
+is a different entry point from the Engine API forward. That is remaining work. Advertisement stays
+with U3g, which advertises all three seal methods together or none.
 
 ## Current total fork inventory
 
@@ -238,9 +263,9 @@ Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface
 | Change | Kind |
 | --- | --- |
 | `Cargo.toml`: two workspace member lines and one local dependency entry for `reth-unicity-execution` | makes the two inactive crates workspace-visible and lets payload reuse execution |
-| `Cargo.lock`: two added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring, the U3c to U3e seal methods; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
-| `crates/unicity/payload/` | per-payload commitment provision, execution builder, bounded seal-job registry, Unicity node wiring, the `engine_forkchoiceUpdatedWithSealV1`, `engine_getPayloadWithSealV1` and `engine_newPayloadWithSealV1` siblings |
-| `crates/unicity/execution/` | bounded registry kernel, shared build/replay adapter, fixtures, the completed-parent token mint and the job root-input accessor |
+| `Cargo.lock`: two added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring, the U3c to U3e seal methods and the U3f node executor, and to the `reth-unicity-execution` entry for U3f; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
+| `crates/unicity/payload/` | per-payload commitment provision, execution builder, bounded seal-job registry, Unicity node wiring, the `engine_forkchoiceUpdatedWithSealV1`, `engine_getPayloadWithSealV1` and `engine_newPayloadWithSealV1` siblings, and the node executor component |
+| `crates/unicity/execution/` | bounded registry kernel, shared build/replay adapter, fixtures, the completed-parent token mint, the job root-input accessor and the node EVM dispatch (`node_evm`) |
 | Ten upstream Rust source files formatted by the current nightly rustfmt | repairs hosted formatting drift only |
 | `crates/trie/sparse/src/arena/mod.rs` | removes one redundant clone rejected by current Clippy |
 | `crates/net/network/src/config.rs` | removes one redundant rustdoc link target rejected by current rustdoc |

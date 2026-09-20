@@ -46,12 +46,12 @@ completion path; a payload ID or caller-provided gas scalar cannot mint one.
 ## Node wiring
 
 `UnicityNode` implements `NodeTypes` with `UnicityEngineTypes` and the stock Ethereum network,
-pool, executor and consensus components. Its payload component uses
-`UnicityExecutionPayloadBuilder` with a `SealJobRegistry` the node holds. All clones of the
-registry see the same entries, so the payload service and the seal method share one collection. The
-engine API is the stock `BasicEngineApiBuilder` plus the `engine_forkchoiceUpdatedWithSealV1`
-sibling, and the validator is the stock Ethereum payload structure and version-field validation
-with no Unicity-specific verdict.
+pool and consensus components. Its payload component uses `UnicityExecutionPayloadBuilder` with a
+`SealJobRegistry` the node holds, and its executor component is `UnicityExecutorBuilder`, which
+supplies `UnicityNodeEvmConfig`. All clones of the registry see the same entries, so the payload
+service and the seal method share one collection. The engine API is the stock
+`BasicEngineApiBuilder` plus the `engine_forkchoiceUpdatedWithSealV1` sibling, and the validator is
+the stock Ethereum payload structure and version-field validation with no Unicity-specific verdict.
 
 A seal job is constructed outside the node, so every piece of node configuration it needs must be
 published by the node. The node publishes the exact `EthereumBuilderConfig` it hands to the payload
@@ -123,14 +123,14 @@ invents no witnesses, synthesises nothing from material it does not have, and do
 `sealBuildInput`.
 
 `engine_newPayloadWithSealV1(executionPayloadV3, expectedBlobVersionedHashes, parentBeaconBlockRoot,
-sealCompanion)` is the import path. It decodes `sealCompanion.rootInput` with the canonical codec,
-refuses a non-empty blob versioned hash list because the bounded profile disables blobs, converts
-the payload and recovers senders, resolves the parent, binds through the U3a entry points, calls the
-shared `replay_complete`, records the returned accounting token for the imported block, and returns
-VALID. A state-root or execution mismatch is INVALID with the refusal in `validationError`. An
-unknown parent is SYNCING. It does not verify witnesses; the shard-node adapter runs
-`VerifyCompanionWitnesses` before the call and reth accepts that verdict over the JWT-authenticated
-channel.
+sealCompanion)` is the import path. It runs its pre-checks (canonical decode, empty blob hash list,
+version-field validation, payload conversion with sender recovery, parent resolution, binding and
+the shared `replay_complete`), records the returned accounting token, registers the bound execution
+input for the block's commitment, forwards the payload to the consensus engine as the stock
+`newPayloadV3` does, and returns the engine's `PayloadStatus`. A state-root or execution mismatch is
+INVALID with the refusal in `validationError`. An unknown parent or a parent without a token is
+SYNCING. It does not verify witnesses; the shard-node adapter runs `VerifyCompanionWitnesses` before
+the call and reth accepts that verdict over the JWT-authenticated channel.
 
 A local parent without a recorded token is also SYNCING, not INVALID. This is a reading of D2: the
 block is not invalid, and the node cannot establish the parent accounting until the parent has been
@@ -138,19 +138,23 @@ seal-executed locally through this same path. Treating a never-seal-executed par
 is what makes the seal chain import contiguous. The method never re-executes the parent recursively
 and never mints a token from a header.
 
-The import path validates the block, mints and records the parent token, and returns VALID, but it
-does NOT persist the block or its post-state and does NOT forward to the consensus engine. The node
-database and the engine tree are unchanged, so the seal chain does not yet run contiguously in
-production: a later import or build cannot resolve the imported block as a parent, and the stock
-executor would reject a seal block anyway because only the payload-builder job path is
-Unicity-aware. Closing that needs a Unicity-aware executor component that resolves a per-block bound
-input, planned as U3f. This unit does not attempt it.
+The import needs a node executor that can execute a seal block. `UnicityNodeEvmConfig` replaces the
+stock Ethereum executor component and resolves each block's bound input from its 32-byte `extraData`
+commitment, so the engine tree executes an imported seal block through the same bounded executor as
+a locally built one. Without a registered commitment the execution fails with the named
+missing-input error rather than falling back to stock execution, which would accept a block nobody
+authenticated. The import registers the input before forwarding.
+
+Devp2p sync of seal blocks does not work yet. Nothing populates the execution-input registry on that
+path, so a seal block received from a peer fails execution with the named missing-input error. D2
+expects a devp2p importer to re-derive the certificate and transitions and re-run the check, which
+is a different entry point from this unit's forward. That is remaining work.
 
 The node keeps the stock EVM configuration out of Unicity builds. `UnicityExecutionPayloadBuilder`
 resolves the per-job `UnicityEvmConfig` instead, so an operator's EVM caches or JIT settings do not
-apply to a Unicity payload. The node-level EVM configuration is the next value that will have to be
-published through the same slot mechanism as `builder_config` rather than a second channel; U3f
-must do that before activation.
+apply to a Unicity payload. The node-level EVM options are the next value that will have to be
+published through the same slot mechanism as `builder_config` rather than a second channel, so that
+the node executor can use them too.
 
 ## Verification scope
 
@@ -160,10 +164,15 @@ beacon-root contract. The copies in this crate are test-only; they are not a dep
 or a separately approved monetary configuration. The independent genesis oracle and provenance
 are retained under `../execution/testdata/`.
 
-These tests exercise in-process payload construction, replay, the bounded job registry and the
-seal build refusals: a non-canonical `rootInput`, an unknown parent, absent attributes, a duplicate
-payload id, and a job that resolves to the same configuration the payload service uses. The node
-wiring and the RPC registration are compile-checked but not launch-tested here: launching the full
-node and exchanging Engine RPC remains the M1 gate. They do not demonstrate an Engine RPC exchange,
-certificate authentication, persistence or public activation. `v0` and the bft-core
+These tests exercise in-process payload construction, replay, the bounded job registry, the seal
+build refusals and the seal import verdicts: a non-canonical `rootInput`, an unknown parent, absent
+attributes, a duplicate payload id, a job that resolves to the same configuration the payload
+service uses, a state-root mismatch, a missing parent, a parent without a token, non-empty blob
+hashes, and that ACCEPTED is never produced. They also cover the execution-input registry
+(idempotent duplicate, conflicting input, oldest-first eviction), node EVM resolution by commitment,
+closed execution without a registered input, and a forward to a fake engine handle that returns its
+verdict. The fake engine is not a real engine: it does not execute or persist. The node wiring and
+the RPC registration are compile-checked but not launch-tested here, and launching the full node and
+exchanging Engine RPC remains the M1 gate. They do not demonstrate an Engine RPC exchange,
+certificate authentication, real persistence or public activation. `v0` and the bft-core
 execution-client pin are unchanged.
