@@ -26,7 +26,7 @@ use reth_payload_primitives::PayloadAttributes;
 use reth_primitives_traits::{
     crypto::secp256k1::sign_message, RecoveredBlock, SealedHeader, SignedTransaction,
 };
-use reth_rpc_engine_api::EngineApiError;
+use reth_rpc_engine_api::{capabilities::EngineCapabilities, EngineApiError};
 use reth_storage_api::{
     BlockHashReader, BlockIdReader, BlockNumReader, HeaderProvider, StateProviderBox,
     StateProviderFactory,
@@ -51,12 +51,12 @@ use reth_unicity_execution::{
     InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY,
 };
 use reth_unicity_payload::{
-    build_seal_companion, prepare_seal_build, refusal_response, ExecutionPayloadJobResolver,
-    FixedPayloadJobResolver, PayloadJobResolutionError, ResolvedPayloadJob, SealBuildContext,
-    SealBuildError, SealJobRegistry, UnicityEngineApiImpl, UnicityEngineTypes,
-    UnicityEngineValidator, UnicityExecutionPayloadBuilder, UnicityParentAccountings,
-    UnicityPayloadAttributes, UnicitySealConfig, COMPANION_NOT_RETAINED_CODE,
-    DEFAULT_SEAL_JOB_CAPACITY,
+    build_seal_companion, prepare_seal_build, refusal_response, unicity_engine_capabilities,
+    ExecutionPayloadJobResolver, FixedPayloadJobResolver, PayloadJobResolutionError,
+    ResolvedPayloadJob, SealBuildContext, SealBuildError, SealJobRegistry, UnicityEngineApiImpl,
+    UnicityEngineTypes, UnicityEngineValidator, UnicityExecutionPayloadBuilder,
+    UnicityParentAccountings, UnicityPayloadAttributes, UnicitySealConfig,
+    COMPANION_NOT_RETAINED_CODE, DEFAULT_SEAL_JOB_CAPACITY, SEAL_CAPABILITIES,
 };
 use std::{
     ops::RangeBounds,
@@ -1386,4 +1386,38 @@ async fn the_parent_token_recorded_by_an_import_is_usable_by_a_later_build() {
         child_id,
     );
     assert!(context.registry.resolve(&child_config).is_ok());
+}
+
+/// The Unicity node advertises exactly the stock Ethereum set plus the three seal methods, and the
+/// stock set advertises none of them. The three are asserted as one set so a partial regression
+/// fails rather than passing two of three checks.
+#[test]
+fn unicity_capabilities_are_the_stock_set_plus_the_three_seal_methods() {
+    let stock = EngineCapabilities::default();
+    let unicity = unicity_engine_capabilities();
+
+    // The full sets differ by exactly the three seal strings.
+    let mut expected = stock.list();
+    expected.extend(SEAL_CAPABILITIES.iter().map(|capability| (*capability).to_owned()));
+    expected.sort_unstable();
+    let mut actual = unicity.list();
+    actual.sort_unstable();
+    assert_eq!(actual, expected, "the Unicity set must be exactly the stock list plus the three");
+
+    // The only additions are those three, so a client never sees a partial seal contract.
+    let mut added: Vec<String> = unicity
+        .list()
+        .into_iter()
+        .filter(|capability| !stock.as_set().contains(capability))
+        .collect();
+    added.sort_unstable();
+    let mut expected_added: Vec<String> =
+        SEAL_CAPABILITIES.iter().map(|capability| (*capability).to_owned()).collect();
+    expected_added.sort_unstable();
+    assert_eq!(added, expected_added, "the only additions must be the three seal strings");
+
+    // A stock Ethereum capability set contains none of them.
+    for capability in SEAL_CAPABILITIES {
+        assert!(!stock.as_set().contains(*capability), "stock must not advertise {capability}");
+    }
 }
