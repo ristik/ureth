@@ -41,6 +41,15 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Failure message when a node-level executor has no bound input for its block commitment.
+///
+/// The node EVM config resolves the input before execution, but
+/// `BlockExecutorFactory::create_executor` cannot fail. A block that reaches the executor without
+/// an input therefore fails here, at the first pre-execution step, rather than falling back to
+/// stock execution.
+pub const MISSING_EXECUTION_INPUT_ERROR: &str =
+    "no bound execution input registered for block commitment";
+
 /// Immutable data bound to one build or replay job.
 #[derive(Clone, Debug)]
 pub struct BoundExecutionInput {
@@ -118,6 +127,11 @@ impl BoundExecutionInput {
             parent_execution: completed.0,
             fee_collector,
         })
+    }
+
+    /// Returns the authenticated structured input this immutable job is bound to.
+    pub fn root_input(&self) -> &RootInputV2 {
+        &self.input
     }
 }
 
@@ -404,7 +418,7 @@ impl<R, Spec, EvmF> UnicityBlockExecutorFactory<R, Spec, EvmF> {
 /// Executor that runs the registry pair before stock Cancun pre-execution calls.
 pub struct UnicityBlockExecutor<'a, E, Spec, R: ReceiptBuilder> {
     inner: EthBlockExecutor<'a, E, Spec, R>,
-    bound: Arc<BoundExecutionInput>,
+    bound: Option<Arc<BoundExecutionInput>>,
     /// Shared slot where `finish` records the gross system gas it charged.
     system_gas: Arc<Mutex<Option<u64>>>,
     prefix: PrefixState,
@@ -423,6 +437,24 @@ impl<E, Spec, R: ReceiptBuilder> fmt::Debug for UnicityBlockExecutor<'_, E, Spec
             .field("bound", &self.bound)
             .field("prefix", &self.prefix)
             .finish_non_exhaustive()
+    }
+}
+
+impl<'a, E, Spec, R: ReceiptBuilder> UnicityBlockExecutor<'a, E, Spec, R> {
+    /// Creates an executor for one already-resolved bound input.
+    ///
+    /// The per-job factory passes `Some`; the node-level factory passes the registry lookup, which
+    /// is `None` when the block's commitment is absent. The input is never re-derived here.
+    pub(crate) fn new(
+        inner: EthBlockExecutor<'a, E, Spec, R>,
+        bound: Option<Arc<BoundExecutionInput>>,
+    ) -> Self {
+        Self { inner, bound, system_gas: Arc::new(Mutex::new(None)), prefix: PrefixState::Pending }
+    }
+
+    /// Returns the bound input, or the named failure when the node did not resolve one.
+    fn bound(&self) -> Result<&Arc<BoundExecutionInput>, BlockExecutionError> {
+        self.bound.as_ref().ok_or_else(|| BlockExecutionError::msg(MISSING_EXECUTION_INPUT_ERROR))
     }
 }
 
@@ -460,7 +492,7 @@ where
     {
         UnicityBlockExecutor {
             inner: self.inner.create_executor(evm, ctx),
-            bound: self.bound.clone(),
+            bound: Some(self.bound.clone()),
             system_gas: self.system_gas.clone(),
             prefix: PrefixState::Pending,
         }
@@ -491,11 +523,12 @@ where
             return Err(BlockExecutionError::msg("pre-execution changes already applied"));
         }
         self.prefix = PrefixState::Poisoned;
-        self.bound.profile.validate().map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
+        let bound = self.bound()?.clone();
+        bound.profile.validate().map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
         let result = execute_registry_transition_on_db(
-            &self.bound.input,
+            &bound.input,
             self.inner.evm.db_mut(),
-            ExecutionConfig { system_gas_limit: self.bound.profile.system_gas },
+            ExecutionConfig { system_gas_limit: bound.profile.system_gas },
         )
         .map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
 
@@ -529,7 +562,7 @@ where
             .into());
         }
         let available = self
-            .bound
+            .bound()?
             .profile
             .ordinary_capacity()
             .map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?
@@ -564,7 +597,7 @@ where
         if let Ok(mut slot) = self.system_gas.lock() {
             *slot = Some(system);
         }
-        let profile = self.bound.profile;
+        let profile = self.bound()?.profile;
         let (evm, mut result) = self.inner.finish()?;
         if result.blob_gas_used != 0 {
             return Err(BlockExecutionError::msg("blob gas is unsupported"));
