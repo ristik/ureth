@@ -24,14 +24,14 @@
 //!   the import path that re-executes the payload, records its accounting token, registers its
 //!   bound input and forwards it to the engine.
 //!
-//! THE SEAL METHODS ARE NOT ADVERTISED. The siblings are registered on the authenticated engine
-//! module, but `engine_exchangeCapabilities` is the stock list and no capability names them, so a
-//! client cannot discover them. U3g advertises all three seal methods together or none. The
-//! execution-aware path remains structurally bound only: its resolver performs structural binding,
-//! while certificate/JWT authentication and exact-parent state provenance remain caller
-//! prerequisites. The import path does not verify witnesses, and the build-path companion carries
-//! no witnesses because `sealBuildInput` supplies none; bft-core holds the authenticated
-//! certificate and must populate them before dissemination. See the crate README.
+//! THE SEAL METHODS ARE ADVERTISED. A Unicity node's `engine_exchangeCapabilities` is the stock
+//! Ethereum list plus the three seal methods, added together as one set. The siblings are
+//! registered on the authenticated engine module and reachable. The execution-aware path remains
+//! structurally bound only: its resolver performs structural binding, while certificate/JWT
+//! authentication and exact-parent state provenance remain caller prerequisites. The import path
+//! does not verify witnesses, and the build-path companion carries no witnesses because
+//! `sealBuildInput` supplies none; bft-core holds the authenticated certificate and must populate
+//! them before dissemination. See the crate README.
 
 pub mod engine;
 pub mod node;
@@ -49,9 +49,10 @@ pub use registry::{
 };
 pub use rpc::{
     build_seal_companion, companion_not_retained_error, import_response, prepare_seal_build,
-    refusal_response, GetPayloadWithSealV1Response, SealBuildContext, SealBuildError,
-    SealCompanionError, SealImportError, UnicityEngineApiBuilder, UnicityEngineApiImpl,
-    UnicityEngineApiModule, BUILD_PROVENANCE, COMPANION_NOT_RETAINED_CODE,
+    refusal_response, unicity_engine_capabilities, GetPayloadWithSealV1Response, SealBuildContext,
+    SealBuildError, SealCompanionError, SealImportError, UnicityEngineApiBuilder,
+    UnicityEngineApiImpl, UnicityEngineApiModule, BUILD_PROVENANCE, COMPANION_NOT_RETAINED_CODE,
+    SEAL_CAPABILITIES,
 };
 
 use alloy_eips::eip4895::Withdrawal;
