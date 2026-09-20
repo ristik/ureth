@@ -2,17 +2,20 @@
 //!
 //! [`UnicityNode`] implements [`NodeTypes`] with [`UnicityEngineTypes`] and replaces the stock
 //! payload builder with [`UnicityExecutionPayloadBuilder`](crate::UnicityExecutionPayloadBuilder)
-//! resolving through a shared [`SealJobRegistry`]. The node is the attachment point for the
-//! `engine_*WithSealV1` methods: a future method inserts a
-//! [`ResolvedPayloadJob`](crate::ResolvedPayloadJob) into the registry and then starts an ordinary
+//! resolving through a shared [`SealJobRegistry`]. The node's add-ons register the
+//! `engine_forkchoiceUpdatedWithSealV1` sibling through
+//! [`UnicityEngineApiBuilder`](crate::rpc::UnicityEngineApiBuilder), so a future method can insert
+//! a [`ResolvedPayloadJob`](crate::ResolvedPayloadJob) into the registry and then start an ordinary
 //! build, which resolves that exact job.
 //!
-//! Nothing here registers an RPC method or a capability string. The stock `engine_*` surface is
-//! assembled from upstream components exactly as the plain Ethereum node assembles it, and this
-//! file contains no method registration, capability list or seal parameter type.
+//! The sibling is reachable but not advertised: `engine_exchangeCapabilities` is the stock list and
+//! no capability string names the method. U3f advertises all three seal methods together or none.
+//! The stock `engine_*` surface is assembled from upstream components exactly as the plain Ethereum
+//! node assembles it.
 
 use std::sync::{Arc, OnceLock};
 
+use alloy_primitives::Address;
 use alloy_rpc_types_engine::ExecutionData;
 use reth_chainspec::ChainSpec;
 use reth_engine_primitives::{EngineApiValidator, PayloadValidator};
@@ -21,10 +24,7 @@ use reth_ethereum_primitives::{EthPrimitives, TransactionSigned};
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_node_builder::{
     components::{BasicPayloadServiceBuilder, ComponentsBuilder, PayloadBuilderBuilder},
-    rpc::{
-        BasicEngineApiBuilder, BasicEngineValidatorBuilder, Identity, PayloadValidatorBuilder,
-        RpcAddOns,
-    },
+    rpc::{BasicEngineValidatorBuilder, Identity, PayloadValidatorBuilder, RpcAddOns},
     AddOnsContext, BuilderContext, FullNodeComponents, FullNodeTypes, Node, NodeAdapter, NodeTypes,
     PayloadBuilderConfig,
 };
@@ -39,11 +39,23 @@ use reth_payload_primitives::{
 use reth_primitives_traits::SealedBlock;
 use reth_provider::EthStorage;
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
+use reth_unicity_execution::block::BlockProfile;
 
 use crate::{
+    registry::UnicityParentAccountings,
+    rpc::{SealBuildContext, UnicityEngineApiBuilder},
     SealJobRegistry, UnicityEngineTypes, UnicityExecutionPayloadBuilder, UnicityPayloadAttributes,
     DEFAULT_SEAL_JOB_CAPACITY,
 };
+
+/// Pinned profile and fee collector the seal build path uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct UnicitySealConfig {
+    /// Gas and fee profile the build path pins.
+    pub profile: BlockProfile,
+    /// Beneficiary the payload attributes must name.
+    pub fee_collector: Address,
+}
 
 /// A Unicity execution node.
 ///
@@ -51,28 +63,45 @@ use crate::{
 /// [`UnicityEngineTypes`], and the payload component builds through
 /// [`UnicityExecutionPayloadBuilder`](crate::UnicityExecutionPayloadBuilder) with the registry this
 /// node holds. Everything else, including the network, pool, executor, consensus and the standard
-/// Engine API, is the stock Ethereum component.
+/// Engine API, is the stock Ethereum component plus the seal sibling method.
 ///
 /// A caller that needs to insert seal jobs shares the registry with the node by constructing it
 /// with [`UnicityNode::new`]; all clones observe the same entries. The node also publishes the
 /// exact [`EthereumBuilderConfig`] it hands to the payload builder, because a seal job is
 /// constructed outside the node and must reproduce that configuration for resolution to succeed.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 #[non_exhaustive]
 pub struct UnicityNode {
     registry: SealJobRegistry,
     builder_config: Arc<OnceLock<EthereumBuilderConfig>>,
+    seal: UnicitySealConfig,
+    parent_accounting: UnicityParentAccountings,
 }
 
 impl UnicityNode {
     /// Creates a node whose payload builder resolves through `registry`.
-    pub fn new(registry: SealJobRegistry) -> Self {
-        Self { registry, builder_config: Arc::new(OnceLock::new()) }
+    pub fn new(registry: SealJobRegistry, seal: UnicitySealConfig) -> Self {
+        Self {
+            registry,
+            builder_config: Arc::new(OnceLock::new()),
+            seal,
+            parent_accounting: UnicityParentAccountings::default(),
+        }
     }
 
     /// Returns the seal job registry shared with the payload builder.
     pub const fn registry(&self) -> &SealJobRegistry {
         &self.registry
+    }
+
+    /// Returns the pinned execution profile and fee collector.
+    pub const fn seal(&self) -> UnicitySealConfig {
+        self.seal
+    }
+
+    /// Returns the parent-accounting store shared with the payload builder and the seal method.
+    pub const fn parent_accounting(&self) -> &UnicityParentAccountings {
+        &self.parent_accounting
     }
 
     /// Returns the exact payload builder configuration the node resolved, once the payload builder
@@ -117,6 +146,7 @@ where
             .payload(BasicPayloadServiceBuilder::new(UnicityPayloadBuilderBuilder::new(
                 self.registry.clone(),
                 self.builder_config.clone(),
+                self.parent_accounting.clone(),
             )))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -126,7 +156,12 @@ where
         RpcAddOns::new(
             EthereumEthApiBuilder::default(),
             UnicityEngineValidatorBuilder,
-            BasicEngineApiBuilder::default(),
+            UnicityEngineApiBuilder::new(SealBuildContext {
+                registry: self.registry.clone(),
+                builder_config: self.builder_config.clone(),
+                seal: self.seal,
+                parent_accounting: self.parent_accounting.clone(),
+            }),
             BasicEngineValidatorBuilder::default(),
             Default::default(),
             Identity::new(),
@@ -145,6 +180,7 @@ where
 pub struct UnicityPayloadBuilderBuilder {
     registry: SealJobRegistry,
     builder_config: Arc<OnceLock<EthereumBuilderConfig>>,
+    parent_accounting: UnicityParentAccountings,
 }
 
 impl UnicityPayloadBuilderBuilder {
@@ -153,8 +189,9 @@ impl UnicityPayloadBuilderBuilder {
     pub const fn new(
         registry: SealJobRegistry,
         builder_config: Arc<OnceLock<EthereumBuilderConfig>>,
+        parent_accounting: UnicityParentAccountings,
     ) -> Self {
-        Self { registry, builder_config }
+        Self { registry, builder_config, parent_accounting }
     }
 
     /// Returns the registry shared with the resulting payload builder.
@@ -215,7 +252,8 @@ where
             pool,
             self.registry,
             base_config,
-        ))
+        )
+        .with_parent_accounting(self.parent_accounting))
     }
 }
 
@@ -312,10 +350,11 @@ where
 
 /// Standard RPC add-ons for a Unicity node.
 ///
-/// The engine API builder is the stock [`BasicEngineApiBuilder`], so no seal method is registered
-/// and no capability is advertised. U3c will extend this type to register the sibling methods and
-/// to carry the node's [`SealJobRegistry`] and builder-configuration slot into them.
-pub type UnicityNodeAddOns<N> = RpcAddOns<N, EthereumEthApiBuilder, UnicityEngineValidatorBuilder>;
+/// The engine API builder is the stock [`BasicEngineApiBuilder`] plus the seal sibling method, so
+/// the sibling is reachable but no capability is advertised. U3f will advertise the three seal
+/// methods together or not at all.
+pub type UnicityNodeAddOns<N> =
+    RpcAddOns<N, EthereumEthApiBuilder, UnicityEngineValidatorBuilder, UnicityEngineApiBuilder>;
 
 #[cfg(test)]
 mod tests {
