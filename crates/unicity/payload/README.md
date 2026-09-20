@@ -61,7 +61,7 @@ builder through `UnicityNode::builder_config`, and raises the registry capacity 
 next-block attributes from its own copy and refuses a job that does not match; a second derivation
 would drift and fail resolution at runtime.
 
-## The seal build method
+## The seal methods
 
 `engine_forkchoiceUpdatedWithSealV1(forkchoiceState, payloadAttributesV3, sealBuildInput)` runs the
 D2 build flow in order: decode `rootInput` through the canonical CBOR codec; resolve
@@ -88,6 +88,22 @@ Only blocks this node built are recorded. A follower that imported the parent th
 parent and the method refuses that parent as an internal error. U3e's import path executes imported
 blocks through the same executor and must record the token there too; that is what lets a follower
 lead in a rotating-leader shard. The token is not and must not be derived from the parent header.
+
+`engine_getPayloadWithSealV1(payloadId)` resolves the built payload the way the stock `getPayloadV3`
+path does and returns `{ executionPayload, blockValue, sealCompanion }`, with an unknown payload id
+keeping the stock unknown-payload error. The companion's `rootInput` is re-encoded from the job's
+decoded input with the canonical codec. That is byte-identical to what the caller supplied, because
+the decoder accepts only canonical encodings and its round-trip invariant is asserted in both
+directions, so re-encoding cannot differ from the caller's bytes. Its `provenance` is `"build"`.
+
+The companion's `witnesses` list is empty. `sealBuildInput` carries no witnesses, so this node holds
+none to put there, and a companion without them is not sufficient for a follower to authenticate
+from: D2 has `VerifyCompanionWitnesses` consume a `VerifiedCert`, check the technical record against
+`TRHash`, and require the transitions to equal the authenticated `ExpectedTransitions` byte for
+byte. bft-core holds the authenticated certificate and is the party that can populate the witnesses
+before dissemination. This is an open question on D2 rather than a decision made here; this crate
+invents no witnesses, synthesises nothing from material it does not have, and does not widen
+`sealBuildInput`.
 
 The node keeps the stock EVM configuration out of Unicity builds. `UnicityExecutionPayloadBuilder`
 resolves the per-job `UnicityEvmConfig` instead, so an operator's EVM caches or JIT settings do not
