@@ -26,8 +26,8 @@ reth-consensus.workspace = true
 reth-consensus-common.workspace = true
 reth-ethereum-consensus.workspace = true
 reth-ethereum-primitives.workspace = true
-reth-evm.workspace = true
-reth-evm-ethereum.workspace = true
+reth-evm = { workspace = true, features = ["std"] }
+reth-evm-ethereum = { workspace = true, features = ["std"] }
 reth-primitives-traits.workspace = true
 reth-storage-api.workspace = true
 serde = { workspace = true, features = ["derive"] }
