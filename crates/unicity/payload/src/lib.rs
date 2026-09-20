@@ -46,9 +46,10 @@ pub use registry::{
     DEFAULT_SEAL_JOB_CAPACITY,
 };
 pub use rpc::{
-    build_seal_companion, prepare_seal_build, refusal_response, GetPayloadWithSealV1Response,
-    SealBuildContext, SealBuildError, SealCompanionError, UnicityEngineApiBuilder,
-    UnicityEngineApiImpl, UnicityEngineApiModule, BUILD_PROVENANCE,
+    build_seal_companion, companion_not_retained_error, prepare_seal_build, refusal_response,
+    GetPayloadWithSealV1Response, SealBuildContext, SealBuildError, SealCompanionError,
+    UnicityEngineApiBuilder, UnicityEngineApiImpl, UnicityEngineApiModule, BUILD_PROVENANCE,
+    COMPANION_NOT_RETAINED_CODE,
 };
 
 use alloy_eips::eip4895::Withdrawal;

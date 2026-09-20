@@ -39,7 +39,7 @@ use alloy_rpc_types_engine::{
     ExecutionPayloadEnvelopeV3, ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadId,
     PayloadStatusEnum,
 };
-use jsonrpsee::{core::RpcResult, proc_macros::rpc, RpcModule};
+use jsonrpsee::{core::RpcResult, proc_macros::rpc, types::ErrorObject, RpcModule};
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
 use reth_engine_primitives::{ConsensusEngineHandle, EngineApiValidator};
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
@@ -258,6 +258,26 @@ impl fmt::Display for SealCompanionError {
 
 impl std::error::Error for SealCompanionError {}
 
+/// JSON-RPC error code for a payload whose build job was evicted before its companion was served.
+///
+/// This is a fork-specific diagnostic outside the standard Engine API error range, so an operator
+/// can tell "the payload exists but its companion is no longer retained" apart from "the payload id
+/// is unknown".
+pub const COMPANION_NOT_RETAINED_CODE: i32 = -39001;
+
+/// The distinct error for a payload that resolved but whose build job is no longer retained.
+///
+/// The payload store may still hold the payload after the bounded job registry evicts the job that
+/// carried its root input. Reporting the stock unknown-payload error in that case would point an
+/// operator at the payload store rather than at companion retention.
+pub fn companion_not_retained_error(payload_id: PayloadId) -> EngineApiError {
+    EngineApiError::other(ErrorObject::owned(
+        COMPANION_NOT_RETAINED_CODE,
+        format!("seal companion is no longer retained for payload {payload_id}"),
+        None::<()>,
+    ))
+}
+
 /// Builds the companion the leader disseminates for a payload this node built.
 ///
 /// `root_input` is re-encoded with the canonical codec rather than retaining the caller's raw
@@ -354,6 +374,11 @@ where
     Provider: ChainSpecProvider<ChainSpec = ChainSpec>,
 {
     /// Resolves the built payload and companion, mirroring the stock `getPayloadV3` path.
+    ///
+    /// An unknown payload id returns the stock [`EngineApiError::UnknownPayload`]. A payload that
+    /// resolves while its build job has been evicted from the bounded registry returns
+    /// [`COMPANION_NOT_RETAINED_CODE`] instead, because the payload exists but its companion is
+    /// gone.
     pub async fn get_payload_with_seal(
         &self,
         payload_id: PayloadId,
@@ -381,10 +406,13 @@ where
             .map_err(|_| EngineApiError::UnknownPayload)?;
 
         // The companion needs the job's decoded input. The job is still in the registry while its
-        // payload is being served; an evicted job refuses as unknown payload rather than inventing
-        // a companion.
-        let root_input =
-            self.context.registry.root_input(&payload_id).ok_or(EngineApiError::UnknownPayload)?;
+        // payload is being served. A bounded registry can evict it before getPayload, and the
+        // payload store may still resolve the payload; that is its own verdict, not an unknown id.
+        let root_input = self
+            .context
+            .registry
+            .root_input(&payload_id)
+            .ok_or_else(|| companion_not_retained_error(payload_id))?;
         let seal_companion = build_seal_companion(&root_input)
             .map_err(|error| EngineApiError::Internal(Box::new(error)))?;
 
