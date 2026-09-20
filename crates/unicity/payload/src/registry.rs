@@ -11,8 +11,12 @@ use std::{
 };
 
 use alloy_primitives::B256;
+use alloy_rpc_types_engine::PayloadId;
 use reth_basic_payload_builder::PayloadConfig;
-use reth_unicity_execution::block_executor::{CompletedParent, UnicityEvmConfig};
+use reth_unicity_execution::{
+    block_executor::{CompletedParent, UnicityEvmConfig},
+    RootInputV2,
+};
 
 use crate::{
     ExecutionPayloadJobResolver, PayloadJobResolutionError, ResolvedPayloadJob,
@@ -98,6 +102,20 @@ impl SealJobRegistry {
     /// Returns whether the registry is empty.
     pub fn is_empty(&self) -> bool {
         self.lock().jobs.is_empty()
+    }
+
+    /// Returns the structured input the job with `payload_id` was bound to, if it is still held.
+    ///
+    /// The build path does not retain the caller's raw `rootInput` bytes. The job holds the decoded
+    /// [`RootInputV2`], and the companion re-encodes it with the canonical codec; the decoder is
+    /// the exact inverse of that encoder, so the re-encoded bytes equal what the caller
+    /// supplied.
+    pub fn root_input(&self, payload_id: &PayloadId) -> Option<RootInputV2> {
+        self.lock()
+            .jobs
+            .iter()
+            .find(|job| job.payload_id == *payload_id)
+            .map(|job| job.evm_config.root_input().clone())
     }
 
     /// Installs `job` and refuses a payload id that is already present.

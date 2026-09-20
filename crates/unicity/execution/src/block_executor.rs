@@ -337,6 +337,14 @@ impl UnicityEvmConfig {
         Ok(CompletedParent(accounting))
     }
 
+    /// Returns the authenticated structured input this immutable job is bound to.
+    ///
+    /// The decoder accepts only canonical encodings and its round-trip invariant is asserted in
+    /// both directions, so re-encoding this value cannot differ from the bytes the caller supplied.
+    pub fn root_input(&self) -> &RootInputV2 {
+        &self.bound.input
+    }
+
     /// Checks that payload-builder inputs select this configuration's exact immutable job.
     ///
     /// This is a structural check only. Authentication of the root input and consistency of the
