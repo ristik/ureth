@@ -6,18 +6,25 @@ use alloy_consensus::{Header, SignableTransaction, TxLegacy};
 use alloy_eips::{BlockNumHash, BlockNumberOrTag};
 use alloy_genesis::Genesis;
 use alloy_primitives::{b256, Address, TxKind, B256, U256};
-use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes as EthPayloadAttributes};
+use alloy_rpc_types_engine::{
+    ForkchoiceState, PayloadAttributes as EthPayloadAttributes, PayloadId,
+};
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
 use reth_chainspec::{ChainInfo, ChainSpec, ChainSpecProvider};
+use reth_engine_primitives::ConsensusEngineHandle;
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use reth_evm_ethereum::EthEvmConfig;
+use reth_payload_builder::{
+    EthBuiltPayload, PayloadBuilderHandle, PayloadServiceCommand, PayloadStore,
+};
 use reth_payload_primitives::PayloadAttributes;
 use reth_primitives_traits::{
     crypto::secp256k1::sign_message, RecoveredBlock, SealedHeader, SignedTransaction,
 };
+use reth_rpc_engine_api::EngineApiError;
 use reth_storage_api::{
     BlockHashReader, BlockIdReader, BlockNumReader, HeaderProvider, StateProviderBox,
     StateProviderFactory,
@@ -35,10 +42,11 @@ use reth_unicity_execution::{
     InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY,
 };
 use reth_unicity_payload::{
-    prepare_seal_build, refusal_response, ExecutionPayloadJobResolver, FixedPayloadJobResolver,
-    PayloadJobResolutionError, ResolvedPayloadJob, SealBuildContext, SealBuildError,
-    SealJobRegistry, UnicityEngineValidator, UnicityExecutionPayloadBuilder,
-    UnicityParentAccountings, UnicityPayloadAttributes, UnicitySealConfig,
+    build_seal_companion, prepare_seal_build, refusal_response, ExecutionPayloadJobResolver,
+    FixedPayloadJobResolver, PayloadJobResolutionError, ResolvedPayloadJob, SealBuildContext,
+    SealBuildError, SealJobRegistry, UnicityEngineApiImpl, UnicityEngineTypes,
+    UnicityEngineValidator, UnicityExecutionPayloadBuilder, UnicityParentAccountings,
+    UnicityPayloadAttributes, UnicitySealConfig, COMPANION_NOT_RETAINED_CODE,
     DEFAULT_SEAL_JOB_CAPACITY,
 };
 use std::{
@@ -816,4 +824,98 @@ fn seal_build_job_resolves_with_the_published_builder_config() {
     bounded.insert(B256::repeat_byte(0x02), token);
     assert!(bounded.get(&B256::repeat_byte(0x01)).is_none());
     assert!(bounded.get(&B256::repeat_byte(0x02)).is_some());
+}
+
+#[test]
+fn get_payload_companion_reencodes_exactly_the_caller_bytes() {
+    let (_client, _parent, root, _attrs, _context, _validator) = seal_fixture();
+    let input = seal_input(&root);
+    // The decoder accepts only canonical encodings, so re-encoding the decoded value must equal the
+    // bytes the caller supplied to forkchoiceUpdatedWithSealV1.
+    let decoded = input.decode_root_input().unwrap();
+    let companion = build_seal_companion(&decoded).unwrap();
+    assert_eq!(companion.root_input, input.root_input);
+    assert_eq!(companion.provenance, "build");
+    assert!(companion.witnesses.is_empty(), "the build input carries no witnesses");
+}
+
+#[tokio::test]
+async fn get_payload_with_seal_refuses_an_unknown_payload_id() {
+    let (client, _parent, _root, _attrs, context, validator) = seal_fixture();
+    // The store's service receiver is dropped, so every request resolves as absent, which is the
+    // same shape as an unknown payload id.
+    let (beacon_tx, _beacon_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (store_tx, store_rx) = tokio::sync::mpsc::unbounded_channel();
+    drop(store_rx);
+    let handler = UnicityEngineApiImpl::new(
+        client,
+        ConsensusEngineHandle::new(beacon_tx),
+        context,
+        validator,
+        PayloadStore::new(PayloadBuilderHandle::new(store_tx)),
+    );
+    let error = handler.get_payload_with_seal(PayloadId::new([0x11; 8])).await.unwrap_err();
+    assert!(matches!(error, EngineApiError::UnknownPayload));
+}
+
+/// Serves one already-built payload from a payload store, so the getPayload path can be exercised
+/// without a running payload service.
+async fn serve_resolved_payload(
+    mut commands: tokio::sync::mpsc::UnboundedReceiver<PayloadServiceCommand<UnicityEngineTypes>>,
+    payload: EthBuiltPayload,
+) {
+    while let Some(command) = commands.recv().await {
+        match command {
+            PayloadServiceCommand::PayloadTimestamp(_, tx) => {
+                let _ = tx.send(Some(Ok(payload.block().header().timestamp)));
+            }
+            PayloadServiceCommand::Resolve(_, _, tx) => {
+                let payload = payload.clone();
+                let _ = tx.send(Some(Box::pin(async move { Ok(payload) })));
+            }
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test]
+async fn get_payload_with_seal_names_an_evicted_companion() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let payload_id = attrs.payload_id(&parent.hash());
+    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &seal_input(&root))
+        .unwrap();
+
+    // Build the payload, then drop its job from the registry so the payload exists but its
+    // companion input is gone.
+    let base = context.builder_config.get().unwrap().clone();
+    let builder = UnicityExecutionPayloadBuilder::new(
+        client.clone(),
+        test_pool(),
+        context.registry.clone(),
+        base,
+    );
+    let payload =
+        builder.build_empty_payload(PayloadConfig::new(parent, attrs, payload_id)).unwrap();
+    context.registry.clear();
+    assert!(context.registry.root_input(&payload_id).is_none());
+
+    let (store_tx, store_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(serve_resolved_payload(store_rx, payload));
+    let (beacon_tx, _beacon_rx) = tokio::sync::mpsc::unbounded_channel();
+    let handler = UnicityEngineApiImpl::new(
+        client,
+        ConsensusEngineHandle::new(beacon_tx),
+        context,
+        validator,
+        PayloadStore::new(PayloadBuilderHandle::new(store_tx)),
+    );
+    let error = handler.get_payload_with_seal(payload_id).await.unwrap_err();
+    match error {
+        EngineApiError::Other(error) => {
+            assert_eq!(error.code(), COMPANION_NOT_RETAINED_CODE);
+            assert!(error.message().contains("no longer retained"));
+        }
+        other => panic!("expected the evicted-companion error, got {other:?}"),
+    }
 }

@@ -179,6 +179,29 @@ This adds a sibling method and a parent-accounting store. It adds dependency edg
 `reth-rpc-api` and `reth-rpc-engine-api`, and it edits no upstream source file. No new package
 enters `Cargo.lock`.
 
+## U3d (bft-core #11): engine_getPayloadWithSealV1, registered but not advertised
+
+`crates/unicity/payload` adds the second seal method. `getPayloadWithSealV1(payloadId)` resolves the
+built payload the way the stock `getPayloadV3` path does (timestamp validation, then the payload
+store) and returns `{ executionPayload, blockValue, sealCompanion }`. An unknown payload id keeps
+the stock unknown-payload error. A payload that resolves while its build job has been evicted from
+the bounded registry gets its own error code (`-39001`) saying the companion is no longer retained,
+which an operator can tell apart from an unknown id. The companion's `rootInput` is re-encoded from
+the job's decoded `RootInputV2` with the canonical codec rather than retaining the caller's raw
+bytes; the decoder accepts only canonical encodings and its round-trip invariant is asserted in
+both directions, so the re-encoded bytes equal what the caller supplied. Its `provenance` is
+`"build"`.
+
+The companion's `witnesses` list is empty, which D2 §2 requires rather than merely permits. The
+header commits to `SHA-256(CBOR(rootInput))` only, witnesses are explicitly not re-hashed into that
+commitment, and `VerifiedCert` and `ExpectedTransitions` are verifier-owned inputs that are never
+trusted straight from a peer companion. The execution client is not the verifier on any path: the
+shard node supplies them on the build path, the adapter runs `VerifyCompanionWitnesses` before
+`newPayloadWithSealV1`, and a devp2p importer re-derives them. Putting witnesses in the fork would
+move the authentication boundary into the execution client. This crate invents no witnesses and does
+not widen `sealBuildInput`. Still no capability string,
+and no new package enters `Cargo.lock`.
+
 ## Current total fork inventory
 
 Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface1bd72cceb4`:
@@ -187,8 +210,8 @@ Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface
 | --- | --- |
 | `Cargo.toml`: two workspace member lines and one local dependency entry for `reth-unicity-execution` | makes the two inactive crates workspace-visible and lets payload reuse execution |
 | `Cargo.lock`: two added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring and the U3c seal method; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
-| `crates/unicity/payload/` | per-payload commitment provision, execution builder, bounded seal-job registry, Unicity node wiring and the `engine_forkchoiceUpdatedWithSealV1` sibling |
-| `crates/unicity/execution/` | bounded registry kernel, shared build/replay adapter, fixtures and the completed-parent token mint |
+| `crates/unicity/payload/` | per-payload commitment provision, execution builder, bounded seal-job registry, Unicity node wiring, the `engine_forkchoiceUpdatedWithSealV1` and `engine_getPayloadWithSealV1` siblings |
+| `crates/unicity/execution/` | bounded registry kernel, shared build/replay adapter, fixtures, the completed-parent token mint and the job root-input accessor |
 | Ten upstream Rust source files formatted by the current nightly rustfmt | repairs hosted formatting drift only |
 | `crates/trie/sparse/src/arena/mod.rs` | removes one redundant clone rejected by current Clippy |
 | `crates/net/network/src/config.rs` | removes one redundant rustdoc link target rejected by current rustdoc |

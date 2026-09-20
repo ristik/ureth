@@ -61,7 +61,7 @@ builder through `UnicityNode::builder_config`, and raises the registry capacity 
 next-block attributes from its own copy and refuses a job that does not match; a second derivation
 would drift and fail resolution at runtime.
 
-## The seal build method
+## The seal methods
 
 `engine_forkchoiceUpdatedWithSealV1(forkchoiceState, payloadAttributesV3, sealBuildInput)` runs the
 D2 build flow in order: decode `rootInput` through the canonical CBOR codec; resolve
@@ -88,6 +88,39 @@ Only blocks this node built are recorded. A follower that imported the parent th
 parent and the method refuses that parent as an internal error. U3e's import path executes imported
 blocks through the same executor and must record the token there too; that is what lets a follower
 lead in a rotating-leader shard. The token is not and must not be derived from the parent header.
+
+`engine_getPayloadWithSealV1(payloadId)` resolves the built payload the way the stock `getPayloadV3`
+path does and returns `{ executionPayload, blockValue, sealCompanion }`, with an unknown payload id
+keeping the stock unknown-payload error. If the payload resolves while its build job has been
+evicted from the bounded registry, the method returns its own error code (`-39001`) saying the
+companion is no longer retained for that payload id, so an operator can tell that apart from an
+unknown id. The companion's `rootInput` is re-encoded from the job's decoded input with the
+canonical codec. That is byte-identical to what the caller supplied, because the decoder accepts
+only canonical encodings and its round-trip invariant is asserted in both directions, so
+re-encoding cannot differ from the caller's bytes. Its `provenance` is `"build"`.
+
+The companion's `witnesses` list is empty, and that is correct rather than incomplete.
+
+D2 §2 "The authentication lifecycle" settles it. The witness is not a commitment-bound field: the
+header commits only to `SHA-256(CBOR(rootInput))`, and D2 states that witnesses authenticate
+`rootInput` and are "not re-hashed into the commitment". A receiver therefore cannot validate them
+by hashing, and D2's implementation boundary says `VerifiedCert` and `ExpectedTransitions` are
+"verifier-owned inputs, never trusted fields deserialized straight from a peer companion", with
+`VerifyCompanionWitnesses` being "the check, never the source of trust".
+
+D2's "Who runs it, per path" list assigns the work accordingly. On the build path the shard node is
+the leader, holds the verified certificate and emits `VerifiedCert` and `ExpectedTransitions` in the
+companion. On `newPayloadWithSealV1` the shard-node adapter derives both verified inputs and runs
+`VerifyCompanionWitnesses` before the call, and reth accepts that verdict only over the
+JWT-authenticated channel. On devp2p import and offline re-execution the importer re-derives both
+itself.
+
+The execution client is not the verifier on any path. It holds no trust base, no certificate and no
+committed cursor, and acquiring them would move the authentication boundary into the execution
+client, which is the surface this fork exists to keep small. So this method returns the companion
+fields the node owns, and bft-core supplies the verifier-owned part before dissemination. This crate
+invents no witnesses, synthesises nothing from material it does not have, and does not widen
+`sealBuildInput`.
 
 The node keeps the stock EVM configuration out of Unicity builds. `UnicityExecutionPayloadBuilder`
 resolves the per-job `UnicityEvmConfig` instead, so an operator's EVM caches or JIT settings do not
