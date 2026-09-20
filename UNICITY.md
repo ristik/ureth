@@ -117,7 +117,7 @@ derived ordinary work rather than a caller-provided scalar.
 Authentication and exact parent-state provenance are explicit caller prerequisites. The crate does
 not authenticate certificates or configuration, bind the supplied database cryptographically to
 the claimed parent, or activate node/RPC/Engine API paths. Its fixture provenance and bounded test inventory are recorded in
-`crates/unicity/execution/README.md`. The inactive payload crate also contains an execution-aware
+`crates/unicity/execution/README.md`. The payload crate also contains an execution-aware
 builder whose immutable resolver binds each job's full parent, attributes and commitment to that
 shared configuration. Resolution is structural; certificate/JWT authentication and exact-parent
 state provenance remain caller prerequisites, and no Engine API path is activated.
@@ -129,6 +129,24 @@ Decoding is not authentication and the types add no verdict. No RPC module, node
 `EngineTypes` or capability string references them; the reachability check for the new symbols
 still returns nothing outside `crates/unicity`.
 
+## U3b (bft-core #11): Unicity node and bounded seal-job registry, no method
+
+`crates/unicity/payload` now supplies the attachment point the later F3 units need. It adds
+`UnicityEngineTypes` (the stock Ethereum payload shape with `UnicityPayloadAttributes`),
+`UnicityNode` (the stock Ethereum node components with the Unicity payload builder), and a bounded
+`SealJobRegistry` the builder resolves through. A future `engine_forkchoiceUpdatedWithSealV1`
+inserts one `ResolvedPayloadJob` into that registry and then starts an ordinary build, which
+resolves that exact job.
+
+The registry is bounded to 16 entries and evicts the oldest insertion first, refuses a duplicate
+payload id, and shares its entries across clones. No Engine API method, RPC module, capability
+string or validator rule is added, so a running node's advertised surface is unchanged. The node
+wiring is compile-checked, not launch-tested; that is the M1 gate.
+
+Adding the node to this crate adds dependency edges from `reth-unicity-payload` to
+`reth-node-builder`, `reth-node-ethereum`, `reth-engine-primitives` and `eyre`. No upstream source
+file is edited and no new package enters `Cargo.lock`.
+
 ## Current total fork inventory
 
 Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface1bd72cceb4`:
@@ -136,8 +154,8 @@ Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface
 | Change | Kind |
 | --- | --- |
 | `Cargo.toml`: two workspace member lines and one local dependency entry for `reth-unicity-execution` | makes the two inactive crates workspace-visible and lets payload reuse execution |
-| `Cargo.lock`: two added Unicity package entries; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
-| `crates/unicity/payload/` | inactive per-payload commitment provision |
+| `Cargo.lock`: two added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
+| `crates/unicity/payload/` | inactive per-payload commitment provision, execution builder, bounded seal-job registry and Unicity node wiring |
 | `crates/unicity/execution/` | inactive bounded registry kernel, shared build/replay adapter and fixtures |
 | Ten upstream Rust source files formatted by the current nightly rustfmt | repairs hosted formatting drift only |
 | `crates/trie/sparse/src/arena/mod.rs` | removes one redundant clone rejected by current Clippy |
