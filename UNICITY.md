@@ -184,10 +184,13 @@ enters `Cargo.lock`.
 `crates/unicity/payload` adds the second seal method. `getPayloadWithSealV1(payloadId)` resolves the
 built payload the way the stock `getPayloadV3` path does (timestamp validation, then the payload
 store) and returns `{ executionPayload, blockValue, sealCompanion }`. An unknown payload id keeps
-the stock unknown-payload error. The companion's `rootInput` is re-encoded from the job's decoded
-`RootInputV2` with the canonical codec rather than retaining the caller's raw bytes; the decoder
-accepts only canonical encodings and its round-trip invariant is asserted in both directions, so
-the re-encoded bytes equal what the caller supplied. Its `provenance` is `"build"`.
+the stock unknown-payload error. A payload that resolves while its build job has been evicted from
+the bounded registry gets its own error code (`-39001`) saying the companion is no longer retained,
+which an operator can tell apart from an unknown id. The companion's `rootInput` is re-encoded from
+the job's decoded `RootInputV2` with the canonical codec rather than retaining the caller's raw
+bytes; the decoder accepts only canonical encodings and its round-trip invariant is asserted in
+both directions, so the re-encoded bytes equal what the caller supplied. Its `provenance` is
+`"build"`.
 
 The companion's `witnesses` list is empty, and this is a specification gap rather than a decision.
 `sealBuildInput` carries no witnesses, so the node holds none to put there, and D2's

@@ -91,10 +91,13 @@ lead in a rotating-leader shard. The token is not and must not be derived from t
 
 `engine_getPayloadWithSealV1(payloadId)` resolves the built payload the way the stock `getPayloadV3`
 path does and returns `{ executionPayload, blockValue, sealCompanion }`, with an unknown payload id
-keeping the stock unknown-payload error. The companion's `rootInput` is re-encoded from the job's
-decoded input with the canonical codec. That is byte-identical to what the caller supplied, because
-the decoder accepts only canonical encodings and its round-trip invariant is asserted in both
-directions, so re-encoding cannot differ from the caller's bytes. Its `provenance` is `"build"`.
+keeping the stock unknown-payload error. If the payload resolves while its build job has been
+evicted from the bounded registry, the method returns its own error code (`-39001`) saying the
+companion is no longer retained for that payload id, so an operator can tell that apart from an
+unknown id. The companion's `rootInput` is re-encoded from the job's decoded input with the
+canonical codec. That is byte-identical to what the caller supplied, because the decoder accepts
+only canonical encodings and its round-trip invariant is asserted in both directions, so
+re-encoding cannot differ from the caller's bytes. Its `provenance` is `"build"`.
 
 The companion's `witnesses` list is empty. `sealBuildInput` carries no witnesses, so this node holds
 none to put there, and a companion without them is not sufficient for a follower to authenticate
