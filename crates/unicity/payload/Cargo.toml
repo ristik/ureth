@@ -20,6 +20,7 @@ reth-engine-primitives = { workspace = true, features = ["std"] }
 reth-ethereum-payload-builder.workspace = true
 reth-ethereum-primitives.workspace = true
 reth-evm.workspace = true
+reth-evm-ethereum = { workspace = true, features = ["std"] }
 reth-node-builder.workspace = true
 reth-node-ethereum.workspace = true
 reth-payload-builder.workspace = true
@@ -27,25 +28,28 @@ reth-payload-builder-primitives.workspace = true
 reth-payload-primitives.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
+reth-rpc-api.workspace = true
+reth-rpc-engine-api.workspace = true
 reth-storage-api.workspace = true
 reth-transaction-pool.workspace = true
 reth-unicity-execution.workspace = true
 
 # alloy
+alloy-consensus.workspace = true
 alloy-eips.workspace = true
 alloy-primitives = { workspace = true, features = ["serde"] }
 alloy-rpc-types-engine = { workspace = true, features = ["serde"] }
 
 # misc
+async-trait.workspace = true
 eyre.workspace = true
+jsonrpsee = { workspace = true, features = ["server", "macros"] }
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
 
 [dev-dependencies]
-alloy-consensus.workspace = true
 alloy-genesis.workspace = true
 alloy-trie = { workspace = true, features = ["std"] }
-reth-evm-ethereum = { workspace = true, features = ["std"] }
 reth-provider = { workspace = true, features = ["test-utils"] }
 reth-storage-errors.workspace = true
 reth-transaction-pool = { workspace = true, features = ["test-utils"] }

@@ -10,8 +10,9 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+use alloy_primitives::B256;
 use reth_basic_payload_builder::PayloadConfig;
-use reth_unicity_execution::block_executor::UnicityEvmConfig;
+use reth_unicity_execution::block_executor::{CompletedParent, UnicityEvmConfig};
 
 use crate::{
     ExecutionPayloadJobResolver, PayloadJobResolutionError, ResolvedPayloadJob,
@@ -147,5 +148,106 @@ impl ExecutionPayloadJobResolver for SealJobRegistry {
             .ok_or(PayloadJobResolutionError("payload job is absent"))?;
         job.check_binding(config)?;
         Ok(job.evm_config.clone())
+    }
+}
+
+/// Capacity of [`UnicityParentAccountings`].
+///
+/// Only recent heads can be the parent of the next build, and the payload service keeps at most a
+/// few builds alive at once, so a small window is enough. The oldest published token is evicted
+/// first, so the store cannot grow without limit as the node builds blocks.
+pub const DEFAULT_PARENT_ACCOUNTING_CAPACITY: usize = 16;
+
+#[derive(Debug)]
+struct ParentAccountingInner {
+    tokens: VecDeque<(B256, CompletedParent)>,
+    capacity: usize,
+}
+
+/// Bounded store of completed parent-accounting tokens published by the build path.
+///
+/// The next build needs the accounting token for the block it builds on. The token is opaque and
+/// can only be minted by a completed build or replay, so it must be retained between calls. This
+/// store is that retention point: the payload builder inserts the token for a block it produced,
+/// and the seal build path reads it for the parent.
+///
+/// This is why the token is not derived from the parent header: the header carries the gross gas
+/// but not the system/ordinary split, and deriving that split from a header alone would let a
+/// caller invent the parent's base-fee input rather than inherit it from the build that produced
+/// it.
+///
+/// Only blocks this node built are recorded. A follower that imported the parent block through
+/// `engine_newPayloadWithSealV1` has no token for it, so a node cannot currently build on an
+/// imported parent and the build path refuses it as an internal error. The import path executes
+/// imported blocks through the same executor and must record the token there too; that is what
+/// lets a follower lead in a rotating-leader shard. The token is not and must not be derived from
+/// the parent header.
+#[derive(Clone, Debug)]
+pub struct UnicityParentAccountings {
+    inner: Arc<Mutex<ParentAccountingInner>>,
+}
+
+impl UnicityParentAccountings {
+    /// Creates an empty store with [`DEFAULT_PARENT_ACCOUNTING_CAPACITY`] entries.
+    pub fn new() -> Self {
+        Self::with_capacity(DEFAULT_PARENT_ACCOUNTING_CAPACITY)
+    }
+
+    /// Creates an empty store bounded to `capacity` entries.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `capacity` is zero.
+    pub fn with_capacity(capacity: usize) -> Self {
+        assert!(capacity > 0, "parent accounting capacity must be greater than zero");
+        Self {
+            inner: Arc::new(Mutex::new(ParentAccountingInner {
+                tokens: VecDeque::new(),
+                capacity,
+            })),
+        }
+    }
+
+    /// Publishes the token for the block whose hash is `block_hash`.
+    ///
+    /// A repeated hash replaces the existing entry rather than adding a second one. If the store is
+    /// full, the oldest insertion is evicted first.
+    pub fn insert(&self, block_hash: B256, token: CompletedParent) {
+        let mut inner = self.lock();
+        if let Some(index) = inner.tokens.iter().position(|(hash, _)| *hash == block_hash) {
+            inner.tokens.remove(index);
+        }
+        if inner.tokens.len() >= inner.capacity {
+            inner.tokens.pop_front();
+        }
+        inner.tokens.push_back((block_hash, token));
+    }
+
+    /// Returns the token for `block_hash`, if a build or replay published one.
+    pub fn get(&self, block_hash: &B256) -> Option<CompletedParent> {
+        self.lock().tokens.iter().find(|(hash, _)| hash == block_hash).map(|(_, token)| *token)
+    }
+
+    /// Returns the number of tokens currently held.
+    pub fn len(&self) -> usize {
+        self.lock().tokens.len()
+    }
+
+    /// Returns whether the store is empty.
+    pub fn is_empty(&self) -> bool {
+        self.lock().tokens.is_empty()
+    }
+
+    fn lock(&self) -> MutexGuard<'_, ParentAccountingInner> {
+        // A poisoned store means an earlier insert panicked. The deque is still readable, and the
+        // worst case is a missing token, which refuses a build rather than taking the payload
+        // service down with the panic.
+        self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl Default for UnicityParentAccountings {
+    fn default() -> Self {
+        Self::new()
     }
 }

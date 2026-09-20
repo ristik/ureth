@@ -120,14 +120,15 @@ the claimed parent, or activate node/RPC/Engine API paths. Its fixture provenanc
 `crates/unicity/execution/README.md`. The payload crate also contains an execution-aware
 builder whose immutable resolver binds each job's full parent, attributes and commitment to that
 shared configuration. Resolution is structural; certificate/JWT authentication and exact-parent
-state provenance remain caller prerequisites, and no Engine API path is activated.
+state provenance remain caller prerequisites. No Engine API path was activated at that point; U3c
+adds one registered but unadvertised sibling.
 
 The execution crate also carries the inactive F3 `sealBuildInput` / `sealCompanion` wire types and
 the canonical CBOR decoder for the structured v2 input (bft-core #11, unit U3a). The envelopes are
 JSON; only the nested `rootInput` bytes are canonical CBOR, decoded through the single codec.
-Decoding is not authentication and the types add no verdict. No RPC module, node registration,
-`EngineTypes` or capability string references them; the reachability check for the new symbols
-still returns nothing outside `crates/unicity`.
+Decoding is not authentication and the types add no verdict. At U3a no RPC module, node
+registration, `EngineTypes` or capability string referenced them; U3c's sibling method consumes
+`sealBuildInput`, but no capability string does.
 
 ## U3b (bft-core #11): Unicity node and bounded seal-job registry, no method
 
@@ -150,6 +151,34 @@ Adding the node to this crate adds dependency edges from `reth-unicity-payload` 
 `reth-node-builder`, `reth-node-ethereum`, `reth-engine-primitives` and `eyre`. No upstream source
 file is edited and no new package enters `Cargo.lock`.
 
+## U3c (bft-core #11): engine_forkchoiceUpdatedWithSealV1, registered but not advertised
+
+`crates/unicity/payload` adds the first actual seal method: a jsonrpsee sibling trait in the
+`engine` namespace with `forkchoiceUpdatedWithSealV1`. It is registered on the authenticated engine
+module alongside the stock Engine API, so it is reachable, but `engine_exchangeCapabilities` is the
+stock list and no capability name is added. U3f advertises all three seal methods together or none.
+
+The handler runs the fixed D2 order: decode the canonical root input, resolve the parent header
+(unknown is SYNCING), bind it through the U3a entry points, build the `UnicityEvmConfig` and
+`ResolvedPayloadJob` from the node's published `EthereumBuilderConfig`, insert the job before
+forwarding, and forward to the consensus handle. Absent attributes, a non-canonical input, a
+binding failure or a duplicate payload id is INVALID with the refusal in `validationError`. A
+missing published configuration or a non-genesis parent without an accounting token is an internal
+error. The method does not trial-execute the system operation.
+
+The build path now retains the opaque `CompletedParent` token for each block it builds, in a bounded
+`UnicityParentAccountings` store, and looks it up for the next block. The execution crate records
+the gross system gas in `UnicityEvmConfig` when the executor finishes a block and exposes
+`completed_parent_for` to mint the token, so a token is never derived from a header alone. Only
+blocks this node built are recorded, so a follower cannot yet build on an imported parent; U3e's
+`newPayloadWithSealV1` import path must record the token for an imported block as well. That is
+what lets a follower lead in a rotating-leader shard.
+
+This adds a sibling method and a parent-accounting store. It adds dependency edges from
+`reth-unicity-payload` to `alloy-consensus`, `async-trait`, `jsonrpsee`, `reth-evm-ethereum`,
+`reth-rpc-api` and `reth-rpc-engine-api`, and it edits no upstream source file. No new package
+enters `Cargo.lock`.
+
 ## Current total fork inventory
 
 Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface1bd72cceb4`:
@@ -157,9 +186,9 @@ Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface
 | Change | Kind |
 | --- | --- |
 | `Cargo.toml`: two workspace member lines and one local dependency entry for `reth-unicity-execution` | makes the two inactive crates workspace-visible and lets payload reuse execution |
-| `Cargo.lock`: two added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
-| `crates/unicity/payload/` | inactive per-payload commitment provision, execution builder, bounded seal-job registry and Unicity node wiring |
-| `crates/unicity/execution/` | inactive bounded registry kernel, shared build/replay adapter and fixtures |
+| `Cargo.lock`: two added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring and the U3c seal method; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
+| `crates/unicity/payload/` | per-payload commitment provision, execution builder, bounded seal-job registry, Unicity node wiring and the `engine_forkchoiceUpdatedWithSealV1` sibling |
+| `crates/unicity/execution/` | bounded registry kernel, shared build/replay adapter, fixtures and the completed-parent token mint |
 | Ten upstream Rust source files formatted by the current nightly rustfmt | repairs hosted formatting drift only |
 | `crates/trie/sparse/src/arena/mod.rs` | removes one redundant clone rejected by current Clippy |
 | `crates/net/network/src/config.rs` | removes one redundant rustdoc link target rejected by current rustdoc |

@@ -17,23 +17,35 @@
 //! - [`UnicityEngineTypes`] and [`UnicityNode`]: the Engine API types and the node wiring that
 //!   carry the Unicity attributes end to end and use [`UnicityExecutionPayloadBuilder`] with that
 //!   registry.
+//! - [`prepare_seal_build`] and the `engine_forkchoiceUpdatedWithSealV1` sibling: the build path
+//!   that decodes the canonical input, binds the parent, installs the job and forwards the
+//!   forkchoice update.
 //!
-//! NO SEAL METHOD IS ADVERTISED. Nothing registers an RPC module or a capability string, no
-//! `engine_*WithSealV1` method exists, and the standard Engine API surface is unchanged. The
-//! execution-aware path remains structurally bound only: its resolver performs structural binding,
-//! while certificate/JWT authentication and exact-parent state provenance remain caller
-//! prerequisites. No Engine API method supplies the companion data yet.
+//! THE SEAL METHOD IS NOT ADVERTISED. The sibling is registered on the authenticated engine module,
+//! but `engine_exchangeCapabilities` is the stock list and no capability names it, so a client
+//! cannot discover it. U3f advertises all three seal methods together or none. The execution-aware
+//! path remains structurally bound only: its resolver performs structural binding, while
+//! certificate/JWT authentication and exact-parent state provenance remain caller prerequisites.
+//! `engine_getPayloadWithSealV1` and `engine_newPayloadWithSealV1` do not exist yet.
 
 pub mod engine;
 pub mod node;
 pub mod registry;
+pub mod rpc;
 
 pub use engine::UnicityEngineTypes;
 pub use node::{
     UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityNode, UnicityNodeAddOns,
-    UnicityPayloadBuilderBuilder,
+    UnicityPayloadBuilderBuilder, UnicitySealConfig,
 };
-pub use registry::{SealJobRegistry, DEFAULT_SEAL_JOB_CAPACITY};
+pub use registry::{
+    SealJobRegistry, UnicityParentAccountings, DEFAULT_PARENT_ACCOUNTING_CAPACITY,
+    DEFAULT_SEAL_JOB_CAPACITY,
+};
+pub use rpc::{
+    prepare_seal_build, refusal_response, SealBuildContext, SealBuildError,
+    UnicityEngineApiBuilder, UnicityEngineApiImpl, UnicityEngineApiModule,
+};
 
 use alloy_eips::eip4895::Withdrawal;
 use alloy_primitives::B256;
@@ -360,17 +372,28 @@ pub struct UnicityExecutionPayloadBuilder<Pool, Client, Resolver> {
     pool: Pool,
     resolver: Resolver,
     base_config: EthereumBuilderConfig,
+    parent_accounting: UnicityParentAccountings,
 }
 
 impl<Pool, Client, Resolver> UnicityExecutionPayloadBuilder<Pool, Client, Resolver> {
     /// Creates an execution-aware payload builder. No stock EVM fallback is retained.
-    pub const fn new(
+    pub fn new(
         client: Client,
         pool: Pool,
         resolver: Resolver,
         base_config: EthereumBuilderConfig,
     ) -> Self {
-        Self { client, pool, resolver, base_config }
+        Self { client, pool, resolver, base_config, parent_accounting: Default::default() }
+    }
+
+    /// Shares the store where completed builds publish their parent-accounting tokens.
+    ///
+    /// A build on top of a block this node produced needs that block's token. The token is minted
+    /// here after a successful build and read back by a later build; the store is what carries it
+    /// across the two calls.
+    pub fn with_parent_accounting(mut self, parent_accounting: UnicityParentAccountings) -> Self {
+        self.parent_accounting = parent_accounting;
+        self
     }
 }
 
@@ -417,6 +440,21 @@ where
                 .with_extra_data(config.attributes.commitment.0.to_vec().into()),
         )
     }
+
+    /// Publishes the parent-accounting token for a payload this job just produced.
+    ///
+    /// The token is only minted from a block the executor actually finished, so a later build can
+    /// inherit the parent's ordinary/system gas split instead of inventing it from the header.
+    ///
+    /// Only built blocks are recorded here. A parent this node imported through
+    /// `engine_newPayloadWithSealV1` has no token until the import path records one, so a follower
+    /// cannot yet lead on it. That import path runs the same executor and must publish the token
+    /// there too.
+    fn remember_parent(&self, evm_config: &UnicityEvmConfig, payload: &EthBuiltPayload) {
+        if let Ok(token) = evm_config.completed_parent_for(payload.block()) {
+            self.parent_accounting.insert(payload.block().hash(), token);
+        }
+    }
 }
 
 impl<Pool, Client, Resolver> PayloadBuilder
@@ -439,9 +477,13 @@ where
                 .validate_payload_candidate(best.block())
                 .map_err(PayloadBuilderError::other)?;
         }
-        let builder = self.for_resolved_job(&args.config, evm_config);
+        let builder = self.for_resolved_job(&args.config, evm_config.clone());
         let (_, args) = split_args(args);
-        builder.try_build(args)
+        let outcome = builder.try_build(args)?;
+        if let BuildOutcome::Better { payload, .. } | BuildOutcome::Freeze(payload) = &outcome {
+            self.remember_parent(&evm_config, payload);
+        }
+        Ok(outcome)
     }
 
     fn on_missing_payload(
@@ -462,9 +504,11 @@ where
         config: PayloadConfig<Self::Attributes>,
     ) -> Result<Self::BuiltPayload, PayloadBuilderError> {
         let evm_config = self.resolve_job(&config)?;
-        let builder = self.for_resolved_job(&config, evm_config);
+        let builder = self.for_resolved_job(&config, evm_config.clone());
         let (_, config) = split_config(config);
-        builder.build_empty_payload(config)
+        let payload = builder.build_empty_payload(config)?;
+        self.remember_parent(&evm_config, &payload);
+        Ok(payload)
     }
 }
 

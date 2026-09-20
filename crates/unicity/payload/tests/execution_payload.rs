@@ -2,11 +2,11 @@
 
 mod support;
 
-use alloy_consensus::{SignableTransaction, TxLegacy};
+use alloy_consensus::{Header, SignableTransaction, TxLegacy};
 use alloy_eips::{BlockNumHash, BlockNumberOrTag};
 use alloy_genesis::Genesis;
 use alloy_primitives::{b256, Address, TxKind, B256, U256};
-use alloy_rpc_types_engine::PayloadAttributes as EthPayloadAttributes;
+use alloy_rpc_types_engine::{ForkchoiceState, PayloadAttributes as EthPayloadAttributes};
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
@@ -19,7 +19,8 @@ use reth_primitives_traits::{
     crypto::secp256k1::sign_message, RecoveredBlock, SealedHeader, SignedTransaction,
 };
 use reth_storage_api::{
-    BlockHashReader, BlockIdReader, BlockNumReader, StateProviderBox, StateProviderFactory,
+    BlockHashReader, BlockIdReader, BlockNumReader, HeaderProvider, StateProviderBox,
+    StateProviderFactory,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_transaction_pool::{
@@ -29,17 +30,23 @@ use reth_transaction_pool::{
 use reth_unicity_execution::{
     block::BlockProfile,
     block_executor::{replay_complete, BoundExecutionInput, UnicityEvmConfig},
-    derive_beacon_root, derive_prev_randao, derive_timestamp, technical_record_hash, InputRecordV2,
-    RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY,
+    derive_beacon_root, derive_prev_randao, derive_timestamp, technical_record_hash,
+    wire::SealBuildInput,
+    InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY,
 };
 use reth_unicity_payload::{
-    ExecutionPayloadJobResolver, FixedPayloadJobResolver, PayloadJobResolutionError,
-    ResolvedPayloadJob, SealJobRegistry, UnicityExecutionPayloadBuilder, UnicityPayloadAttributes,
+    prepare_seal_build, refusal_response, ExecutionPayloadJobResolver, FixedPayloadJobResolver,
+    PayloadJobResolutionError, ResolvedPayloadJob, SealBuildContext, SealBuildError,
+    SealJobRegistry, UnicityEngineValidator, UnicityExecutionPayloadBuilder,
+    UnicityParentAccountings, UnicityPayloadAttributes, UnicitySealConfig,
     DEFAULT_SEAL_JOB_CAPACITY,
 };
-use std::sync::{
-    atomic::{AtomicUsize, Ordering},
-    Arc,
+use std::{
+    ops::RangeBounds,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, OnceLock,
+    },
 };
 use support::provider::FixtureProvider;
 
@@ -117,6 +124,40 @@ impl BlockNumReader for Client {
     }
     fn block_number(&self, hash: B256) -> ProviderResult<Option<u64>> {
         Ok((hash == self.parent_hash).then_some(0))
+    }
+}
+
+impl HeaderProvider for Client {
+    type Header = Header;
+
+    fn header(&self, block_hash: B256) -> ProviderResult<Option<Self::Header>> {
+        Ok((block_hash == self.chain_spec.genesis_hash())
+            .then(|| self.chain_spec.genesis_header().clone()))
+    }
+
+    fn header_by_number(&self, number: u64) -> ProviderResult<Option<Self::Header>> {
+        Ok((number == 0).then(|| self.chain_spec.genesis_header().clone()))
+    }
+
+    fn headers_range(&self, _: impl RangeBounds<u64>) -> ProviderResult<Vec<Self::Header>> {
+        Ok(Vec::new())
+    }
+
+    fn sealed_header(&self, number: u64) -> ProviderResult<Option<SealedHeader<Self::Header>>> {
+        Ok((number == 0).then(|| {
+            SealedHeader::new(
+                self.chain_spec.genesis_header().clone(),
+                self.chain_spec.genesis_hash(),
+            )
+        }))
+    }
+
+    fn sealed_headers_while(
+        &self,
+        _: impl RangeBounds<u64>,
+        _: impl FnMut(&SealedHeader<Self::Header>) -> bool,
+    ) -> ProviderResult<Vec<SealedHeader<Self::Header>>> {
+        Ok(Vec::new())
     }
 }
 
@@ -605,4 +646,174 @@ fn seal_job_registry_is_bounded_shared_and_refuses_duplicates() {
     let (job_d, attrs_d) = resolved_job(&chain_spec, &parent, &root_a, &base);
     registry.insert(job_d).unwrap();
     assert!(shared.resolve(&config(&attrs_d)).is_ok());
+}
+/// A genesis-parent fixture for the seal build handler.
+///
+/// The provider serves only the genesis header, and the state is the signed real genesis so a job
+/// inserted by the handler can be resolved and built.
+fn seal_fixture() -> (
+    Client,
+    Arc<SealedHeader>,
+    RootInputV2,
+    UnicityPayloadAttributes,
+    SealBuildContext,
+    UnicityEngineValidator,
+) {
+    let genesis: Genesis =
+        serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
+    let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
+    let validator = UnicityEngineValidator::new(chain_spec.clone());
+    let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH));
+    let mut state = FixtureProvider::signed_genesis();
+    state.set_block_hash(0, GENESIS_HASH);
+    let client = Client { chain_spec, parent_hash: GENESIS_HASH, state };
+    let root = input(1, 1, GENESIS_HASH);
+    let attrs = attributes(&root, parent.timestamp);
+    let builder_config = Arc::new(OnceLock::new());
+    builder_config
+        .set(
+            EthereumBuilderConfig::new()
+                .with_gas_limit(PROFILE.max_gas)
+                .with_await_payload_on_missing(false),
+        )
+        .unwrap();
+    let context = SealBuildContext {
+        registry: SealJobRegistry::new(),
+        builder_config,
+        seal: UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR },
+        parent_accounting: UnicityParentAccountings::default(),
+    };
+    (client, parent, root, attrs, context, validator)
+}
+
+fn seal_input(root: &RootInputV2) -> SealBuildInput {
+    SealBuildInput { root_input: root.canonical_cbor().unwrap().into(), transitions: vec![] }
+}
+
+#[test]
+fn seal_build_rejects_non_canonical_root_input_as_invalid() {
+    let (client, _parent, _root, attrs, context, validator) = seal_fixture();
+    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let bad = SealBuildInput { root_input: vec![0x80].into(), transitions: vec![] };
+
+    let error =
+        prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &bad).unwrap_err();
+    assert!(matches!(error, SealBuildError::RootInput(_)));
+
+    let response = refusal_response(error).unwrap();
+    assert!(response.payload_status.is_invalid());
+    assert!(response
+        .payload_status
+        .status
+        .validation_error()
+        .unwrap()
+        .contains("canonical root input"));
+    assert!(context.registry.is_empty());
+}
+
+#[test]
+fn seal_build_rejects_malformed_attributes_as_invalid_before_inserting() {
+    let (client, _parent, root, mut attrs, context, validator) = seal_fixture();
+    // Cancun requires withdrawals in the attributes; ResolvedPayloadJob alone would tolerate a
+    // missing list, so this exercises the validator parity.
+    attrs.inner.withdrawals = None;
+    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+
+    let error =
+        prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &seal_input(&root))
+            .unwrap_err();
+    assert!(matches!(error, SealBuildError::Attributes(_)));
+    assert!(context.registry.is_empty(), "the refusal must happen before any job is inserted");
+
+    let response = refusal_response(error).unwrap();
+    assert!(response.payload_status.is_invalid());
+    assert!(response.payload_status.status.validation_error().is_some());
+}
+
+#[test]
+fn seal_build_reports_an_unknown_parent_as_syncing() {
+    let (client, _parent, root, attrs, context, validator) = seal_fixture();
+    let unknown = ForkchoiceState::same_hash(B256::repeat_byte(0x99));
+
+    let error = prepare_seal_build(
+        &client,
+        &context,
+        &validator,
+        &unknown,
+        Some(&attrs),
+        &seal_input(&root),
+    )
+    .unwrap_err();
+    assert_eq!(error, SealBuildError::UnknownParent);
+    assert!(refusal_response(error).unwrap().is_syncing());
+    assert!(context.registry.is_empty());
+}
+
+#[test]
+fn seal_build_requires_payload_attributes() {
+    let (client, _parent, root, _attrs, context, validator) = seal_fixture();
+    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+
+    let error = prepare_seal_build(&client, &context, &validator, &state, None, &seal_input(&root))
+        .unwrap_err();
+    assert_eq!(error, SealBuildError::AttributesMissing);
+
+    let response = refusal_response(error).unwrap();
+    assert_eq!(
+        response.payload_status.status.validation_error(),
+        Some("payload attributes are required")
+    );
+    assert!(context.registry.is_empty());
+}
+
+#[test]
+fn seal_build_refuses_a_duplicate_payload_id() {
+    let (client, _parent, root, attrs, context, validator) = seal_fixture();
+    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let input = seal_input(&root);
+
+    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input).unwrap();
+    let error = prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input)
+        .unwrap_err();
+    assert_eq!(error, SealBuildError::DuplicatePayloadId);
+    assert_eq!(
+        refusal_response(error).unwrap().payload_status.status.validation_error(),
+        Some("duplicate payload id")
+    );
+    assert_eq!(context.registry.len(), 1);
+}
+
+#[test]
+fn seal_build_job_resolves_with_the_published_builder_config() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+
+    let returned =
+        prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &seal_input(&root))
+            .unwrap();
+    assert_eq!(returned, attrs);
+    assert_eq!(context.registry.len(), 1);
+
+    // The payload service resolves the job through the exact configuration the handler published
+    // into the job, and the built block carries the commitment the attributes named.
+    let base = context.builder_config.get().unwrap().clone();
+    let accounting = context.parent_accounting.clone();
+    let builder = UnicityExecutionPayloadBuilder::new(client, test_pool(), context.registry, base)
+        .with_parent_accounting(accounting.clone());
+    let config =
+        PayloadConfig::new(parent.clone(), attrs.clone(), attrs.payload_id(&parent.hash()));
+    let payload = builder.build_empty_payload(config).unwrap();
+    assert_eq!(payload.block().header().extra_data.as_ref(), attrs.commitment.as_slice());
+    assert!(
+        accounting.get(&payload.block().hash()).is_some(),
+        "the build must publish its parent token for the next block"
+    );
+
+    // The token store is bounded and evicts the oldest insertion.
+    let bounded = UnicityParentAccountings::with_capacity(1);
+    let token = accounting.get(&payload.block().hash()).unwrap();
+    bounded.insert(B256::repeat_byte(0x01), token);
+    bounded.insert(B256::repeat_byte(0x02), token);
+    assert!(bounded.get(&B256::repeat_byte(0x01)).is_none());
+    assert!(bounded.get(&B256::repeat_byte(0x02)).is_some());
 }
