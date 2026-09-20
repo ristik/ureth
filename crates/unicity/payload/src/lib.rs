@@ -17,18 +17,19 @@
 //! - [`UnicityEngineTypes`] and [`UnicityNode`]: the Engine API types and the node wiring that
 //!   carry the Unicity attributes end to end and use [`UnicityExecutionPayloadBuilder`] with that
 //!   registry.
-//! - [`prepare_seal_build`] and the `engine_forkchoiceUpdatedWithSealV1` and
-//!   `engine_getPayloadWithSealV1` siblings: the build path that decodes the canonical input, binds
-//!   the parent, installs the job and forwards the forkchoice update, and the response that returns
-//!   the built payload, its block value and the companion.
+//! - [`prepare_seal_build`] and the `engine_forkchoiceUpdatedWithSealV1`,
+//!   `engine_getPayloadWithSealV1` and `engine_newPayloadWithSealV1` siblings: the build path that
+//!   decodes the canonical input, binds the parent, installs the job and forwards the forkchoice
+//!   update; the response that returns the built payload, its block value and the companion; and
+//!   the import path that re-executes the payload and records its accounting token.
 //!
 //! THE SEAL METHODS ARE NOT ADVERTISED. The siblings are registered on the authenticated engine
 //! module, but `engine_exchangeCapabilities` is the stock list and no capability names them, so a
 //! client cannot discover them. U3f advertises all three seal methods together or none. The
 //! execution-aware path remains structurally bound only: its resolver performs structural binding,
 //! while certificate/JWT authentication and exact-parent state provenance remain caller
-//! prerequisites. `engine_newPayloadWithSealV1` does not exist yet, and the build-path companion
-//! carries no witnesses because `sealBuildInput` supplies none; bft-core holds the authenticated
+//! prerequisites. The import path does not verify witnesses, and the build-path companion carries
+//! no witnesses because `sealBuildInput` supplies none; bft-core holds the authenticated
 //! certificate and must populate them before dissemination. See the crate README.
 
 pub mod engine;
@@ -46,10 +47,10 @@ pub use registry::{
     DEFAULT_SEAL_JOB_CAPACITY,
 };
 pub use rpc::{
-    build_seal_companion, companion_not_retained_error, prepare_seal_build, refusal_response,
-    GetPayloadWithSealV1Response, SealBuildContext, SealBuildError, SealCompanionError,
-    UnicityEngineApiBuilder, UnicityEngineApiImpl, UnicityEngineApiModule, BUILD_PROVENANCE,
-    COMPANION_NOT_RETAINED_CODE,
+    build_seal_companion, companion_not_retained_error, import_response, prepare_seal_build,
+    refusal_response, GetPayloadWithSealV1Response, SealBuildContext, SealBuildError,
+    SealCompanionError, SealImportError, UnicityEngineApiBuilder, UnicityEngineApiImpl,
+    UnicityEngineApiModule, BUILD_PROVENANCE, COMPANION_NOT_RETAINED_CODE,
 };
 
 use alloy_eips::eip4895::Withdrawal;

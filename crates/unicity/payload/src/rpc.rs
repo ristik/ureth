@@ -1,4 +1,5 @@
-//! The `engine_forkchoiceUpdatedWithSealV1` and `engine_getPayloadWithSealV1` siblings.
+//! The `engine_forkchoiceUpdatedWithSealV1`, `engine_getPayloadWithSealV1` and
+//! `engine_newPayloadWithSealV1` siblings.
 //!
 //! This is a jsonrpsee trait in the `engine` namespace, separate from reth's own
 //! [`reth_rpc_api::EngineApi`], so the fork adds methods without editing an upstream file. It is
@@ -34,14 +35,15 @@ use std::{
 };
 
 use alloy_consensus::Header;
-use alloy_primitives::U256;
+use alloy_primitives::{B256, U256};
 use alloy_rpc_types_engine::{
-    ExecutionPayloadEnvelopeV3, ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadId,
-    PayloadStatusEnum,
+    CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadEnvelopeV3,
+    ExecutionPayloadSidecar, ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadId,
+    PayloadStatus, PayloadStatusEnum,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc, types::ErrorObject, RpcModule};
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
-use reth_engine_primitives::{ConsensusEngineHandle, EngineApiValidator};
+use reth_engine_primitives::{ConsensusEngineHandle, EngineApiValidator, PayloadValidator};
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_evm_ethereum::EthEvmConfig;
 use reth_node_builder::{
@@ -52,12 +54,13 @@ use reth_payload_builder::PayloadStore;
 use reth_payload_primitives::{
     validate_payload_timestamp, EngineApiMessageVersion, MessageValidationKind,
 };
+use reth_revm::database::StateProviderDatabase;
 use reth_rpc_api::IntoEngineApiRpcModule;
 use reth_rpc_engine_api::EngineApiError;
-use reth_storage_api::HeaderProvider;
+use reth_storage_api::{HeaderProvider, StateProviderFactory};
 use reth_unicity_execution::{
     block::BlockAccountingError,
-    block_executor::UnicityEvmConfig,
+    block_executor::{replay_complete, UnicityEvmConfig},
     wire::{
         bind_completed_parent, bind_validated_genesis, CanonicalCborError, SealBuildInput,
         SealCompanion,
@@ -102,6 +105,23 @@ pub trait UnicityEngineApi {
         &self,
         payload_id: PayloadId,
     ) -> RpcResult<GetPayloadWithSealV1Response>;
+
+    /// `engine_newPayloadWithSealV1`.
+    ///
+    /// Validates and records one imported seal block. This is the follower and re-execution path,
+    /// and it is what lets a node that followed round N lead round N+1 by recording the imported
+    /// block's accounting token. It does not verify witnesses: the shard-node adapter runs
+    /// `VerifyCompanionWitnesses` before calling this method and reth accepts that verdict over the
+    /// JWT-authenticated channel. `sealCompanion.rootInput` is taken as the structured input to
+    /// execute against, nothing more.
+    #[method(name = "newPayloadWithSealV1")]
+    async fn new_payload_with_seal_v1(
+        &self,
+        payload: ExecutionPayloadV3,
+        expected_blob_versioned_hashes: Vec<B256>,
+        parent_beacon_block_root: B256,
+        seal_companion: SealCompanion,
+    ) -> RpcResult<PayloadStatus>;
 }
 
 /// The `engine_getPayloadWithSealV1` response.
@@ -173,6 +193,58 @@ impl fmt::Display for SealBuildError {
 }
 
 impl std::error::Error for SealBuildError {}
+
+/// A refusal from the seal import flow.
+///
+/// Every variant maps to a [`PayloadStatus`]: [`Self::UnknownParent`] and
+/// [`Self::ParentAccountingMissing`] are SYNCING, [`Self::Provider`] is an internal RPC error, and
+/// the rest are INVALID with this error's display text in `validationError`. `ACCEPTED` is never
+/// produced.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SealImportError {
+    /// `sealCompanion.rootInput` is not a canonical root input.
+    RootInput(CanonicalCborError),
+    /// The caller supplied blob versioned hashes, which the bounded Cancun profile forbids.
+    UnexpectedBlobHashes {
+        /// Number of hashes the caller supplied.
+        count: usize,
+    },
+    /// The payload could not be converted into a block with recovered senders.
+    Payload(String),
+    /// The payload parent header is not local.
+    UnknownParent,
+    /// The parent is local but no accounting token is recorded for it.
+    ParentAccountingMissing,
+    /// The decoded input does not bind to the resolved parent.
+    Binding(BlockAccountingError),
+    /// Local execution rejected the block.
+    Replay(String),
+    /// A provider read failed; this is internal state, not caller input.
+    Provider(String),
+}
+
+impl fmt::Display for SealImportError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::RootInput(error) => {
+                write!(formatter, "rootInput is not a canonical root input: {error}")
+            }
+            Self::UnexpectedBlobHashes { count } => {
+                write!(formatter, "blob versioned hashes are unsupported ({count} supplied)")
+            }
+            Self::Payload(error) => write!(formatter, "payload is not well formed: {error}"),
+            Self::UnknownParent => formatter.write_str("payload parent is unknown"),
+            Self::ParentAccountingMissing => {
+                formatter.write_str("parent accounting token is not retained")
+            }
+            Self::Binding(error) => write!(formatter, "parent binding failed: {error:?}"),
+            Self::Replay(error) => write!(formatter, "local execution rejected the block: {error}"),
+            Self::Provider(error) => write!(formatter, "provider read failed: {error}"),
+        }
+    }
+}
+
+impl std::error::Error for SealImportError {}
 
 /// Resolves and installs the seal job for one build request.
 ///
@@ -340,6 +412,25 @@ pub fn refusal_response(error: SealBuildError) -> Result<ForkchoiceUpdated, Engi
     }
 }
 
+/// Maps an import refusal to the handler's [`PayloadStatus`].
+///
+/// A missing parent token is SYNCING rather than INVALID. This is an interpretation of D2: the
+/// block is not invalid, the node simply cannot establish the parent accounting until the parent
+/// has been seal-executed locally through this same path. Treating a never-seal-executed parent as
+/// not yet local is what makes the seal chain import contiguous. A provider read failure is
+/// internal state and returns an RPC error. Nothing here ever produces `ACCEPTED`.
+pub fn import_response(error: SealImportError) -> Result<PayloadStatus, EngineApiError> {
+    match error {
+        SealImportError::UnknownParent | SealImportError::ParentAccountingMissing => {
+            Ok(PayloadStatus::from_status(PayloadStatusEnum::Syncing))
+        }
+        error @ SealImportError::Provider(_) => Err(EngineApiError::Internal(Box::new(error))),
+        error => Ok(PayloadStatus::from_status(PayloadStatusEnum::Invalid {
+            validation_error: error.to_string(),
+        })),
+    }
+}
+
 /// Runtime state of the seal build handler.
 pub struct UnicityEngineApiImpl<Provider> {
     provider: Provider,
@@ -430,11 +521,137 @@ where
     }
 }
 
+impl<Provider> UnicityEngineApiImpl<Provider>
+where
+    Provider: HeaderProvider<Header = Header>
+        + ChainSpecProvider<ChainSpec = ChainSpec>
+        + StateProviderFactory
+        + Send
+        + Sync
+        + 'static,
+{
+    /// Validates and records one imported seal block.
+    ///
+    /// The verdicts are [`PayloadStatus`] values: VALID, INVALID with the refusal in
+    /// `validationError`, or SYNCING. A provider read failure is an internal error. This method
+    /// does not verify witnesses and does not forward to the consensus engine; the shard-node
+    /// adapter has already authenticated the companion over the JWT channel.
+    pub fn new_payload_with_seal(
+        &self,
+        payload: ExecutionPayloadV3,
+        expected_blob_versioned_hashes: Vec<B256>,
+        parent_beacon_block_root: B256,
+        seal_companion: &SealCompanion,
+    ) -> Result<PayloadStatus, EngineApiError> {
+        match self.try_import_seal_payload(
+            payload,
+            expected_blob_versioned_hashes,
+            parent_beacon_block_root,
+            seal_companion,
+        ) {
+            Ok(block_hash) => Ok(PayloadStatus::new(PayloadStatusEnum::Valid, Some(block_hash))),
+            Err(error) => import_response(error),
+        }
+    }
+
+    /// Runs the ordered import flow and returns the imported block hash on success.
+    ///
+    /// Sender recovery is this path's responsibility: `replay_complete` documents that it does not
+    /// recover senders and requires the caller to have verified them, so the payload validator's
+    /// `ensure_well_formed_payload` recovers them here before the block reaches the executor.
+    fn try_import_seal_payload(
+        &self,
+        payload: ExecutionPayloadV3,
+        expected_blob_versioned_hashes: Vec<B256>,
+        parent_beacon_block_root: B256,
+        seal_companion: &SealCompanion,
+    ) -> Result<B256, SealImportError> {
+        // 1. Decode the canonical root input.
+        let root = seal_companion.decode_root_input().map_err(SealImportError::RootInput)?;
+        // 2. The bounded profile disables blobs, so any expected hash is a refusal rather than
+        //    something to ignore.
+        if !expected_blob_versioned_hashes.is_empty() {
+            return Err(SealImportError::UnexpectedBlobHashes {
+                count: expected_blob_versioned_hashes.len(),
+            });
+        }
+        // 3. Convert the payload and recover senders.
+        let execution_data = ExecutionData {
+            payload: ExecutionPayload::V3(payload),
+            sidecar: ExecutionPayloadSidecar::v3(CancunPayloadFields {
+                parent_beacon_block_root,
+                versioned_hashes: expected_blob_versioned_hashes,
+            }),
+        };
+        let block = self
+            .validator
+            .ensure_well_formed_payload(execution_data)
+            .map_err(|error| SealImportError::Payload(error.to_string()))?;
+
+        // 4. Resolve the payload parent. Absence is a sync condition, not a bad block.
+        let parent_hash = block.header().parent_hash;
+        let parent = self
+            .provider
+            .sealed_header_by_hash(parent_hash)
+            .map_err(|error| SealImportError::Provider(error.to_string()))?
+            .ok_or(SealImportError::UnknownParent)?;
+
+        // 5. Bind through the U3a entry points. The token is the genesis bootstrap or the token the
+        //    build path or a previous import published, never a value derived from the header.
+        let chain_spec = self.provider.chain_spec();
+        let genesis_hash = chain_spec.genesis_hash();
+        let bound = if parent.number == 0 && parent.hash() == genesis_hash {
+            bind_validated_genesis(
+                root,
+                self.context.seal.profile,
+                &parent,
+                genesis_hash,
+                self.context.seal.fee_collector,
+            )
+            .map_err(SealImportError::Binding)?
+        } else {
+            let token = self
+                .context
+                .parent_accounting
+                .get(&parent.hash())
+                .ok_or(SealImportError::ParentAccountingMissing)?;
+            bind_completed_parent(
+                root,
+                self.context.seal.profile,
+                &parent,
+                token,
+                self.context.seal.fee_collector,
+            )
+            .map_err(SealImportError::Binding)?
+        };
+        let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec), Arc::new(bound));
+
+        // 6. Re-use the shared replay rather than a second execution or comparison path.
+        let state_provider = self
+            .provider
+            .state_by_block_hash(parent_hash)
+            .map_err(|error| SealImportError::Provider(error.to_string()))?;
+        let replay = replay_complete(
+            &config,
+            StateProviderDatabase::new(state_provider.as_ref()),
+            &state_provider,
+            &block,
+        )
+        .map_err(|error| SealImportError::Replay(error.to_string()))?;
+
+        // 7. Record the imported block's accounting so a node that followed it can lead on it next.
+        let block_hash = block.hash();
+        self.context.parent_accounting.insert(block_hash, replay.parent);
+        Ok(block_hash)
+    }
+}
+
 #[async_trait::async_trait]
 impl<Provider> UnicityEngineApiServer for UnicityEngineApiImpl<Provider>
 where
     Provider: HeaderProvider<Header = Header>
         + ChainSpecProvider<ChainSpec = ChainSpec>
+        + StateProviderFactory
         + Send
         + Sync
         + 'static,
@@ -471,6 +688,21 @@ where
         payload_id: PayloadId,
     ) -> RpcResult<GetPayloadWithSealV1Response> {
         Ok(self.get_payload_with_seal(payload_id).await?)
+    }
+
+    async fn new_payload_with_seal_v1(
+        &self,
+        payload: ExecutionPayloadV3,
+        expected_blob_versioned_hashes: Vec<B256>,
+        parent_beacon_block_root: B256,
+        seal_companion: SealCompanion,
+    ) -> RpcResult<PayloadStatus> {
+        Ok(self.new_payload_with_seal(
+            payload,
+            expected_blob_versioned_hashes,
+            parent_beacon_block_root,
+            &seal_companion,
+        )?)
     }
 }
 
@@ -525,6 +757,7 @@ where
     N: FullNodeComponents<Types = UnicityNode>,
     N::Provider: HeaderProvider<Header = Header>
         + ChainSpecProvider<ChainSpec = ChainSpec>
+        + StateProviderFactory
         + Clone
         + Send
         + Sync
