@@ -138,10 +138,13 @@ still returns nothing outside `crates/unicity`.
 inserts one `ResolvedPayloadJob` into that registry and then starts an ordinary build, which
 resolves that exact job.
 
-The registry is bounded to 16 entries and evicts the oldest insertion first, refuses a duplicate
-payload id, and shares its entries across clones. No Engine API method, RPC module, capability
-string or validator rule is added, so a running node's advertised surface is unchanged. The node
-wiring is compile-checked, not launch-tested; that is the M1 gate.
+The registry tracks the node's `max_payload_tasks` (at least 16 and four times that value),
+evicts the oldest insertion first, refuses a duplicate payload id, and shares its entries across
+clones. The node also publishes the exact `EthereumBuilderConfig` it hands to the payload builder,
+because a seal job is constructed outside the node and resolution rejects a job built from a
+different configuration. No Engine API method, RPC module, capability string or validator rule is
+added, so a running node's advertised surface is unchanged. The node wiring is compile-checked, not
+launch-tested; that is the M1 gate.
 
 Adding the node to this crate adds dependency edges from `reth-unicity-payload` to
 `reth-node-builder`, `reth-node-ethereum`, `reth-engine-primitives` and `eyre`. No upstream source
