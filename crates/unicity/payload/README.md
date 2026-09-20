@@ -83,11 +83,11 @@ header, because the header carries the gross gas but not the system/ordinary spl
 would let a caller invent the parent's base-fee input. The store is bounded and evicts the oldest
 entry first.
 
-Only blocks this node built are recorded. A follower that imported the parent through
-`engine_newPayloadWithSealV1` has no token for it, so a node cannot currently build on an imported
-parent and the method refuses that parent as an internal error. U3e's import path executes imported
-blocks through the same executor and must record the token there too; that is what lets a follower
-lead in a rotating-leader shard. The token is not and must not be derived from the parent header.
+Both the build path and the import path record the opaque `CompletedParent` token for each block
+they process: the build path after a successful build, and `engine_newPayloadWithSealV1` after a
+successful replay. A node that followed round N can therefore lead round N+1 in a rotating-leader
+shard, which was previously impossible because the token existed only for blocks the node built.
+The token is never derived from the parent header.
 
 `engine_getPayloadWithSealV1(payloadId)` resolves the built payload the way the stock `getPayloadV3`
 path does and returns `{ executionPayload, blockValue, sealCompanion }`, with an unknown payload id
@@ -121,6 +121,27 @@ client, which is the surface this fork exists to keep small. So this method retu
 fields the node owns, and bft-core supplies the verifier-owned part before dissemination. This crate
 invents no witnesses, synthesises nothing from material it does not have, and does not widen
 `sealBuildInput`.
+
+`engine_newPayloadWithSealV1(executionPayloadV3, expectedBlobVersionedHashes, parentBeaconBlockRoot,
+sealCompanion)` is the import path. It decodes `sealCompanion.rootInput` with the canonical codec,
+refuses a non-empty blob versioned hash list because the bounded profile disables blobs, converts
+the payload and recovers senders, resolves the parent, binds through the U3a entry points, calls the
+shared `replay_complete`, records the returned accounting token for the imported block, and returns
+VALID. A state-root or execution mismatch is INVALID with the refusal in `validationError`. An
+unknown parent is SYNCING. It does not verify witnesses; the shard-node adapter runs
+`VerifyCompanionWitnesses` before the call and reth accepts that verdict over the JWT-authenticated
+channel.
+
+A local parent without a recorded token is also SYNCING, not INVALID. This is a reading of D2: the
+block is not invalid, and the node cannot establish the parent accounting until the parent has been
+seal-executed locally through this same path. Treating a never-seal-executed parent as not yet local
+is what makes the seal chain import contiguous. The method never re-executes the parent recursively
+and never mints a token from a header.
+
+The import path does not persist the block or its post-state. `replay_complete` validates the block
+and mints the accounting token, but the node's database is unchanged, so a later import or build
+cannot resolve this block as a parent until it is persisted. That is an open gap this unit does not
+close; the adapter or a later unit owns persistence.
 
 The node keeps the stock EVM configuration out of Unicity builds. `UnicityExecutionPayloadBuilder`
 resolves the per-job `UnicityEvmConfig` instead, so an operator's EVM caches or JIT settings do not
