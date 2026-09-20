@@ -3,11 +3,12 @@
 The commitment-only `UnicityPayloadBuilder` preserves U2's provision interface.
 `UnicityExecutionPayloadBuilder` connects the actual transaction-pool payload builder to the
 shared Unicity executor. `UnicityEngineTypes` and `UnicityNode` carry the Unicity payload
-attributes end to end and use that builder with a bounded `SealJobRegistry`.
+attributes end to end and use that builder with a bounded `SealJobRegistry`. The
+`engine_forkchoiceUpdatedWithSealV1` sibling is registered on the authenticated engine module.
 
-No Engine API method and no capability is registered, so the standard `engine_*` surface is
-unchanged and normal node operation cannot reach a seal method. The node wiring is the attachment
-point U3c to U3f build on, not activation of D2.
+The method is reachable but not advertised: `engine_exchangeCapabilities` is the stock list and no
+capability names it, so the standard `engine_*` surface a client can discover is unchanged. U3f
+advertises all three seal methods together or none.
 
 ## Per-job authority
 
@@ -47,9 +48,10 @@ completion path; a payload ID or caller-provided gas scalar cannot mint one.
 `UnicityNode` implements `NodeTypes` with `UnicityEngineTypes` and the stock Ethereum network,
 pool, executor and consensus components. Its payload component uses
 `UnicityExecutionPayloadBuilder` with a `SealJobRegistry` the node holds. All clones of the
-registry see the same entries, so the payload service and a future seal method share one
-collection. The engine API is the stock `BasicEngineApiBuilder` and the validator is the stock
-Ethereum payload structure and version-field validation with no Unicity-specific verdict.
+registry see the same entries, so the payload service and the seal method share one collection. The
+engine API is the stock `BasicEngineApiBuilder` plus the `engine_forkchoiceUpdatedWithSealV1`
+sibling, and the validator is the stock Ethereum payload structure and version-field validation
+with no Unicity-specific verdict.
 
 A seal job is constructed outside the node, so every piece of node configuration it needs must be
 published by the node. The node publishes the exact `EthereumBuilderConfig` it hands to the payload
@@ -59,11 +61,33 @@ builder through `UnicityNode::builder_config`, and raises the registry capacity 
 next-block attributes from its own copy and refuses a job that does not match; a second derivation
 would drift and fail resolution at runtime.
 
+## The seal build method
+
+`engine_forkchoiceUpdatedWithSealV1(forkchoiceState, payloadAttributesV3, sealBuildInput)` runs the
+D2 build flow in order: decode `rootInput` through the canonical CBOR codec; resolve
+`headBlockHash`, where an unknown parent is SYNCING; bind the decoded input to that parent through
+the U3a entry points; build the `UnicityEvmConfig` and `ResolvedPayloadJob` with the node's
+published `EthereumBuilderConfig`; insert the job into the registry; and forward to the consensus
+handle. A refusal from decoding, binding, the job checks or a duplicate payload id is INVALID with
+the refusal in `validationError`. Absent `payloadAttributes` is INVALID. A missing
+`builder_config` or a missing non-genesis parent accounting token is an internal error, not caller
+input.
+
+The method does not trial-execute the system operation. "Runs the system operation as step 0"
+describes where the privileged `open` and `finalize` pair sits in the built block, which the bounded
+kernel already does. A failed system operation therefore surfaces as a failed build.
+
+The build path retains the opaque `CompletedParent` token for each block it builds and looks it up
+when a later build names that block as its parent. The token is never derived from the parent
+header, because the header carries the gross gas but not the system/ordinary split, so deriving it
+would let a caller invent the parent's base-fee input. The store is bounded and evicts the oldest
+entry first.
+
 The node keeps the stock EVM configuration out of Unicity builds. `UnicityExecutionPayloadBuilder`
 resolves the per-job `UnicityEvmConfig` instead, so an operator's EVM caches or JIT settings do not
 apply to a Unicity payload. The node-level EVM configuration is the next value that will have to be
-published through the same slot mechanism as `builder_config` rather than a second channel; U3c to
-U3f must do that before activation.
+published through the same slot mechanism as `builder_config` rather than a second channel; U3f
+must do that before activation.
 
 ## Verification scope
 
@@ -73,8 +97,10 @@ beacon-root contract. The copies in this crate are test-only; they are not a dep
 or a separately approved monetary configuration. The independent genesis oracle and provenance
 are retained under `../execution/testdata/`.
 
-These tests exercise in-process payload construction, replay and the bounded job registry. The
-node wiring is compile-checked but not launch-tested here: launching the full node and exchanging
-Engine RPC remains the M1 gate. They do not demonstrate an Engine RPC exchange, certificate
-authentication, persistence or public activation. `v0` and the bft-core execution-client pin are
-unchanged.
+These tests exercise in-process payload construction, replay, the bounded job registry and the
+seal build refusals: a non-canonical `rootInput`, an unknown parent, absent attributes, a duplicate
+payload id, and a job that resolves to the same configuration the payload service uses. The node
+wiring and the RPC registration are compile-checked but not launch-tested here: launching the full
+node and exchanging Engine RPC remains the M1 gate. They do not demonstrate an Engine RPC exchange,
+certificate authentication, persistence or public activation. `v0` and the bft-core
+execution-client pin are unchanged.
