@@ -18,24 +18,21 @@ use crate::{
     UnicityPayloadAttributes,
 };
 
-/// Number of seal build jobs [`SealJobRegistry`] holds when it is not given an explicit capacity.
+/// Floor for [`SealJobRegistry`] capacity.
 ///
-/// The upstream payload service deduplicates by payload id and keeps a job alive while it builds,
-/// and [`BasicPayloadJobGenerator`](reth_basic_payload_builder::BasicPayloadJobGenerator) admits at
-/// most `max_payload_tasks` builds to execute at once. That value is
-/// `--builder.max-payload-tasks`, three by default. Sixteen exceeds that default by more than five
-/// times, so with the default configuration every in-flight job stays resident and is never
-/// evicted while its build still needs it.
-///
-/// If an operator raises `max_payload_tasks` above the registry capacity, a build can outlive its
-/// own entry. That is fail-safe rather than a wrong result: the oldest insertion is evicted first,
-/// so the evicted job can no longer resolve and the build fails with "payload job is absent". A
-/// job that has been evicted is never silently replaced by a different one.
+/// The node does not use this number directly. When it constructs the payload builder it raises the
+/// registry capacity to `max(DEFAULT_SEAL_JOB_CAPACITY, max_payload_tasks * 4)`, where
+/// `max_payload_tasks` is the configured `--builder.max-payload-tasks`. Upstream
+/// [`BasicPayloadJobGenerator`](reth_basic_payload_builder::BasicPayloadJobGenerator) admits at
+/// most that many builds to execute at once, so the four-times multiplier keeps the registry above
+/// the number of builds that can be in flight and leaves headroom for jobs that are alive but not
+/// yet executing. Sixteen is the floor for a node that leaves the default configuration in place.
 pub const DEFAULT_SEAL_JOB_CAPACITY: usize = 16;
 
 #[derive(Debug)]
 struct SealJobRegistryInner {
     jobs: VecDeque<ResolvedPayloadJob>,
+    capacity: usize,
 }
 
 /// Bounded, shareable registry of seal build jobs waiting to be resolved.
@@ -46,7 +43,8 @@ struct SealJobRegistryInner {
 /// `try_build`, `build_empty_payload` and missing-payload path, so the registry only has to keep a
 /// job until its build has started.
 ///
-/// The registry is bounded to [`DEFAULT_SEAL_JOB_CAPACITY`] entries and evicts in insertion order:
+/// The capacity is at least [`DEFAULT_SEAL_JOB_CAPACITY`] and tracks the node's
+/// `max_payload_tasks` through [`SealJobRegistry::grow_capacity`]. It evicts in insertion order:
 /// the oldest job is dropped when a new one would exceed the capacity. A duplicate payload id is
 /// refused instead of replacing the existing job, matching
 /// [`FixedPayloadJobResolver`](crate::FixedPayloadJobResolver) and the fact that a payload id
@@ -54,7 +52,6 @@ struct SealJobRegistryInner {
 /// the method that inserts jobs see one registry.
 #[derive(Clone, Debug)]
 pub struct SealJobRegistry {
-    capacity: usize,
     inner: Arc<Mutex<SealJobRegistryInner>>,
 }
 
@@ -73,14 +70,23 @@ impl SealJobRegistry {
     pub fn with_capacity(capacity: usize) -> Self {
         assert!(capacity > 0, "seal job registry capacity must be greater than zero");
         Self {
-            capacity,
-            inner: Arc::new(Mutex::new(SealJobRegistryInner { jobs: VecDeque::new() })),
+            inner: Arc::new(Mutex::new(SealJobRegistryInner { jobs: VecDeque::new(), capacity })),
         }
     }
 
-    /// Returns the configured capacity.
-    pub const fn capacity(&self) -> usize {
-        self.capacity
+    /// Returns the current capacity.
+    pub fn capacity(&self) -> usize {
+        self.lock().capacity
+    }
+
+    /// Raises the capacity to `capacity` if that is larger.
+    ///
+    /// The node calls this once when it constructs the payload builder, so the registry tracks
+    /// `--builder.max-payload-tasks`. Capacity never shrinks, so a job already held cannot be
+    /// evicted by a later, smaller configuration.
+    pub fn grow_capacity(&self, capacity: usize) {
+        let mut inner = self.lock();
+        inner.capacity = inner.capacity.max(capacity);
     }
 
     /// Returns the number of jobs currently held.
@@ -102,7 +108,7 @@ impl SealJobRegistry {
         if inner.jobs.iter().any(|existing| existing.payload_id == job.payload_id) {
             return Err(PayloadJobResolutionError("duplicate payload job"));
         }
-        if inner.jobs.len() == self.capacity {
+        if inner.jobs.len() >= inner.capacity {
             inner.jobs.pop_front();
         }
         inner.jobs.push_back(job);

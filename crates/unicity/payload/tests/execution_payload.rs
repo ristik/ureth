@@ -571,6 +571,13 @@ fn seal_job_registry_is_bounded_shared_and_refuses_duplicates() {
 
     assert_eq!(SealJobRegistry::new().capacity(), DEFAULT_SEAL_JOB_CAPACITY);
 
+    // Capacity only grows, so a later smaller configuration cannot evict a held job.
+    let grown = SealJobRegistry::with_capacity(2);
+    grown.grow_capacity(5);
+    assert_eq!(grown.capacity(), 5);
+    grown.grow_capacity(3);
+    assert_eq!(grown.capacity(), 5, "capacity never shrinks");
+
     let registry = SealJobRegistry::with_capacity(2);
     assert!(registry.is_empty());
     registry.insert(job_a).unwrap();

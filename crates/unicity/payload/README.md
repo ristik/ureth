@@ -51,10 +51,19 @@ registry see the same entries, so the payload service and a future seal method s
 collection. The engine API is the stock `BasicEngineApiBuilder` and the validator is the stock
 Ethereum payload structure and version-field validation with no Unicity-specific verdict.
 
+A seal job is constructed outside the node, so every piece of node configuration it needs must be
+published by the node. The node publishes the exact `EthereumBuilderConfig` it hands to the payload
+builder through `UnicityNode::builder_config`, and raises the registry capacity to
+`max(16, max_payload_tasks * 4)` when that builder is constructed. A method that creates a
+`ResolvedPayloadJob` must pass the published configuration, because the builder re-derives the
+next-block attributes from its own copy and refuses a job that does not match; a second derivation
+would drift and fail resolution at runtime.
+
 The node keeps the stock EVM configuration out of Unicity builds. `UnicityExecutionPayloadBuilder`
 resolves the per-job `UnicityEvmConfig` instead, so an operator's EVM caches or JIT settings do not
-apply to a Unicity payload. U3c to U3f must decide how the node-level EVM configuration reaches a
-seal build before activation.
+apply to a Unicity payload. The node-level EVM configuration is the next value that will have to be
+published through the same slot mechanism as `builder_config` rather than a second channel; U3c to
+U3f must do that before activation.
 
 ## Verification scope
 

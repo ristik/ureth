@@ -11,7 +11,7 @@
 //! assembled from upstream components exactly as the plain Ethereum node assembles it, and this
 //! file contains no method registration, capability list or seal parameter type.
 
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use alloy_rpc_types_engine::ExecutionData;
 use reth_chainspec::ChainSpec;
@@ -42,6 +42,7 @@ use reth_transaction_pool::{PoolTransaction, TransactionPool};
 
 use crate::{
     SealJobRegistry, UnicityEngineTypes, UnicityExecutionPayloadBuilder, UnicityPayloadAttributes,
+    DEFAULT_SEAL_JOB_CAPACITY,
 };
 
 /// A Unicity execution node.
@@ -53,22 +54,37 @@ use crate::{
 /// Engine API, is the stock Ethereum component.
 ///
 /// A caller that needs to insert seal jobs shares the registry with the node by constructing it
-/// with [`UnicityNode::new`]; all clones observe the same entries.
+/// with [`UnicityNode::new`]; all clones observe the same entries. The node also publishes the
+/// exact [`EthereumBuilderConfig`] it hands to the payload builder, because a seal job is
+/// constructed outside the node and must reproduce that configuration for resolution to succeed.
 #[derive(Debug, Clone, Default)]
 #[non_exhaustive]
 pub struct UnicityNode {
     registry: SealJobRegistry,
+    builder_config: Arc<OnceLock<EthereumBuilderConfig>>,
 }
 
 impl UnicityNode {
     /// Creates a node whose payload builder resolves through `registry`.
-    pub const fn new(registry: SealJobRegistry) -> Self {
-        Self { registry }
+    pub fn new(registry: SealJobRegistry) -> Self {
+        Self { registry, builder_config: Arc::new(OnceLock::new()) }
     }
 
     /// Returns the seal job registry shared with the payload builder.
     pub const fn registry(&self) -> &SealJobRegistry {
         &self.registry
+    }
+
+    /// Returns the exact payload builder configuration the node resolved, once the payload builder
+    /// has been constructed.
+    ///
+    /// A seal method constructs [`ResolvedPayloadJob`](crate::ResolvedPayloadJob) outside the node
+    /// and must pass this value as its builder configuration. The builder re-derives the next-block
+    /// attributes from the configuration it was handed and refuses a job that does not match, so a
+    /// caller that derived its own copy would drift and fail resolution at runtime. This returns
+    /// `None` before the payload service has been built.
+    pub fn builder_config(&self) -> Option<&EthereumBuilderConfig> {
+        self.builder_config.get()
     }
 }
 
@@ -100,6 +116,7 @@ where
             .executor(EthereumExecutorBuilder::default())
             .payload(BasicPayloadServiceBuilder::new(UnicityPayloadBuilderBuilder::new(
                 self.registry.clone(),
+                self.builder_config.clone(),
             )))
             .network(EthereumNetworkBuilder::default())
             .consensus(EthereumConsensusBuilder::default())
@@ -120,17 +137,24 @@ where
 /// Builds [`UnicityExecutionPayloadBuilder`](crate::UnicityExecutionPayloadBuilder) for the
 /// payload service.
 ///
-/// The builder owns a clone of the node's [`SealJobRegistry`], so the registry the payload service
-/// resolves through is the same one a seal method will insert into.
+/// The builder owns a clone of the node's [`SealJobRegistry`] and a clone of the node's shared
+/// builder-configuration slot. On construction it derives the configuration once, publishes it in
+/// that slot, and hands the same value to the payload builder, so a seal method and the payload
+/// service can never resolve against different configurations.
 #[derive(Clone, Debug)]
 pub struct UnicityPayloadBuilderBuilder {
     registry: SealJobRegistry,
+    builder_config: Arc<OnceLock<EthereumBuilderConfig>>,
 }
 
 impl UnicityPayloadBuilderBuilder {
-    /// Creates a payload builder builder that resolves through `registry`.
-    pub const fn new(registry: SealJobRegistry) -> Self {
-        Self { registry }
+    /// Creates a payload builder builder that resolves through `registry` and publishes the
+    /// resolved configuration into `builder_config`.
+    pub const fn new(
+        registry: SealJobRegistry,
+        builder_config: Arc<OnceLock<EthereumBuilderConfig>>,
+    ) -> Self {
+        Self { registry, builder_config }
     }
 
     /// Returns the registry shared with the resulting payload builder.
@@ -170,17 +194,38 @@ where
         // The commitment in each job overrides `extra_data` inside the builder, so this base value
         // is only the node's configured default for paths that never enter a Unicity job. The
         // remaining fields are the stock Ethereum payload builder configuration.
+        let base_config = EthereumBuilderConfig::new()
+            .with_gas_limit(gas_limit)
+            .with_max_blobs_per_block(conf.max_blobs_per_block())
+            .with_extra_data(conf.extra_data())
+            .with_skip_state_root(skip_state_root);
+
+        // Publish the exact value handed to the builder. A seal job is constructed outside the
+        // node, so it must read this slot rather than derive its own copy. `get_or_init` keeps the
+        // first value, so even a second construction of the payload service hands out the same
+        // configuration that was published.
+        let base_config = self.builder_config.get_or_init(|| base_config).clone();
+
+        // Track `max_payload_tasks` so the registry stays above the number of builds that can be in
+        // flight. `grow_capacity` only raises the floor, so an already-held job is never evicted.
+        self.registry.grow_capacity(registry_capacity(conf.max_payload_tasks()));
+
         Ok(UnicityExecutionPayloadBuilder::new(
             ctx.provider().clone(),
             pool,
             self.registry,
-            EthereumBuilderConfig::new()
-                .with_gas_limit(gas_limit)
-                .with_max_blobs_per_block(conf.max_blobs_per_block())
-                .with_extra_data(conf.extra_data())
-                .with_skip_state_root(skip_state_root),
+            base_config,
         ))
     }
+}
+
+/// Capacity a Unicity node gives its [`SealJobRegistry`].
+///
+/// The upstream payload service admits at most `max_payload_tasks` builds to execute at once, so
+/// four times that leaves headroom for jobs that are alive but not yet executing. The floor covers
+/// a node that leaves the default in place.
+fn registry_capacity(max_payload_tasks: usize) -> usize {
+    DEFAULT_SEAL_JOB_CAPACITY.max(max_payload_tasks.saturating_mul(4))
 }
 
 /// Engine API validator for [`UnicityEngineTypes`].
@@ -269,5 +314,20 @@ where
 ///
 /// The engine API builder is the stock [`BasicEngineApiBuilder`], so no seal method is registered
 /// and no capability is advertised. U3c will extend this type to register the sibling methods and
-/// to carry the node's [`SealJobRegistry`] into them.
+/// to carry the node's [`SealJobRegistry`] and builder-configuration slot into them.
 pub type UnicityNodeAddOns<N> = RpcAddOns<N, EthereumEthApiBuilder, UnicityEngineValidatorBuilder>;
+
+#[cfg(test)]
+mod tests {
+    use super::registry_capacity;
+    use crate::DEFAULT_SEAL_JOB_CAPACITY;
+
+    #[test]
+    fn registry_capacity_tracks_max_payload_tasks_with_a_floor() {
+        assert_eq!(registry_capacity(0), DEFAULT_SEAL_JOB_CAPACITY);
+        assert_eq!(registry_capacity(1), DEFAULT_SEAL_JOB_CAPACITY);
+        assert_eq!(registry_capacity(4), DEFAULT_SEAL_JOB_CAPACITY);
+        assert_eq!(registry_capacity(5), 20);
+        assert_eq!(registry_capacity(usize::MAX), usize::MAX);
+    }
+}
