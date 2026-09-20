@@ -12,12 +12,28 @@
 //! - [`UnicityPayloadBuilder`]: the U2 commitment-only stock builder wrapper.
 //! - [`UnicityExecutionPayloadBuilder`]: an execution-aware wrapper which resolves every build,
 //!   empty-build and missing-payload path to an immutable [`UnicityEvmConfig`].
+//! - [`SealJobRegistry`]: a bounded, shareable handoff between a future seal method and the payload
+//!   builder.
+//! - [`UnicityEngineTypes`] and [`UnicityNode`]: the Engine API types and the node wiring that
+//!   carry the Unicity attributes end to end and use [`UnicityExecutionPayloadBuilder`] with that
+//!   registry.
 //!
-//! INACTIVE. Nothing registers these types with an `EngineTypes`, a node, an RPC module or a
-//! capability, so no Engine API method accepts them and normal node operation cannot reach them.
-//! The execution-aware path remains inactive too. Its resolver performs structural binding, while
-//! certificate/JWT authentication and exact-parent state provenance remain caller prerequisites.
-//! No Engine API method supplies the companion data yet.
+//! NO SEAL METHOD IS ADVERTISED. Nothing registers an RPC module or a capability string, no
+//! `engine_*WithSealV1` method exists, and the standard Engine API surface is unchanged. The
+//! execution-aware path remains structurally bound only: its resolver performs structural binding,
+//! while certificate/JWT authentication and exact-parent state provenance remain caller
+//! prerequisites. No Engine API method supplies the companion data yet.
+
+pub mod engine;
+pub mod node;
+pub mod registry;
+
+pub use engine::UnicityEngineTypes;
+pub use node::{
+    UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityNode, UnicityNodeAddOns,
+    UnicityPayloadBuilderBuilder,
+};
+pub use registry::{SealJobRegistry, DEFAULT_SEAL_JOB_CAPACITY};
 
 use alloy_eips::eip4895::Withdrawal;
 use alloy_primitives::B256;
@@ -264,6 +280,25 @@ impl ResolvedPayloadJob {
             .map_err(|_| PayloadJobResolutionError("execution configuration does not match job"))?;
         Ok(Self { parent, attributes, payload_id, evm_config })
     }
+
+    /// Checks that `config` still selects this exact immutable job.
+    ///
+    /// The eight-byte payload id is only a lookup handle. This compares the full parent and
+    /// attributes again, so a resolver cannot select a job whose id collided or whose caller
+    /// changed the parent or attributes after the id was computed.
+    pub(crate) fn check_binding(
+        &self,
+        config: &PayloadConfig<UnicityPayloadAttributes>,
+    ) -> Result<(), PayloadJobResolutionError> {
+        let parent_mismatch = self.parent.as_ref() != config.parent_header.as_ref();
+        let attributes_mismatch = self.attributes != config.attributes;
+        let id_mismatch =
+            config.attributes.payload_id(&config.parent_header.hash()) != config.payload_id;
+        if parent_mismatch || attributes_mismatch || id_mismatch {
+            return Err(PayloadJobResolutionError("payload job binding mismatch"));
+        }
+        Ok(())
+    }
 }
 
 /// A fixed set of independently prepared payload jobs. It has no mutable current-job state.
@@ -294,13 +329,7 @@ impl ExecutionPayloadJobResolver for FixedPayloadJobResolver {
             .iter()
             .find(|job| job.payload_id == config.payload_id)
             .ok_or(PayloadJobResolutionError("payload job is absent"))?;
-        let parent_mismatch = job.parent.as_ref() != config.parent_header.as_ref();
-        let attributes_mismatch = job.attributes != config.attributes;
-        let id_mismatch =
-            config.attributes.payload_id(&config.parent_header.hash()) != config.payload_id;
-        if parent_mismatch || attributes_mismatch || id_mismatch {
-            return Err(PayloadJobResolutionError("payload job binding mismatch"));
-        }
+        job.check_binding(config)?;
         Ok(job.evm_config.clone())
     }
 }

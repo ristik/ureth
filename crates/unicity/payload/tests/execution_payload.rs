@@ -34,7 +34,8 @@ use reth_unicity_execution::{
 };
 use reth_unicity_payload::{
     ExecutionPayloadJobResolver, FixedPayloadJobResolver, PayloadJobResolutionError,
-    ResolvedPayloadJob, UnicityExecutionPayloadBuilder, UnicityPayloadAttributes,
+    ResolvedPayloadJob, SealJobRegistry, UnicityExecutionPayloadBuilder, UnicityPayloadAttributes,
+    DEFAULT_SEAL_JOB_CAPACITY,
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
@@ -220,6 +221,30 @@ fn attributes(input: &RootInputV2, parent_timestamp: u64) -> UnicityPayloadAttri
         },
         commitment: input.input_commitment().unwrap(),
     }
+}
+
+/// Builds one valid job and the attributes whose payload id selects it. Used to exercise the seal
+/// job registry without a running payload service.
+fn resolved_job(
+    chain_spec: &Arc<ChainSpec>,
+    parent: &Arc<SealedHeader>,
+    root: &Arc<RootInputV2>,
+    base: &EthereumBuilderConfig,
+) -> (ResolvedPayloadJob, UnicityPayloadAttributes) {
+    let bound = Arc::new(
+        BoundExecutionInput::from_validated_genesis(
+            root.clone(),
+            PROFILE,
+            parent,
+            GENESIS_HASH,
+            FEE_COLLECTOR,
+        )
+        .unwrap(),
+    );
+    let evm = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec.clone()), bound);
+    let attrs = attributes(root, parent.timestamp);
+    let job = ResolvedPayloadJob::new(parent.clone(), attrs.clone(), evm, base).unwrap();
+    (job, attrs)
 }
 
 fn signed_call(
@@ -510,4 +535,74 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     let alt_b = interleaved.build_empty_payload(alternate_config).unwrap();
     assert_eq!(alt_a.block().hash(), alt_b.block().hash());
     assert_ne!(alt_a.block().header().extra_data, first.block().header().extra_data);
+}
+
+/// The production registry is the bounded replacement for [`FixedPayloadJobResolver`]: it refuses
+/// a duplicate payload id, evicts the oldest insertion at capacity, and shares its entries between
+/// clones so the payload service and a future seal method see the same jobs.
+#[test]
+fn seal_job_registry_is_bounded_shared_and_refuses_duplicates() {
+    let genesis: Genesis =
+        serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
+    let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
+    let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH));
+    let base = EthereumBuilderConfig::new()
+        .with_gas_limit(PROFILE.max_gas)
+        .with_await_payload_on_missing(false);
+
+    // Three jobs on the same parent that differ only in the committed tree root, so each has a
+    // distinct payload id and a matching execution configuration.
+    let root_a = Arc::new(input(1, 1, GENESIS_HASH));
+    let mut root_b = input(1, 1, GENESIS_HASH);
+    root_b.origin.tree_root = B256::repeat_byte(0xab);
+    let root_b = Arc::new(root_b);
+    let mut root_c = input(1, 1, GENESIS_HASH);
+    root_c.origin.tree_root = B256::repeat_byte(0xcd);
+    let root_c = Arc::new(root_c);
+
+    let (job_a, attrs_a) = resolved_job(&chain_spec, &parent, &root_a, &base);
+    let (job_a_duplicate, _) = resolved_job(&chain_spec, &parent, &root_a, &base);
+    let (job_b, attrs_b) = resolved_job(&chain_spec, &parent, &root_b, &base);
+    let (job_c, attrs_c) = resolved_job(&chain_spec, &parent, &root_c, &base);
+
+    let config = |attrs: &UnicityPayloadAttributes| {
+        PayloadConfig::new(parent.clone(), attrs.clone(), attrs.payload_id(&parent.hash()))
+    };
+
+    assert_eq!(SealJobRegistry::new().capacity(), DEFAULT_SEAL_JOB_CAPACITY);
+
+    // Capacity only grows, so a later smaller configuration cannot evict a held job.
+    let grown = SealJobRegistry::with_capacity(2);
+    grown.grow_capacity(5);
+    assert_eq!(grown.capacity(), 5);
+    grown.grow_capacity(3);
+    assert_eq!(grown.capacity(), 5, "capacity never shrinks");
+
+    let registry = SealJobRegistry::with_capacity(2);
+    assert!(registry.is_empty());
+    registry.insert(job_a).unwrap();
+    assert_eq!(registry.len(), 1);
+    assert!(registry.insert(job_a_duplicate).is_err(), "duplicate payload id must be refused");
+    assert_eq!(registry.len(), 1, "a refused duplicate must not displace the held job");
+    assert!(registry.resolve(&config(&attrs_a)).is_ok());
+
+    registry.insert(job_b).unwrap();
+    assert_eq!(registry.len(), 2);
+    assert!(registry.resolve(&config(&attrs_b)).is_ok());
+
+    // The registry is full, so inserting a third job evicts the oldest insertion.
+    registry.insert(job_c).unwrap();
+    assert_eq!(registry.len(), 2, "the registry stays bounded");
+    assert!(registry.resolve(&config(&attrs_a)).is_err(), "the oldest job was evicted");
+    assert!(registry.resolve(&config(&attrs_b)).is_ok());
+    assert!(registry.resolve(&config(&attrs_c)).is_ok());
+
+    // All clones share one registry, which is what lets the payload service and the method that
+    // inserts a job observe the same entries.
+    let shared = registry.clone();
+    shared.clear();
+    assert!(registry.is_empty());
+    let (job_d, attrs_d) = resolved_job(&chain_spec, &parent, &root_a, &base);
+    registry.insert(job_d).unwrap();
+    assert!(shared.resolve(&config(&attrs_d)).is_ok());
 }
