@@ -1142,7 +1142,14 @@ fn new_payload_with_seal_never_returns_accepted() {
 }
 
 #[test]
-fn an_imported_block_can_be_led_on() {
+fn the_parent_token_recorded_by_an_import_is_usable_by_a_later_build() {
+    // This test proves only the token mechanism: an import records the parent accounting token and
+    // a later `prepare_seal_build` can bind a child job with it. It does NOT demonstrate the
+    // production follower-becomes-leader path, because the import does not persist the block or its
+    // post-state, so in production the provider would not resolve this block as a parent at all.
+    // The README and UNICITY.md record that persistence gap; a Unicity-aware executor component
+    // (planned as U3f) closes it. The test installs the imported header in the test provider
+    // deliberately, to isolate the token mechanism from that gap.
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let imported_header = payload.block().header().clone();
@@ -1155,8 +1162,9 @@ fn an_imported_block_can_be_led_on() {
     assert!(status.is_valid());
     assert!(context.parent_accounting.get(&imported_hash).is_some());
 
-    // The follower now leads. The imported block is the parent and its recorded token is the only
-    // accounting available for it. Without the token recording this call would be SYNCING.
+    // The build binds the child to the imported parent using the token the import just recorded.
+    // Without that recording this call would be SYNCING with a missing parent accounting token.
+    // The provider's `extra_headers` above isolates this mechanism from the persistence gap.
     let leader_client = Client {
         parent_hash: imported_hash,
         extra_headers: vec![imported_header.clone()],

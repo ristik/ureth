@@ -7,7 +7,7 @@
 //! shared node state.
 //!
 //! The methods are reachable but never advertised. `engine_exchangeCapabilities` is the stock list,
-//! because U3f advertises all three seal methods together or none.
+//! because U3g advertises all three seal methods together or none.
 //!
 //! # Order
 //!
@@ -52,7 +52,7 @@ use reth_node_builder::{
 };
 use reth_payload_builder::PayloadStore;
 use reth_payload_primitives::{
-    validate_payload_timestamp, EngineApiMessageVersion, MessageValidationKind,
+    validate_payload_timestamp, EngineApiMessageVersion, MessageValidationKind, PayloadOrAttributes,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_rpc_api::IntoEngineApiRpcModule;
@@ -211,6 +211,8 @@ pub enum SealImportError {
     },
     /// The payload could not be converted into a block with recovered senders.
     Payload(String),
+    /// The version-specific Engine API fields did not match the V3 shape.
+    VersionFields(String),
     /// The payload parent header is not local.
     UnknownParent,
     /// The parent is local but no accounting token is recorded for it.
@@ -233,6 +235,9 @@ impl fmt::Display for SealImportError {
                 write!(formatter, "blob versioned hashes are unsupported ({count} supplied)")
             }
             Self::Payload(error) => write!(formatter, "payload is not well formed: {error}"),
+            Self::VersionFields(error) => {
+                write!(formatter, "payload version fields are invalid: {error}")
+            }
             Self::UnknownParent => formatter.write_str("payload parent is unknown"),
             Self::ParentAccountingMissing => {
                 formatter.write_str("parent accounting token is not retained")
@@ -575,7 +580,11 @@ where
                 count: expected_blob_versioned_hashes.len(),
             });
         }
-        // 3. Convert the payload and recover senders.
+        // 3. Convert the payload and recover senders. Validate the version-specific fields first,
+        //    exactly as the stock `newPayloadV3` path does, because this data arrives from outside
+        //    the process. The bounded-profile checks in `replay_complete` cover the Cancun fields,
+        //    but matching the stock order removes a difference a reviewer would have to reason
+        //    about.
         let execution_data = ExecutionData {
             payload: ExecutionPayload::V3(payload),
             sidecar: ExecutionPayloadSidecar::v3(CancunPayloadFields {
@@ -583,6 +592,12 @@ where
                 versioned_hashes: expected_blob_versioned_hashes,
             }),
         };
+        self.validator
+            .validate_version_specific_fields(
+                EngineApiMessageVersion::V3,
+                PayloadOrAttributes::from_execution_payload(&execution_data),
+            )
+            .map_err(|error| SealImportError::VersionFields(error.to_string()))?;
         let block = self
             .validator
             .ensure_well_formed_payload(execution_data)
