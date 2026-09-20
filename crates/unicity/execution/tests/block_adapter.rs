@@ -2,16 +2,17 @@
 
 mod support;
 
-use alloy_consensus::{SignableTransaction, TxLegacy};
+use alloy_consensus::{transaction::Recovered, SignableTransaction, TxEip4844, TxLegacy};
 use alloy_eips::eip4788::BEACON_ROOTS_ADDRESS;
+use alloy_evm::block::BlockExecutor;
 use alloy_genesis::Genesis;
-use alloy_primitives::{b256, Address, TxKind, B256, B64, U256};
+use alloy_primitives::{b256, Address, Bytes, Signature, TxKind, B256, B64, U256};
 use reth_chainspec::ChainSpec;
-use reth_ethereum_primitives::{Transaction, TransactionSigned};
-use reth_evm::NextBlockEnvAttributes;
+use reth_ethereum_primitives::{Block, Transaction, TransactionSigned};
+use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_primitives_traits::{
-    crypto::secp256k1::sign_message, RecoveredBlock, SealedHeader, SignedTransaction,
+    crypto::secp256k1::sign_message, BlockBody, RecoveredBlock, SealedHeader, SignedTransaction,
 };
 use reth_storage_api::{AccountReader, StateProvider};
 use reth_unicity_execution::{
@@ -19,7 +20,7 @@ use reth_unicity_execution::{
     block_executor::{build_complete, replay_complete, BoundExecutionInput, UnicityEvmConfig},
     derive_beacon_root, derive_prev_randao, derive_timestamp, technical_record_hash,
     wire::bind_completed_parent,
-    InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY,
+    InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY, SYSTEM_CALLER,
 };
 use revm::database::State;
 use std::sync::{Arc, Mutex};
@@ -400,5 +401,239 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
                     second_price -
                         u128::from(block_a.outcome.block.header().base_fee_per_gas.unwrap()),
                 ),
+    );
+}
+
+/// Genesis fixture with one valid first block, shared by the impersonation tests.
+struct ImportFixture {
+    chain_spec: Arc<ChainSpec>,
+    config: UnicityEvmConfig,
+    provider: FixtureProvider,
+    first_block: RecoveredBlock<Block>,
+}
+
+fn import_fixture() -> ImportFixture {
+    let genesis_json = include_str!("../testdata/signed-beacon-genesis.json");
+    let genesis: Genesis = serde_json::from_str(genesis_json).unwrap();
+    let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
+    let genesis_header = chain_spec.genesis_header().clone();
+    let parent = SealedHeader::new(genesis_header.clone(), GENESIS_HASH);
+    let mut provider = FixtureProvider::signed_genesis();
+    provider.set_block_hash(0, GENESIS_HASH);
+    let first_input = Arc::new(input(1, 1, GENESIS_HASH));
+    let bound = Arc::new(
+        BoundExecutionInput::from_validated_genesis(
+            first_input.clone(),
+            PROFILE,
+            &parent,
+            GENESIS_HASH,
+            FEE_COLLECTOR,
+        )
+        .unwrap(),
+    );
+    let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec.clone()), bound);
+    let mut build_state =
+        State::builder().with_database(provider.clone()).with_bundle_update().build();
+    let transfer = signed_call(
+        chain_spec.chain.id(),
+        0,
+        u128::from(genesis_header.base_fee_per_gas.unwrap()) + 100,
+        Address::repeat_byte(0x42),
+        U256::from(1),
+        21_000,
+    )
+    .try_into_recovered()
+    .unwrap();
+    let built = build_complete(
+        &config,
+        &parent,
+        attributes(&first_input, parent.timestamp),
+        &mut build_state,
+        provider.clone(),
+        vec![transfer],
+    )
+    .unwrap();
+    ImportFixture { chain_spec, config, provider, first_block: built.outcome.block }
+}
+
+/// Returns a copy of `block` with `transactions` and the matching `senders`, recomputing only the
+/// transaction root.
+///
+/// Every other header field is left as it was, so the block is internally inconsistent in the
+/// fields that are checked after the rule under test. Pre-execution checks the transaction root and
+/// the header, not the state root, receipts or gas, so the intended rule is what rejects the block.
+fn with_transactions(
+    block: &RecoveredBlock<Block>,
+    transactions: Vec<TransactionSigned>,
+    senders: Vec<Address>,
+) -> RecoveredBlock<Block> {
+    let (mut inner, _) = block.clone().split();
+    inner.body.transactions = transactions;
+    inner.header.transactions_root = inner.body.calculate_tx_root();
+    RecoveredBlock::new_unhashed(inner, senders)
+}
+
+/// A signed EIP-4844 transaction carrying one blob versioned hash.
+fn blob_tx(chain_id: u64) -> TransactionSigned {
+    TransactionSigned::new_unhashed(
+        Transaction::Eip4844(TxEip4844 {
+            chain_id,
+            nonce: 0,
+            gas_limit: 100_000,
+            max_fee_per_gas: 1_000_000_000,
+            max_priority_fee_per_gas: 0,
+            to: Address::repeat_byte(0x42),
+            value: U256::ZERO,
+            access_list: Default::default(),
+            blob_versioned_hashes: vec![B256::repeat_byte(0x01)],
+            max_fee_per_blob_gas: 1,
+            input: Bytes::new(),
+        }),
+        Signature::new(U256::default(), U256::default(), true),
+    )
+}
+
+/// Rule: an ordinary transaction whose signer is `SYSTEM_CALLER` is refused.
+///
+/// This is the malicious-builder shape driven through the import entry point, because that is where
+/// a hostile block actually arrives. The block is otherwise well formed, and its transaction root
+/// is recomputed, so the refusal is the reserved-sender rule rather than a structural check.
+#[test]
+fn import_refuses_a_block_that_forges_the_system_sender() {
+    let fixture = import_fixture();
+    let hostile = signed_call(
+        fixture.chain_spec.chain.id(),
+        1,
+        1_000,
+        Address::repeat_byte(0x42),
+        U256::ZERO,
+        21_000,
+    );
+    let block = with_transactions(&fixture.first_block, vec![hostile], vec![SYSTEM_CALLER]);
+
+    let error =
+        replay_complete(&fixture.config, fixture.provider.clone(), &fixture.provider, &block)
+            .unwrap_err();
+    assert!(
+        error.to_string().contains("reserved sender"),
+        "expected the reserved-sender refusal, got: {error}"
+    );
+}
+
+/// Rule: an extra transaction claiming the system sender, appended after the legitimate prefix, is
+/// refused. This is the "cannot repeat" half of the clause.
+///
+/// The block first carries the legitimate paying user transaction, so the executor has already run
+/// the real system prefix, and only then reaches the repeated system-sender transaction. The
+/// refusal must fall out of the same reserved-sender rule as the forged-sender case, which the
+/// assertion confirms rather than assumes.
+#[test]
+fn import_refuses_a_repeated_system_sender_after_the_legitimate_prefix() {
+    let fixture = import_fixture();
+    let (inner, mut senders) = fixture.first_block.clone().split();
+    let mut transactions = inner.body.transactions;
+    transactions.push(signed_call(
+        fixture.chain_spec.chain.id(),
+        9,
+        1_000,
+        Address::repeat_byte(0x42),
+        U256::ZERO,
+        21_000,
+    ));
+    senders.push(SYSTEM_CALLER);
+    let block = with_transactions(&fixture.first_block, transactions, senders);
+
+    let error =
+        replay_complete(&fixture.config, fixture.provider.clone(), &fixture.provider, &block)
+            .unwrap_err();
+    assert!(
+        error.to_string().contains("reserved sender"),
+        "a repeated system sender must hit the reserved-sender rule, got: {error}"
+    );
+}
+
+/// Rule: an ordinary transaction executed before the system prefix is refused.
+///
+/// This one is executor-level, not import-level. On the import path `BasicBlockExecutor` always
+/// calls `apply_pre_execution_changes` before any transaction, so a transaction before the prefix
+/// cannot be expressed in a block at all and the ordering is enforced structurally. The check still
+/// protects direct executor use, so it is exercised here by calling `execute_transaction` on a
+/// freshly created executor whose prefix is still `Pending`.
+#[test]
+fn executor_refuses_an_ordinary_transaction_before_the_system_prefix() {
+    let fixture = import_fixture();
+    let mut state =
+        State::builder().with_database(fixture.provider.clone()).with_bundle_update().build();
+    let mut executor =
+        fixture.config.executor_for_block(&mut state, fixture.first_block.sealed_block()).unwrap();
+    let tx = signed_call(
+        fixture.chain_spec.chain.id(),
+        0,
+        1_000,
+        Address::repeat_byte(0x42),
+        U256::ZERO,
+        21_000,
+    )
+    .try_into_recovered()
+    .unwrap();
+
+    let error = executor.execute_transaction(tx).unwrap_err();
+    assert!(
+        error.to_string().contains("ordinary transaction before system prefix"),
+        "expected the ordering refusal, got: {error}"
+    );
+}
+
+/// Rule: a blob transaction is refused.
+///
+/// This is executor-level for the same reason as the ordering rule: on the import path the
+/// header/body blob-gas consistency check in `validate_block_pre_execution` rejects a block with a
+/// blob transaction before execution starts, so the executor's own blob rule only fires when the
+/// executor is driven directly with the prefix already applied.
+#[test]
+fn executor_refuses_a_blob_transaction() {
+    let fixture = import_fixture();
+    let mut state =
+        State::builder().with_database(fixture.provider.clone()).with_bundle_update().build();
+    let mut executor =
+        fixture.config.executor_for_block(&mut state, fixture.first_block.sealed_block()).unwrap();
+    executor.apply_pre_execution_changes().unwrap();
+    let blob = Recovered::new_unchecked(
+        blob_tx(fixture.chain_spec.chain.id()),
+        Address::repeat_byte(0x42),
+    );
+
+    let error = executor.execute_transaction(blob).unwrap_err();
+    assert!(
+        error.to_string().contains("blob transactions are unsupported"),
+        "expected the blob refusal, got: {error}"
+    );
+}
+
+/// The import path rejects a blob transaction earlier than the executor rule.
+///
+/// A blob transaction in the body makes the block's blob gas disagree with the header's
+/// `blob_gas_used`, and `validate_block_pre_execution` rejects that mismatch before execution. This
+/// test records which rule actually protects the import path, so the executor-level blob test above
+/// is not mistaken for import-path coverage.
+#[test]
+fn import_rejects_a_blob_transaction_at_the_header_blob_gas_check() {
+    let fixture = import_fixture();
+    let block = with_transactions(
+        &fixture.first_block,
+        vec![blob_tx(fixture.chain_spec.chain.id())],
+        vec![Address::repeat_byte(0x42)],
+    );
+
+    let error =
+        replay_complete(&fixture.config, fixture.provider.clone(), &fixture.provider, &block)
+            .unwrap_err();
+    assert!(
+        error.to_string().contains("blob gas used mismatch"),
+        "expected the header blob-gas mismatch to reject the block first, got: {error}"
+    );
+    assert!(
+        !error.to_string().contains("blob transactions are unsupported"),
+        "the executor rule must not be the one that fires on the import path, got: {error}"
     );
 }
