@@ -1,11 +1,11 @@
-//! The `engine_forkchoiceUpdatedWithSealV1` sibling method.
+//! The `engine_forkchoiceUpdatedWithSealV1` and `engine_getPayloadWithSealV1` siblings.
 //!
 //! This is a jsonrpsee trait in the `engine` namespace, separate from reth's own
-//! [`reth_rpc_api::EngineApi`], so the fork adds one method without editing an upstream file. It is
+//! [`reth_rpc_api::EngineApi`], so the fork adds methods without editing an upstream file. It is
 //! shaped after `EngineApiInner` in `reth_rpc_engine_api`: the same provider, consensus handle and
 //! shared node state.
 //!
-//! The method is reachable but never advertised. `engine_exchangeCapabilities` is the stock list,
+//! The methods are reachable but never advertised. `engine_exchangeCapabilities` is the stock list,
 //! because U3f advertises all three seal methods together or none.
 //!
 //! # Order
@@ -34,7 +34,11 @@ use std::{
 };
 
 use alloy_consensus::Header;
-use alloy_rpc_types_engine::{ForkchoiceState, ForkchoiceUpdated, PayloadStatusEnum};
+use alloy_primitives::U256;
+use alloy_rpc_types_engine::{
+    ExecutionPayloadEnvelopeV3, ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadId,
+    PayloadStatusEnum,
+};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc, RpcModule};
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
 use reth_engine_primitives::{ConsensusEngineHandle, EngineApiValidator};
@@ -44,15 +48,23 @@ use reth_node_builder::{
     rpc::{BasicEngineApiBuilder, EngineApiBuilder},
     AddOnsContext, FullNodeComponents,
 };
-use reth_payload_primitives::EngineApiMessageVersion;
+use reth_payload_builder::PayloadStore;
+use reth_payload_primitives::{
+    validate_payload_timestamp, EngineApiMessageVersion, MessageValidationKind,
+};
 use reth_rpc_api::IntoEngineApiRpcModule;
 use reth_rpc_engine_api::EngineApiError;
 use reth_storage_api::HeaderProvider;
 use reth_unicity_execution::{
     block::BlockAccountingError,
     block_executor::UnicityEvmConfig,
-    wire::{bind_completed_parent, bind_validated_genesis, CanonicalCborError, SealBuildInput},
+    wire::{
+        bind_completed_parent, bind_validated_genesis, CanonicalCborError, SealBuildInput,
+        SealCompanion,
+    },
+    RootInputV2,
 };
+use serde::{Deserialize, Serialize};
 
 use crate::{
     node::{UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityNode, UnicitySealConfig},
@@ -74,6 +86,34 @@ pub trait UnicityEngineApi {
         payload_attributes: Option<UnicityPayloadAttributes>,
         seal_build_input: SealBuildInput,
     ) -> RpcResult<ForkchoiceUpdated>;
+
+    /// `engine_getPayloadWithSealV1`.
+    ///
+    /// Returns the built payload, its block value and the companion the leader disseminates. The
+    /// companion's `rootInput` is re-encoded from the job's decoded input, and its `witnesses` list
+    /// is empty because `sealBuildInput` carries no witnesses. That is not sufficient for a
+    /// follower to authenticate from; see the crate README for the open D2 question.
+    #[method(name = "getPayloadWithSealV1")]
+    async fn get_payload_with_seal_v1(
+        &self,
+        payload_id: PayloadId,
+    ) -> RpcResult<GetPayloadWithSealV1Response>;
+}
+
+/// The `engine_getPayloadWithSealV1` response.
+///
+/// D2 fixes the shape as `{ executionPayload, blockValue, sealCompanion }`. This is the V3
+/// execution payload and block value with the companion added, not the full stock
+/// [`ExecutionPayloadEnvelopeV3`], which also carries `blobsBundle` and `shouldOverrideBuilder`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct GetPayloadWithSealV1Response {
+    /// The built execution payload.
+    pub execution_payload: ExecutionPayloadV3,
+    /// The total fees the built block collected.
+    pub block_value: U256,
+    /// The companion the leader disseminates alongside the payload.
+    pub seal_companion: SealCompanion,
 }
 
 /// A refusal from the seal build flow.
@@ -200,6 +240,46 @@ where
     Ok(attributes)
 }
 
+/// Provenance label for a companion produced by the local build path, matching D2.
+pub const BUILD_PROVENANCE: &str = "build";
+
+/// Failure to re-encode a job's root input while building its companion.
+///
+/// The job's input was accepted by the canonical decoder, so the decoder's inverse should always
+/// accept it. This exists so a failure is reported rather than silently producing a companion.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SealCompanionError(String);
+
+impl fmt::Display for SealCompanionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for SealCompanionError {}
+
+/// Builds the companion the leader disseminates for a payload this node built.
+///
+/// `root_input` is re-encoded with the canonical codec rather than retaining the caller's raw
+/// bytes. That is provably byte-identical: [`RootInputV2::from_canonical_cbor`] accepts only
+/// canonical encodings, and the round-trip invariant `from_canonical_cbor(canonical_cbor(v)) == v`
+/// together with `canonical_cbor(from_canonical_cbor(b)) == b` is asserted in both directions, so
+/// re-encoding cannot differ from what the caller supplied. Retaining a second copy would only add
+/// a way for the two to disagree.
+///
+/// The witness list is empty because the build input carries no witnesses. Witnesses are the
+/// authentication material a follower needs, bft-core holds the authenticated certificate, and it
+/// is the party that can populate them before dissemination. See the crate README.
+pub fn build_seal_companion(root_input: &RootInputV2) -> Result<SealCompanion, SealCompanionError> {
+    let root_input =
+        root_input.canonical_cbor().map_err(|error| SealCompanionError(format!("{error:?}")))?;
+    Ok(SealCompanion {
+        root_input: root_input.into(),
+        witnesses: Vec::new(),
+        provenance: BUILD_PROVENANCE.to_owned(),
+    })
+}
+
 /// Node-owned state the seal build flow resolves against.
 ///
 /// The payload service and the handler share every field, so the job the handler installs is
@@ -242,18 +322,20 @@ pub struct UnicityEngineApiImpl<Provider> {
     beacon_consensus: ConsensusEngineHandle<UnicityEngineTypes>,
     context: SealBuildContext,
     validator: UnicityEngineValidator,
+    payload_store: PayloadStore<UnicityEngineTypes>,
 }
 
 impl<Provider> UnicityEngineApiImpl<Provider> {
-    /// Creates the handler over the node's provider, consensus handle, shared build state and
-    /// attribute validator.
+    /// Creates the handler over the node's provider, consensus handle, shared build state,
+    /// attribute validator and payload store.
     pub const fn new(
         provider: Provider,
         beacon_consensus: ConsensusEngineHandle<UnicityEngineTypes>,
         context: SealBuildContext,
         validator: UnicityEngineValidator,
+        payload_store: PayloadStore<UnicityEngineTypes>,
     ) -> Self {
-        Self { provider, beacon_consensus, context, validator }
+        Self { provider, beacon_consensus, context, validator, payload_store }
     }
 }
 
@@ -264,6 +346,55 @@ impl<Provider> fmt::Debug for UnicityEngineApiImpl<Provider> {
             .debug_struct("UnicityEngineApiImpl")
             .field("context", &self.context)
             .finish_non_exhaustive()
+    }
+}
+
+impl<Provider> UnicityEngineApiImpl<Provider>
+where
+    Provider: ChainSpecProvider<ChainSpec = ChainSpec>,
+{
+    /// Resolves the built payload and companion, mirroring the stock `getPayloadV3` path.
+    pub async fn get_payload_with_seal(
+        &self,
+        payload_id: PayloadId,
+    ) -> Result<GetPayloadWithSealV1Response, EngineApiError> {
+        // Validate the payload timestamp before resolving, as the stock `get_payload_inner` does.
+        let timestamp = self
+            .payload_store
+            .payload_timestamp(payload_id)
+            .await
+            .ok_or(EngineApiError::UnknownPayload)?
+            .map_err(|_| EngineApiError::UnknownPayload)?;
+        let chain_spec = self.provider.chain_spec();
+        validate_payload_timestamp(
+            &chain_spec,
+            EngineApiMessageVersion::V3,
+            timestamp,
+            MessageValidationKind::GetPayload,
+        )?;
+
+        let payload = self
+            .payload_store
+            .resolve(payload_id)
+            .await
+            .ok_or(EngineApiError::UnknownPayload)?
+            .map_err(|_| EngineApiError::UnknownPayload)?;
+
+        // The companion needs the job's decoded input. The job is still in the registry while its
+        // payload is being served; an evicted job refuses as unknown payload rather than inventing
+        // a companion.
+        let root_input =
+            self.context.registry.root_input(&payload_id).ok_or(EngineApiError::UnknownPayload)?;
+        let seal_companion = build_seal_companion(&root_input)
+            .map_err(|error| EngineApiError::Internal(Box::new(error)))?;
+
+        let envelope: ExecutionPayloadEnvelopeV3 =
+            payload.try_into().map_err(|_| EngineApiError::UnknownPayload)?;
+        Ok(GetPayloadWithSealV1Response {
+            execution_payload: envelope.execution_payload,
+            block_value: envelope.block_value,
+            seal_companion,
+        })
     }
 }
 
@@ -302,6 +433,13 @@ where
             .map_err(EngineApiError::ForkChoiceUpdate)?;
         Ok(updated)
     }
+
+    async fn get_payload_with_seal_v1(
+        &self,
+        payload_id: PayloadId,
+    ) -> RpcResult<GetPayloadWithSealV1Response> {
+        Ok(self.get_payload_with_seal(payload_id).await?)
+    }
 }
 
 /// The authenticated engine module: the stock Engine API plus the seal sibling.
@@ -332,7 +470,7 @@ where
         let mut module = self.inner.into_rpc_module();
         module
             .merge(UnicityEngineApiServer::into_rpc(self.sibling).remove_context())
-            .expect("forkchoiceUpdatedWithSealV1 is additive and cannot conflict");
+            .expect("the seal methods are additive and cannot conflict");
         module
     }
 }
@@ -367,6 +505,7 @@ where
 
     async fn build_engine_api(self, ctx: &AddOnsContext<'_, N>) -> eyre::Result<Self::EngineApi> {
         let validator = UnicityEngineValidator::new(ctx.config.chain.clone());
+        let payload_store = PayloadStore::new(ctx.node.payload_builder_handle().clone());
         let inner = BasicEngineApiBuilder::<UnicityEngineValidatorBuilder>::default()
             .build_engine_api(ctx)
             .await?;
@@ -375,6 +514,7 @@ where
             ctx.beacon_engine_handle.clone(),
             self.context,
             validator,
+            payload_store,
         );
         Ok(UnicityEngineApiModule::new(inner, sibling))
     }
