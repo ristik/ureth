@@ -6,9 +6,10 @@ shared Unicity executor. `UnicityEngineTypes` and `UnicityNode` carry the Unicit
 attributes end to end and use that builder with a bounded `SealJobRegistry`. The
 `engine_forkchoiceUpdatedWithSealV1` sibling is registered on the authenticated engine module.
 
-The method is reachable but not advertised: `engine_exchangeCapabilities` is the stock list and no
-capability names it, so the standard `engine_*` surface a client can discover is unchanged. U3g
-advertises all three seal methods together or none.
+The three seal methods are reachable and advertised together. A Unicity node's
+`engine_exchangeCapabilities` is the stock Ethereum list plus `engine_forkchoiceUpdatedWithSealV1`,
+`engine_newPayloadWithSealV1` and `engine_getPayloadWithSealV1`, added as one set. All three or
+none, never a subset.
 
 ## Per-job authority
 
@@ -49,9 +50,10 @@ completion path; a payload ID or caller-provided gas scalar cannot mint one.
 pool and consensus components. Its payload component uses `UnicityExecutionPayloadBuilder` with a
 `SealJobRegistry` the node holds, and its executor component is `UnicityExecutorBuilder`, which
 supplies `UnicityNodeEvmConfig`. All clones of the registry see the same entries, so the payload
-service and the seal method share one collection. The engine API is the stock
-`BasicEngineApiBuilder` plus the `engine_forkchoiceUpdatedWithSealV1` sibling, and the validator is
-the stock Ethereum payload structure and version-field validation with no Unicity-specific verdict.
+service and the seal method share one collection. The engine API is the stock `EngineApi` built with the stock capability list plus the three seal
+methods, together, with the seal siblings merged into the same authenticated module. The validator
+is the stock Ethereum payload structure and version-field validation with no Unicity-specific
+verdict.
 
 A seal job is constructed outside the node, so every piece of node configuration it needs must be
 published by the node. The node publishes the exact `EthereumBuilderConfig` it hands to the payload
@@ -170,8 +172,9 @@ attributes, a duplicate payload id, a job that resolves to the same configuratio
 service uses, a state-root mismatch, a missing parent, a parent without a token, non-empty blob
 hashes, and that ACCEPTED is never produced. They also cover the execution-input registry
 (idempotent duplicate, conflicting input, oldest-first eviction), node EVM resolution by commitment,
-closed execution without a registered input, and a forward to a fake engine handle that returns its
-verdict. The fake engine is not a real engine: it does not execute or persist. The node wiring and
+closed execution without a registered input, a forward to a fake engine handle that returns its
+verdict, and that the advertised capability set is exactly the stock list plus the three seal
+strings. The fake engine is not a real engine: it does not execute or persist. The node wiring and
 the RPC registration are compile-checked but not launch-tested here, and launching the full node and
 exchanging Engine RPC remains the M1 gate. They do not demonstrate an Engine RPC exchange,
 certificate authentication, real persistence or public activation. `v0` and the bft-core

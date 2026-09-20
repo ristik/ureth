@@ -8,10 +8,9 @@
 //! a [`ResolvedPayloadJob`](crate::ResolvedPayloadJob) into the registry and then start an ordinary
 //! build, which resolves that exact job.
 //!
-//! The sibling is reachable but not advertised: `engine_exchangeCapabilities` is the stock list and
-//! no capability string names the method. U3g advertises all three seal methods together or none.
-//! The stock `engine_*` surface is assembled from upstream components exactly as the plain Ethereum
-//! node assembles it.
+//! The sibling is reachable and advertised: a Unicity node's `engine_exchangeCapabilities` is the
+//! stock list plus all three seal methods together. The stock `engine_*` surface is otherwise
+//! assembled from upstream components exactly as the plain Ethereum node assembles it.
 
 use std::sync::{Arc, OnceLock};
 
@@ -392,9 +391,8 @@ where
 
 /// Standard RPC add-ons for a Unicity node.
 ///
-/// The engine API builder is the stock [`BasicEngineApiBuilder`] plus the seal sibling method, so
-/// the sibling is reachable but no capability is advertised. U3g will advertise the three seal
-/// methods together or not at all.
+/// The engine API builder registers the seal siblings and advertises the three seal capabilities
+/// together with the stock list. No stock method changes.
 pub type UnicityNodeAddOns<N> =
     RpcAddOns<N, EthereumEthApiBuilder, UnicityEngineValidatorBuilder, UnicityEngineApiBuilder>;
 
