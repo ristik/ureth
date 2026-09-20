@@ -156,7 +156,7 @@ file is edited and no new package enters `Cargo.lock`.
 `crates/unicity/payload` adds the first actual seal method: a jsonrpsee sibling trait in the
 `engine` namespace with `forkchoiceUpdatedWithSealV1`. It is registered on the authenticated engine
 module alongside the stock Engine API, so it is reachable, but `engine_exchangeCapabilities` is the
-stock list and no capability name is added. U3f advertises all three seal methods together or none.
+stock list and no capability name is added. U3g advertises all three seal methods together or none.
 
 The handler runs the fixed D2 order: decode the canonical root input, resolve the parent header
 (unknown is SYNCING), bind it through the U3a entry points, build the `UnicityEvmConfig` and
@@ -202,6 +202,35 @@ move the authentication boundary into the execution client. This crate invents n
 not widen `sealBuildInput`. Still no capability string,
 and no new package enters `Cargo.lock`.
 
+## U3e (bft-core #11): engine_newPayloadWithSealV1, registered but not advertised
+
+`crates/unicity/payload` adds the third and last seal method. `newPayloadWithSealV1` decodes
+`sealCompanion.rootInput` with the canonical codec, refuses a non-empty blob versioned hash list
+because the bounded profile disables blobs, converts the payload and recovers senders, resolves the
+parent, binds through the U3a entry points, calls the shared `replay_complete`, records the returned
+`CompletedParent` token for the imported block, and returns VALID. A state-root or execution mismatch
+is INVALID with the refusal in `validationError`; an unknown parent is SYNCING. It never returns
+ACCEPTED and it does not verify witnesses: the shard-node adapter runs `VerifyCompanionWitnesses`
+before the call over the JWT-authenticated channel, and moving that into the execution client is the
+divergence this fork avoids.
+
+A local parent without a recorded token is also SYNCING rather than INVALID. That is a reading of
+D2: the block is not invalid, and the parent accounting cannot be established until the parent has
+been seal-executed locally through this same path. This is what makes the seal chain import
+contiguous, and it is why U3e records the token for an imported block. The method does not
+re-execute the parent recursively and does not mint a token from a header.
+
+The import path validates the block, mints and records the parent token, and returns VALID, but it
+does NOT persist the block or its post-state and does NOT forward to the consensus engine. The node
+database and the engine tree are unchanged, so the seal chain does not yet run contiguously in
+production: a later import or build cannot resolve the imported block as a parent, and the stock
+executor would reject a seal block anyway because only the payload-builder job path is
+Unicity-aware. Closing that needs a Unicity-aware executor component that resolves a per-block bound
+input, planned as U3f. This unit does not attempt it.
+
+This adds the method and one dependency edge from `reth-unicity-payload` to `reth-revm`. No upstream
+source file is edited.
+
 ## Current total fork inventory
 
 Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface1bd72cceb4`:
@@ -209,8 +238,8 @@ Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface
 | Change | Kind |
 | --- | --- |
 | `Cargo.toml`: two workspace member lines and one local dependency entry for `reth-unicity-execution` | makes the two inactive crates workspace-visible and lets payload reuse execution |
-| `Cargo.lock`: two added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring and the U3c seal method; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
-| `crates/unicity/payload/` | per-payload commitment provision, execution builder, bounded seal-job registry, Unicity node wiring, the `engine_forkchoiceUpdatedWithSealV1` and `engine_getPayloadWithSealV1` siblings |
+| `Cargo.lock`: two added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring, the U3c to U3e seal methods; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
+| `crates/unicity/payload/` | per-payload commitment provision, execution builder, bounded seal-job registry, Unicity node wiring, the `engine_forkchoiceUpdatedWithSealV1`, `engine_getPayloadWithSealV1` and `engine_newPayloadWithSealV1` siblings |
 | `crates/unicity/execution/` | bounded registry kernel, shared build/replay adapter, fixtures, the completed-parent token mint and the job root-input accessor |
 | Ten upstream Rust source files formatted by the current nightly rustfmt | repairs hosted formatting drift only |
 | `crates/trie/sparse/src/arena/mod.rs` | removes one redundant clone rejected by current Clippy |

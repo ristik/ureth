@@ -7,7 +7,8 @@ use alloy_eips::{BlockNumHash, BlockNumberOrTag};
 use alloy_genesis::Genesis;
 use alloy_primitives::{b256, Address, TxKind, B256, U256};
 use alloy_rpc_types_engine::{
-    ForkchoiceState, PayloadAttributes as EthPayloadAttributes, PayloadId,
+    ExecutionPayloadV3, ForkchoiceState, PayloadAttributes as EthPayloadAttributes, PayloadId,
+    PayloadStatusEnum,
 };
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
@@ -38,7 +39,7 @@ use reth_unicity_execution::{
     block::BlockProfile,
     block_executor::{replay_complete, BoundExecutionInput, UnicityEvmConfig},
     derive_beacon_root, derive_prev_randao, derive_timestamp, technical_record_hash,
-    wire::SealBuildInput,
+    wire::{SealBuildInput, SealCompanion},
     InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY,
 };
 use reth_unicity_payload::{
@@ -86,6 +87,7 @@ struct Client {
     chain_spec: Arc<ChainSpec>,
     parent_hash: B256,
     state: FixtureProvider,
+    extra_headers: Vec<Header>,
 }
 
 #[derive(Clone)]
@@ -139,12 +141,17 @@ impl HeaderProvider for Client {
     type Header = Header;
 
     fn header(&self, block_hash: B256) -> ProviderResult<Option<Self::Header>> {
-        Ok((block_hash == self.chain_spec.genesis_hash())
-            .then(|| self.chain_spec.genesis_header().clone()))
+        if block_hash == self.chain_spec.genesis_hash() {
+            return Ok(Some(self.chain_spec.genesis_header().clone()))
+        }
+        Ok(self.extra_headers.iter().find(|header| header.hash_slow() == block_hash).cloned())
     }
 
     fn header_by_number(&self, number: u64) -> ProviderResult<Option<Self::Header>> {
-        Ok((number == 0).then(|| self.chain_spec.genesis_header().clone()))
+        if number == 0 {
+            return Ok(Some(self.chain_spec.genesis_header().clone()))
+        }
+        Ok(self.extra_headers.iter().find(|header| header.number == number).cloned())
     }
 
     fn headers_range(&self, _: impl RangeBounds<u64>) -> ProviderResult<Vec<Self::Header>> {
@@ -152,11 +159,9 @@ impl HeaderProvider for Client {
     }
 
     fn sealed_header(&self, number: u64) -> ProviderResult<Option<SealedHeader<Self::Header>>> {
-        Ok((number == 0).then(|| {
-            SealedHeader::new(
-                self.chain_spec.genesis_header().clone(),
-                self.chain_spec.genesis_hash(),
-            )
+        Ok(self.header_by_number(number)?.map(|header| {
+            let hash = header.hash_slow();
+            SealedHeader::new(header, hash)
         }))
     }
 
@@ -346,8 +351,12 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH));
     let mut state = FixtureProvider::signed_genesis();
     state.set_block_hash(0, GENESIS_HASH);
-    let client =
-        Client { chain_spec: chain_spec.clone(), parent_hash: GENESIS_HASH, state: state.clone() };
+    let client = Client {
+        chain_spec: chain_spec.clone(),
+        parent_hash: GENESIS_HASH,
+        state: state.clone(),
+        extra_headers: Vec::new(),
+    };
     let root = Arc::new(input(1, 1, GENESIS_HASH));
     let attrs = attributes(&root, parent.timestamp);
     let base = EthereumBuilderConfig::new()
@@ -436,8 +445,12 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         &base,
     )
     .unwrap();
-    let second_client =
-        Client { chain_spec, parent_hash: first_header.hash(), state: state.clone() };
+    let second_client = Client {
+        chain_spec,
+        parent_hash: first_header.hash(),
+        state: state.clone(),
+        extra_headers: Vec::new(),
+    };
     let second_builder = UnicityExecutionPayloadBuilder::new(
         second_client,
         test_pool(),
@@ -674,7 +687,7 @@ fn seal_fixture() -> (
     let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH));
     let mut state = FixtureProvider::signed_genesis();
     state.set_block_hash(0, GENESIS_HASH);
-    let client = Client { chain_spec, parent_hash: GENESIS_HASH, state };
+    let client = Client { chain_spec, parent_hash: GENESIS_HASH, state, extra_headers: Vec::new() };
     let root = input(1, 1, GENESIS_HASH);
     let attrs = attributes(&root, parent.timestamp);
     let builder_config = Arc::new(OnceLock::new());
@@ -918,4 +931,264 @@ async fn get_payload_with_seal_names_an_evicted_companion() {
         }
         other => panic!("expected the evicted-companion error, got {other:?}"),
     }
+}
+
+/// Builds the first post-genesis block through the payload service path, so the import tests have a
+/// real block whose state root and gas accounting are correct.
+fn build_genesis_seal_payload(
+    client: &Client,
+    parent: &Arc<SealedHeader>,
+    root: &RootInputV2,
+    attrs: &UnicityPayloadAttributes,
+    context: &SealBuildContext,
+    validator: &UnicityEngineValidator,
+) -> EthBuiltPayload {
+    prepare_seal_build(
+        client,
+        context,
+        validator,
+        &ForkchoiceState::same_hash(GENESIS_HASH),
+        Some(attrs),
+        &seal_input(root),
+    )
+    .unwrap();
+    let base = context.builder_config.get().unwrap().clone();
+    let builder = UnicityExecutionPayloadBuilder::new(
+        client.clone(),
+        test_pool(),
+        context.registry.clone(),
+        base,
+    );
+    builder
+        .build_empty_payload(PayloadConfig::new(
+            parent.clone(),
+            attrs.clone(),
+            attrs.payload_id(&parent.hash()),
+        ))
+        .unwrap()
+}
+
+/// Converts a built block into the `ExecutionPayloadV3` the import method accepts, plus the
+/// companion for `root` and the block's parent beacon root.
+///
+/// `mutate` runs on the block before conversion, so a test can tamper with one header field and
+/// keep the payload's `blockHash` consistent with the tampered block.
+fn payload_for_import(
+    payload: &EthBuiltPayload,
+    root: &RootInputV2,
+    mutate: impl FnOnce(&mut Header),
+) -> (ExecutionPayloadV3, SealCompanion, B256) {
+    let mut block = payload.block().clone().into_block();
+    mutate(&mut block.header);
+    let block_hash = block.header.hash_slow();
+    let execution_payload = ExecutionPayloadV3::from_block_unchecked(block_hash, &block);
+    let beacon_root = block.header.parent_beacon_block_root.unwrap();
+    let companion = build_seal_companion(root).unwrap();
+    (execution_payload, companion, beacon_root)
+}
+
+/// Builds the import handler. The consensus handle and payload store channels are closed because
+/// the import path uses neither.
+fn seal_import_handler(
+    client: Client,
+    context: SealBuildContext,
+    validator: UnicityEngineValidator,
+) -> UnicityEngineApiImpl<Client> {
+    let (beacon_tx, _beacon_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (store_tx, _store_rx) = tokio::sync::mpsc::unbounded_channel();
+    UnicityEngineApiImpl::new(
+        client,
+        ConsensusEngineHandle::new(beacon_tx),
+        context,
+        validator,
+        PayloadStore::new(PayloadBuilderHandle::new(store_tx)),
+    )
+}
+
+#[test]
+fn new_payload_with_seal_imports_a_built_block_and_records_its_token() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let block_hash = payload.block().hash();
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+
+    let handler = seal_import_handler(client, context.clone(), validator);
+    let status =
+        handler.new_payload_with_seal(execution_payload, vec![], beacon_root, &companion).unwrap();
+    assert!(status.is_valid());
+    assert_eq!(status.latest_valid_hash, Some(block_hash));
+    assert!(!matches!(status.status, PayloadStatusEnum::Accepted));
+    assert!(
+        context.parent_accounting.get(&block_hash).is_some(),
+        "the import must record the accounting token for the imported block"
+    );
+}
+
+#[test]
+fn new_payload_with_seal_rejects_a_state_root_mismatch() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &root, |header| {
+            header.state_root = B256::repeat_byte(0x99);
+        });
+
+    let handler = seal_import_handler(client, context.clone(), validator);
+    let status =
+        handler.new_payload_with_seal(execution_payload, vec![], beacon_root, &companion).unwrap();
+    assert!(status.is_invalid());
+    assert!(status.status.validation_error().unwrap().contains("state root"));
+    assert!(!matches!(status.status, PayloadStatusEnum::Accepted));
+    assert!(context.parent_accounting.is_empty(), "a rejected import records nothing");
+}
+
+#[test]
+fn new_payload_with_seal_reports_a_missing_parent_as_syncing() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &root, |header| {
+            header.parent_hash = B256::repeat_byte(0x99);
+        });
+
+    let handler = seal_import_handler(client, context.clone(), validator);
+    let status =
+        handler.new_payload_with_seal(execution_payload, vec![], beacon_root, &companion).unwrap();
+    assert!(status.is_syncing());
+    assert!(!matches!(status.status, PayloadStatusEnum::Accepted));
+    assert!(context.parent_accounting.is_empty());
+}
+
+#[test]
+fn new_payload_with_seal_reports_a_parent_without_a_token_as_syncing() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    // A local non-genesis parent that this node has never seal-executed.
+    let mut orphan_header = payload.block().header().clone();
+    orphan_header.number = 7;
+    let orphan_hash = orphan_header.hash_slow();
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &root, |header| {
+            header.parent_hash = orphan_hash;
+        });
+
+    let client = Client { extra_headers: vec![orphan_header], ..client };
+    let handler = seal_import_handler(client, context.clone(), validator);
+    let status =
+        handler.new_payload_with_seal(execution_payload, vec![], beacon_root, &companion).unwrap();
+    assert!(status.is_syncing(), "a local parent without a token is a sync condition");
+    assert!(!matches!(status.status, PayloadStatusEnum::Accepted));
+    assert!(context.parent_accounting.is_empty());
+}
+
+#[test]
+fn new_payload_with_seal_rejects_blob_versioned_hashes() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+
+    let handler = seal_import_handler(client, context.clone(), validator);
+    let status = handler
+        .new_payload_with_seal(
+            execution_payload,
+            vec![B256::repeat_byte(0x01)],
+            beacon_root,
+            &companion,
+        )
+        .unwrap();
+    assert!(status.is_invalid());
+    assert!(status.status.validation_error().unwrap().contains("blob versioned hashes"));
+    assert!(context.parent_accounting.is_empty());
+}
+
+#[test]
+fn new_payload_with_seal_rejects_a_malformed_root_input() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let (execution_payload, _companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let malformed = SealCompanion {
+        root_input: vec![0x80].into(),
+        witnesses: vec![],
+        provenance: "newPayload".into(),
+    };
+
+    let handler = seal_import_handler(client, context.clone(), validator);
+    let status =
+        handler.new_payload_with_seal(execution_payload, vec![], beacon_root, &malformed).unwrap();
+    assert!(status.is_invalid());
+    assert!(status.status.validation_error().unwrap().contains("canonical root input"));
+    assert!(context.parent_accounting.is_empty());
+}
+
+#[test]
+fn new_payload_with_seal_never_returns_accepted() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let (good_payload, good_companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (bad_payload, bad_companion, _) = payload_for_import(&payload, &root, |header| {
+        header.state_root = B256::repeat_byte(0x99);
+    });
+
+    let handler = seal_import_handler(client, context, validator);
+    let valid =
+        handler.new_payload_with_seal(good_payload, vec![], beacon_root, &good_companion).unwrap();
+    let invalid =
+        handler.new_payload_with_seal(bad_payload, vec![], beacon_root, &bad_companion).unwrap();
+    assert!(valid.is_valid());
+    assert!(invalid.is_invalid());
+    for status in [valid, invalid] {
+        assert!(!matches!(status.status, PayloadStatusEnum::Accepted));
+    }
+}
+
+#[test]
+fn the_parent_token_recorded_by_an_import_is_usable_by_a_later_build() {
+    // This test proves only the token mechanism: an import records the parent accounting token and
+    // a later `prepare_seal_build` can bind a child job with it. It does NOT demonstrate the
+    // production follower-becomes-leader path, because the import does not persist the block or its
+    // post-state, so in production the provider would not resolve this block as a parent at all.
+    // The README and UNICITY.md record that persistence gap; a Unicity-aware executor component
+    // (planned as U3f) closes it. The test installs the imported header in the test provider
+    // deliberately, to isolate the token mechanism from that gap.
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let imported_header = payload.block().header().clone();
+    let imported_hash = payload.block().hash();
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+
+    let handler = seal_import_handler(client.clone(), context.clone(), validator.clone());
+    let status =
+        handler.new_payload_with_seal(execution_payload, vec![], beacon_root, &companion).unwrap();
+    assert!(status.is_valid());
+    assert!(context.parent_accounting.get(&imported_hash).is_some());
+
+    // The build binds the child to the imported parent using the token the import just recorded.
+    // Without that recording this call would be SYNCING with a missing parent accounting token.
+    // The provider's `extra_headers` above isolates this mechanism from the persistence gap.
+    let leader_client = Client {
+        parent_hash: imported_hash,
+        extra_headers: vec![imported_header.clone()],
+        ..client
+    };
+    let child_root = input(2, 2, imported_hash);
+    let child_attrs = attributes(&child_root, imported_header.timestamp);
+    let returned = prepare_seal_build(
+        &leader_client,
+        &context,
+        &validator,
+        &ForkchoiceState::same_hash(imported_hash),
+        Some(&child_attrs),
+        &seal_input(&child_root),
+    )
+    .unwrap();
+    assert_eq!(returned, child_attrs);
+
+    // The inserted child job resolves through the registry, which is what the payload service does.
+    let child_id = child_attrs.payload_id(&imported_hash);
+    let child_config = PayloadConfig::new(
+        Arc::new(SealedHeader::new(imported_header, imported_hash)),
+        child_attrs,
+        child_id,
+    );
+    assert!(context.registry.resolve(&child_config).is_ok());
 }
