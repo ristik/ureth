@@ -6,8 +6,9 @@
 //! shaped after `EngineApiInner` in `reth_rpc_engine_api`: the same provider, consensus handle and
 //! shared node state.
 //!
-//! The methods are reachable but never advertised. `engine_exchangeCapabilities` is the stock list,
-//! because U3g advertises all three seal methods together or none.
+//! The methods are reachable and advertised. A Unicity node's `engine_exchangeCapabilities` adds
+//! all three seal methods together; the stock Ethereum set is unchanged and the three are never
+//! advertised as a subset.
 //!
 //! # Order
 //!
@@ -37,9 +38,9 @@ use std::{
 use alloy_consensus::Header;
 use alloy_primitives::{B256, U256};
 use alloy_rpc_types_engine::{
-    CancunPayloadFields, ExecutionData, ExecutionPayload, ExecutionPayloadEnvelopeV3,
-    ExecutionPayloadSidecar, ExecutionPayloadV3, ForkchoiceState, ForkchoiceUpdated, PayloadId,
-    PayloadStatus, PayloadStatusEnum,
+    CancunPayloadFields, ClientVersionV1, ExecutionData, ExecutionPayload,
+    ExecutionPayloadEnvelopeV3, ExecutionPayloadSidecar, ExecutionPayloadV3, ForkchoiceState,
+    ForkchoiceUpdated, PayloadId, PayloadStatus, PayloadStatusEnum,
 };
 use jsonrpsee::{core::RpcResult, proc_macros::rpc, types::ErrorObject, RpcModule};
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
@@ -47,16 +48,20 @@ use reth_engine_primitives::{ConsensusEngineHandle, EngineApiValidator, PayloadV
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_evm_ethereum::EthEvmConfig;
 use reth_node_builder::{
-    rpc::{BasicEngineApiBuilder, EngineApiBuilder},
+    rpc::{EngineApiBuilder, PayloadValidatorBuilder},
     AddOnsContext, FullNodeComponents,
 };
+use reth_node_core::version::{version_metadata, CLIENT_CODE};
 use reth_payload_builder::PayloadStore;
 use reth_payload_primitives::{
     validate_payload_timestamp, EngineApiMessageVersion, MessageValidationKind, PayloadOrAttributes,
 };
 use reth_revm::database::StateProviderDatabase;
 use reth_rpc_api::IntoEngineApiRpcModule;
-use reth_rpc_engine_api::EngineApiError;
+use reth_rpc_engine_api::{
+    capabilities::{EngineCapabilities, CAPABILITIES},
+    EngineApi, EngineApiError,
+};
 use reth_storage_api::{HeaderProvider, StateProviderFactory};
 use reth_unicity_execution::{
     block::BlockAccountingError,
@@ -807,6 +812,26 @@ impl UnicityEngineApiBuilder {
     }
 }
 
+/// The three `engine_*WithSealV1` capability strings this node serves.
+///
+/// D2 requires all three to be advertised together or not at all, so this is one list and the
+/// capability set is built from it in one step. A client that saw a subset would believe it could
+/// complete a flow the node cannot.
+pub const SEAL_CAPABILITIES: &[&str] = &[
+    "engine_forkchoiceUpdatedWithSealV1",
+    "engine_newPayloadWithSealV1",
+    "engine_getPayloadWithSealV1",
+];
+
+/// Builds the node's capability set: the stock Ethereum list plus the three seal methods.
+///
+/// This is the only place a Unicity node changes the advertised set.
+/// [`EngineCapabilities::default`] is left untouched, so `EthereumNode` still reports exactly the
+/// stock list.
+pub fn unicity_engine_capabilities() -> EngineCapabilities {
+    EngineCapabilities::new(CAPABILITIES.iter().copied().chain(SEAL_CAPABILITIES.iter().copied()))
+}
+
 impl<N> EngineApiBuilder<N> for UnicityEngineApiBuilder
 where
     N: FullNodeComponents<Types = UnicityNode>,
@@ -819,22 +844,42 @@ where
         + 'static,
 {
     type EngineApi = UnicityEngineApiModule<
-        <BasicEngineApiBuilder<UnicityEngineValidatorBuilder> as EngineApiBuilder<N>>::EngineApi,
+        EngineApi<N::Provider, UnicityEngineTypes, N::Pool, UnicityEngineValidator, ChainSpec>,
         UnicityEngineApiImpl<N::Provider>,
     >;
 
     async fn build_engine_api(self, ctx: &AddOnsContext<'_, N>) -> eyre::Result<Self::EngineApi> {
-        let validator = UnicityEngineValidator::new(ctx.config.chain.clone());
-        let payload_store = PayloadStore::new(ctx.node.payload_builder_handle().clone());
-        let inner = BasicEngineApiBuilder::<UnicityEngineValidatorBuilder>::default()
-            .build_engine_api(ctx)
-            .await?;
+        // Build the validator once and share it between the stock Engine API and the seal sibling.
+        let validator = UnicityEngineValidatorBuilder.build(ctx).await?;
+        let client = ClientVersionV1 {
+            code: CLIENT_CODE,
+            name: version_metadata().name_client.to_string(),
+            version: version_metadata().cargo_pkg_version.to_string(),
+            commit: version_metadata().vergen_git_sha.to_string(),
+        };
+        // `BasicEngineApiBuilder` hardcodes `EngineCapabilities::default()`. This fork builds the
+        // same `EngineApi` with the three seal methods added, so the extension stays in
+        // `crates/unicity` and the stock node's advertised set is untouched. The three are added in
+        // one step, never incrementally.
+        let inner = EngineApi::new(
+            ctx.node.provider().clone(),
+            ctx.config.chain.clone(),
+            ctx.beacon_engine_handle.clone(),
+            PayloadStore::new(ctx.node.payload_builder_handle().clone()),
+            ctx.node.pool().clone(),
+            ctx.node.task_executor().clone(),
+            client,
+            unicity_engine_capabilities(),
+            validator.clone(),
+            ctx.config.engine.accept_execution_requests_hash,
+            ctx.node.network().clone(),
+        );
         let sibling = UnicityEngineApiImpl::new(
             ctx.node.provider().clone(),
             ctx.beacon_engine_handle.clone(),
             self.context,
             validator,
-            payload_store,
+            PayloadStore::new(ctx.node.payload_builder_handle().clone()),
         );
         Ok(UnicityEngineApiModule::new(inner, sibling))
     }

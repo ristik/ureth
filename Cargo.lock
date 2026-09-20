@@ -10836,6 +10836,7 @@ dependencies = [
  "reth-evm",
  "reth-evm-ethereum",
  "reth-node-builder",
+ "reth-node-core",
  "reth-node-ethereum",
  "reth-payload-builder",
  "reth-payload-builder-primitives",

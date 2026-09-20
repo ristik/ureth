@@ -156,7 +156,8 @@ file is edited and no new package enters `Cargo.lock`.
 `crates/unicity/payload` adds the first actual seal method: a jsonrpsee sibling trait in the
 `engine` namespace with `forkchoiceUpdatedWithSealV1`. It is registered on the authenticated engine
 module alongside the stock Engine API, so it is reachable, but `engine_exchangeCapabilities` is the
-stock list and no capability name is added. U3g advertises all three seal methods together or none.
+stock list and no capability name is added. U3g later added all three seal capability strings
+together.
 
 The handler runs the fixed D2 order: decode the canonical root input, resolve the parent header
 (unknown is SYNCING), bind it through the U3a entry points, build the `UnicityEvmConfig` and
@@ -253,8 +254,30 @@ its existing `reth-revm` edge. No upstream source file is edited.
 Devp2p sync of seal blocks does not work: nothing populates the execution-input registry on that
 path, so a seal block received from a peer fails execution with the named missing-input error. D2
 expects a devp2p importer to re-derive the certificate and transitions and re-run the check, which
-is a different entry point from the Engine API forward. That is remaining work. Advertisement stays
-with U3g, which advertises all three seal methods together or none.
+is a different entry point from the Engine API forward. That is remaining work. Advertisement
+landed in U3g, which adds all three seal capability strings together.
+
+## U3g (bft-core #11): advertise the three seal capabilities
+
+`UnicityNode` now advertises the three `engine_*WithSealV1` capability strings in
+`engine_exchangeCapabilities`, added together as one set on top of the stock Ethereum list. A client
+that saw a subset would believe it could complete a flow the node cannot, so there is no incremental
+or configurable advertisement. The methods were already reachable; this unit only changes what the
+exchange reports.
+
+The extension lives in `UnicityEngineApiBuilder` in `crates/unicity/payload`. It builds the stock
+`EngineApi` directly instead of through `BasicEngineApiBuilder`, which hardcodes the stock capability
+list, and passes `unicity_engine_capabilities()`. `EthereumNode`, `EthereumAddOns` and
+`BasicEngineApiBuilder` are untouched, so a stock node still reports exactly the stock list. A test
+asserts that the Unicity set is exactly the stock list plus the three and that the stock set contains
+none of them.
+
+No method behaviour changes. Devp2p sync of seal blocks still does not work (see U3f), and no launch
+test exists: the capability set is verified as a value, not by an Engine RPC exchange on a running
+node, which remains the M1 gate.
+
+This adds one dependency edge from `reth-unicity-payload` to `reth-node-core` for the client-version
+helpers that `BasicEngineApiBuilder` used internally. No upstream source file is edited.
 
 ## Current total fork inventory
 
@@ -263,8 +286,8 @@ Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface
 | Change | Kind |
 | --- | --- |
 | `Cargo.toml`: two workspace member lines and one local dependency entry for `reth-unicity-execution` | makes the two inactive crates workspace-visible and lets payload reuse execution |
-| `Cargo.lock`: two added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring, the U3c to U3e seal methods and the U3f node executor, and to the `reth-unicity-execution` entry for U3f; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
-| `crates/unicity/payload/` | per-payload commitment provision, execution builder, bounded seal-job registry, Unicity node wiring, the `engine_forkchoiceUpdatedWithSealV1`, `engine_getPayloadWithSealV1` and `engine_newPayloadWithSealV1` siblings, and the node executor component |
+| `Cargo.lock`: two added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring, the U3c to U3e seal methods, the U3f node executor and the U3g capability set, and to the `reth-unicity-execution` entry for U3f; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
+| `crates/unicity/payload/` | per-payload commitment provision, execution builder, bounded seal-job registry, Unicity node wiring, the `engine_forkchoiceUpdatedWithSealV1`, `engine_getPayloadWithSealV1` and `engine_newPayloadWithSealV1` siblings, the node executor component and the seal capability advertisement |
 | `crates/unicity/execution/` | bounded registry kernel, shared build/replay adapter, fixtures, the completed-parent token mint, the job root-input accessor and the node EVM dispatch (`node_evm`) |
 | Ten upstream Rust source files formatted by the current nightly rustfmt | repairs hosted formatting drift only |
 | `crates/trie/sparse/src/arena/mod.rs` | removes one redundant clone rejected by current Clippy |
