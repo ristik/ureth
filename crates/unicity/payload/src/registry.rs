@@ -175,6 +175,13 @@ struct ParentAccountingInner {
 /// but not the system/ordinary split, and deriving that split from a header alone would let a
 /// caller invent the parent's base-fee input rather than inherit it from the build that produced
 /// it.
+///
+/// Only blocks this node built are recorded. A follower that imported the parent block through
+/// `engine_newPayloadWithSealV1` has no token for it, so a node cannot currently build on an
+/// imported parent and the build path refuses it as an internal error. The import path executes
+/// imported blocks through the same executor and must record the token there too; that is what
+/// lets a follower lead in a rotating-leader shard. The token is not and must not be derived from
+/// the parent header.
 #[derive(Clone, Debug)]
 pub struct UnicityParentAccountings {
     inner: Arc<Mutex<ParentAccountingInner>>,

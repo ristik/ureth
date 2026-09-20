@@ -445,6 +445,11 @@ where
     ///
     /// The token is only minted from a block the executor actually finished, so a later build can
     /// inherit the parent's ordinary/system gas split instead of inventing it from the header.
+    ///
+    /// Only built blocks are recorded here. A parent this node imported through
+    /// `engine_newPayloadWithSealV1` has no token until the import path records one, so a follower
+    /// cannot yet lead on it. That import path runs the same executor and must publish the token
+    /// there too.
     fn remember_parent(&self, evm_config: &UnicityEvmConfig, payload: &EthBuiltPayload) {
         if let Ok(token) = evm_config.completed_parent_for(payload.block()) {
             self.parent_accounting.insert(payload.block().hash(), token);

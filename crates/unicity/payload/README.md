@@ -83,6 +83,12 @@ header, because the header carries the gross gas but not the system/ordinary spl
 would let a caller invent the parent's base-fee input. The store is bounded and evicts the oldest
 entry first.
 
+Only blocks this node built are recorded. A follower that imported the parent through
+`engine_newPayloadWithSealV1` has no token for it, so a node cannot currently build on an imported
+parent and the method refuses that parent as an internal error. U3e's import path executes imported
+blocks through the same executor and must record the token there too; that is what lets a follower
+lead in a rotating-leader shard. The token is not and must not be derived from the parent header.
+
 The node keeps the stock EVM configuration out of Unicity builds. `UnicityExecutionPayloadBuilder`
 resolves the per-job `UnicityEvmConfig` instead, so an operator's EVM caches or JIT settings do not
 apply to a Unicity payload. The node-level EVM configuration is the next value that will have to be

@@ -169,7 +169,10 @@ error. The method does not trial-execute the system operation.
 The build path now retains the opaque `CompletedParent` token for each block it builds, in a bounded
 `UnicityParentAccountings` store, and looks it up for the next block. The execution crate records
 the gross system gas in `UnicityEvmConfig` when the executor finishes a block and exposes
-`completed_parent_for` to mint the token, so a token is never derived from a header alone.
+`completed_parent_for` to mint the token, so a token is never derived from a header alone. Only
+blocks this node built are recorded, so a follower cannot yet build on an imported parent; U3e's
+`newPayloadWithSealV1` import path must record the token for an imported block as well. That is
+what lets a follower lead in a rotating-leader shard.
 
 This adds a sibling method and a parent-accounting store. It adds dependency edges from
 `reth-unicity-payload` to `alloy-consensus`, `async-trait`, `jsonrpsee`, `reth-evm-ethereum`,
