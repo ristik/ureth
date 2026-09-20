@@ -21,7 +21,8 @@
 //!   `engine_getPayloadWithSealV1` and `engine_newPayloadWithSealV1` siblings: the build path that
 //!   decodes the canonical input, binds the parent, installs the job and forwards the forkchoice
 //!   update; the response that returns the built payload, its block value and the companion; and
-//!   the import path that re-executes the payload and records its accounting token.
+//!   the import path that re-executes the payload, records its accounting token, registers its
+//!   bound input and forwards it to the engine.
 //!
 //! THE SEAL METHODS ARE NOT ADVERTISED. The siblings are registered on the authenticated engine
 //! module, but `engine_exchangeCapabilities` is the stock list and no capability names them, so a
@@ -39,8 +40,8 @@ pub mod rpc;
 
 pub use engine::UnicityEngineTypes;
 pub use node::{
-    UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityNode, UnicityNodeAddOns,
-    UnicityPayloadBuilderBuilder, UnicitySealConfig,
+    UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityExecutorBuilder, UnicityNode,
+    UnicityNodeAddOns, UnicityPayloadBuilderBuilder, UnicitySealConfig,
 };
 pub use registry::{
     SealJobRegistry, UnicityParentAccountings, DEFAULT_PARENT_ACCOUNTING_CAPACITY,

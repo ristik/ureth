@@ -5,8 +5,10 @@
 //! checks the technical-record hash against the structured record, and derives the ABI projection
 //! before executing the two privileged calls. Certificate authentication, configuration binding,
 //! and binding `parent_hash` to the supplied parent state remain caller prerequisites. The shared
-//! adapter supplies build and replay primitives, but is not wired into a node, RPC, Engine API, or
-//! live import path.
+//! adapter supplies build and replay primitives. The `node_evm` module supplies the node-level EVM
+//! component that resolves each seal block's bound input from its header commitment, so the engine
+//! tree executes an imported block through the same bounded executor. RPC and Engine API exposure
+//! lives in `reth-unicity-payload`.
 
 use alloy_primitives::{b256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall};
@@ -22,6 +24,7 @@ use sha2::{Digest, Sha256};
 
 pub mod block;
 pub mod block_executor;
+pub mod node_evm;
 pub mod wire;
 
 sol! {

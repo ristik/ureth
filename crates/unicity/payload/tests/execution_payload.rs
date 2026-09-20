@@ -7,16 +7,17 @@ use alloy_eips::{BlockNumHash, BlockNumberOrTag};
 use alloy_genesis::Genesis;
 use alloy_primitives::{b256, Address, TxKind, B256, U256};
 use alloy_rpc_types_engine::{
-    ExecutionPayloadV3, ForkchoiceState, PayloadAttributes as EthPayloadAttributes, PayloadId,
-    PayloadStatusEnum,
+    ExecutionData, ExecutionPayloadV3, ForkchoiceState, PayloadAttributes as EthPayloadAttributes,
+    PayloadId, PayloadStatus, PayloadStatusEnum,
 };
 use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
 use reth_chainspec::{ChainInfo, ChainSpec, ChainSpecProvider};
-use reth_engine_primitives::ConsensusEngineHandle;
+use reth_engine_primitives::{BeaconEngineMessage, ConsensusEngineHandle};
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
+use reth_evm::{execute::Executor, ConfigureEvm};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_payload_builder::{
     EthBuiltPayload, PayloadBuilderHandle, PayloadServiceCommand, PayloadStore,
@@ -37,8 +38,15 @@ use reth_transaction_pool::{
 };
 use reth_unicity_execution::{
     block::BlockProfile,
-    block_executor::{replay_complete, BoundExecutionInput, UnicityEvmConfig},
-    derive_beacon_root, derive_prev_randao, derive_timestamp, technical_record_hash,
+    block_executor::{
+        replay_complete, BoundExecutionInput, UnicityEvmConfig, MISSING_EXECUTION_INPUT_ERROR,
+    },
+    derive_beacon_root, derive_prev_randao, derive_timestamp,
+    node_evm::{
+        BlockExecutionRegistryError, UnicityBlockExecutionRegistry, UnicityNodeEvmConfig,
+        UnicityNodeEvmError,
+    },
+    technical_record_hash,
     wire::{SealBuildInput, SealCompanion},
     InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY,
 };
@@ -703,6 +711,7 @@ fn seal_fixture() -> (
         builder_config,
         seal: UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR },
         parent_accounting: UnicityParentAccountings::default(),
+        execution_inputs: UnicityBlockExecutionRegistry::default(),
     };
     (client, parent, root, attrs, context, validator)
 }
@@ -987,34 +996,90 @@ fn payload_for_import(
     (execution_payload, companion, beacon_root)
 }
 
-/// Builds the import handler. The consensus handle and payload store channels are closed because
-/// the import path uses neither.
+/// Builds the import handler over a consensus handle and a closed payload store. The import path
+/// does not use the payload store; only the forward uses the consensus handle.
 fn seal_import_handler(
     client: Client,
     context: SealBuildContext,
     validator: UnicityEngineValidator,
+    beacon_consensus: ConsensusEngineHandle<UnicityEngineTypes>,
 ) -> UnicityEngineApiImpl<Client> {
-    let (beacon_tx, _beacon_rx) = tokio::sync::mpsc::unbounded_channel();
     let (store_tx, _store_rx) = tokio::sync::mpsc::unbounded_channel();
     UnicityEngineApiImpl::new(
         client,
-        ConsensusEngineHandle::new(beacon_tx),
+        beacon_consensus,
         context,
         validator,
         PayloadStore::new(PayloadBuilderHandle::new(store_tx)),
     )
 }
 
-#[test]
-fn new_payload_with_seal_imports_a_built_block_and_records_its_token() {
+/// A consensus handle whose receiver is dropped, for refusals that never reach the forward.
+fn closed_engine() -> ConsensusEngineHandle<UnicityEngineTypes> {
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    ConsensusEngineHandle::new(tx)
+}
+
+/// A fake consensus engine that replies to every `NewPayload` with `status` and reports the first
+/// payload it saw on the returned receiver.
+///
+/// This exercises the forward without booting a node. It is not a real engine and does not execute
+/// or persist anything.
+async fn fake_engine(
+    status: PayloadStatus,
+) -> (ConsensusEngineHandle<UnicityEngineTypes>, tokio::sync::oneshot::Receiver<ExecutionData>) {
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    let (seen_tx, seen_rx) = tokio::sync::oneshot::channel();
+    tokio::spawn(async move {
+        let mut seen_tx = Some(seen_tx);
+        while let Some(message) = rx.recv().await {
+            if let BeaconEngineMessage::NewPayload { payload, tx: reply } = message {
+                if let Some(seen_tx) = seen_tx.take() {
+                    let _ = seen_tx.send(payload);
+                }
+                let _ = reply.send(Ok(status.clone()));
+            }
+        }
+    });
+    (ConsensusEngineHandle::new(tx), seen_rx)
+}
+
+/// Builds the genesis-bound execution input for `root`.
+fn bound_input(root: &RootInputV2, parent: &Arc<SealedHeader>) -> Arc<BoundExecutionInput> {
+    Arc::new(
+        BoundExecutionInput::from_validated_genesis(
+            Arc::new(root.clone()),
+            PROFILE,
+            parent,
+            GENESIS_HASH,
+            FEE_COLLECTOR,
+        )
+        .unwrap(),
+    )
+}
+
+/// Returns a copy of `root` with a different tree root, so it has a different commitment.
+fn root_with_tree_root(root: &RootInputV2, tree_root: B256) -> RootInputV2 {
+    let mut next = root.clone();
+    next.origin.tree_root = tree_root;
+    next
+}
+
+#[tokio::test]
+async fn new_payload_with_seal_imports_a_built_block_and_records_its_token() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let block_hash = payload.block().hash();
+    let commitment = B256::from_slice(&payload.block().header().extra_data);
     let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
 
-    let handler = seal_import_handler(client, context.clone(), validator);
-    let status =
-        handler.new_payload_with_seal(execution_payload, vec![], beacon_root, &companion).unwrap();
+    let (engine, seen) =
+        fake_engine(PayloadStatus::new(PayloadStatusEnum::Valid, Some(block_hash))).await;
+    let handler = seal_import_handler(client, context.clone(), validator, engine);
+    let status = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap();
     assert!(status.is_valid());
     assert_eq!(status.latest_valid_hash, Some(block_hash));
     assert!(!matches!(status.status, PayloadStatusEnum::Accepted));
@@ -1022,10 +1087,34 @@ fn new_payload_with_seal_imports_a_built_block_and_records_its_token() {
         context.parent_accounting.get(&block_hash).is_some(),
         "the import must record the accounting token for the imported block"
     );
+    assert!(
+        context.execution_inputs.get(&commitment).is_some(),
+        "the import must register the bound input for the engine to resolve"
+    );
+    // The forward actually reached the engine with this block.
+    assert_eq!(seen.await.unwrap().block_hash(), block_hash);
 }
 
-#[test]
-fn new_payload_with_seal_rejects_a_state_root_mismatch() {
+#[tokio::test]
+async fn new_payload_with_seal_returns_the_engine_verdict() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+
+    let engine_status = PayloadStatus::from_status(PayloadStatusEnum::Invalid {
+        validation_error: "engine verdict".into(),
+    });
+    let (engine, _seen) = fake_engine(engine_status.clone()).await;
+    let handler = seal_import_handler(client, context, validator, engine);
+    let status = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap();
+    assert_eq!(status, engine_status, "the handler must return the engine's verdict");
+}
+
+#[tokio::test]
+async fn new_payload_with_seal_rejects_a_state_root_mismatch() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let (execution_payload, companion, beacon_root) =
@@ -1033,17 +1122,20 @@ fn new_payload_with_seal_rejects_a_state_root_mismatch() {
             header.state_root = B256::repeat_byte(0x99);
         });
 
-    let handler = seal_import_handler(client, context.clone(), validator);
-    let status =
-        handler.new_payload_with_seal(execution_payload, vec![], beacon_root, &companion).unwrap();
+    let handler = seal_import_handler(client, context.clone(), validator, closed_engine());
+    let status = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap();
     assert!(status.is_invalid());
     assert!(status.status.validation_error().unwrap().contains("state root"));
     assert!(!matches!(status.status, PayloadStatusEnum::Accepted));
     assert!(context.parent_accounting.is_empty(), "a rejected import records nothing");
+    assert!(context.execution_inputs.is_empty(), "a rejected import registers nothing");
 }
 
-#[test]
-fn new_payload_with_seal_reports_a_missing_parent_as_syncing() {
+#[tokio::test]
+async fn new_payload_with_seal_reports_a_missing_parent_as_syncing() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let (execution_payload, companion, beacon_root) =
@@ -1051,16 +1143,18 @@ fn new_payload_with_seal_reports_a_missing_parent_as_syncing() {
             header.parent_hash = B256::repeat_byte(0x99);
         });
 
-    let handler = seal_import_handler(client, context.clone(), validator);
-    let status =
-        handler.new_payload_with_seal(execution_payload, vec![], beacon_root, &companion).unwrap();
+    let handler = seal_import_handler(client, context.clone(), validator, closed_engine());
+    let status = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap();
     assert!(status.is_syncing());
     assert!(!matches!(status.status, PayloadStatusEnum::Accepted));
     assert!(context.parent_accounting.is_empty());
 }
 
-#[test]
-fn new_payload_with_seal_reports_a_parent_without_a_token_as_syncing() {
+#[tokio::test]
+async fn new_payload_with_seal_reports_a_parent_without_a_token_as_syncing() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     // A local non-genesis parent that this node has never seal-executed.
@@ -1073,21 +1167,23 @@ fn new_payload_with_seal_reports_a_parent_without_a_token_as_syncing() {
         });
 
     let client = Client { extra_headers: vec![orphan_header], ..client };
-    let handler = seal_import_handler(client, context.clone(), validator);
-    let status =
-        handler.new_payload_with_seal(execution_payload, vec![], beacon_root, &companion).unwrap();
+    let handler = seal_import_handler(client, context.clone(), validator, closed_engine());
+    let status = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap();
     assert!(status.is_syncing(), "a local parent without a token is a sync condition");
     assert!(!matches!(status.status, PayloadStatusEnum::Accepted));
     assert!(context.parent_accounting.is_empty());
 }
 
-#[test]
-fn new_payload_with_seal_rejects_blob_versioned_hashes() {
+#[tokio::test]
+async fn new_payload_with_seal_rejects_blob_versioned_hashes() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
 
-    let handler = seal_import_handler(client, context.clone(), validator);
+    let handler = seal_import_handler(client, context.clone(), validator, closed_engine());
     let status = handler
         .new_payload_with_seal(
             execution_payload,
@@ -1095,14 +1191,15 @@ fn new_payload_with_seal_rejects_blob_versioned_hashes() {
             beacon_root,
             &companion,
         )
+        .await
         .unwrap();
     assert!(status.is_invalid());
     assert!(status.status.validation_error().unwrap().contains("blob versioned hashes"));
     assert!(context.parent_accounting.is_empty());
 }
 
-#[test]
-fn new_payload_with_seal_rejects_a_malformed_root_input() {
+#[tokio::test]
+async fn new_payload_with_seal_rejects_a_malformed_root_input() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let (execution_payload, _companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
@@ -1112,16 +1209,18 @@ fn new_payload_with_seal_rejects_a_malformed_root_input() {
         provenance: "newPayload".into(),
     };
 
-    let handler = seal_import_handler(client, context.clone(), validator);
-    let status =
-        handler.new_payload_with_seal(execution_payload, vec![], beacon_root, &malformed).unwrap();
+    let handler = seal_import_handler(client, context.clone(), validator, closed_engine());
+    let status = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &malformed)
+        .await
+        .unwrap();
     assert!(status.is_invalid());
     assert!(status.status.validation_error().unwrap().contains("canonical root input"));
     assert!(context.parent_accounting.is_empty());
 }
 
-#[test]
-fn new_payload_with_seal_never_returns_accepted() {
+#[tokio::test]
+async fn new_payload_with_seal_never_returns_accepted() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let (good_payload, good_companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
@@ -1129,11 +1228,21 @@ fn new_payload_with_seal_never_returns_accepted() {
         header.state_root = B256::repeat_byte(0x99);
     });
 
-    let handler = seal_import_handler(client, context, validator);
-    let valid =
-        handler.new_payload_with_seal(good_payload, vec![], beacon_root, &good_companion).unwrap();
-    let invalid =
-        handler.new_payload_with_seal(bad_payload, vec![], beacon_root, &bad_companion).unwrap();
+    let (good_engine, _seen) =
+        fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
+    let good_handler =
+        seal_import_handler(client.clone(), context.clone(), validator.clone(), good_engine);
+    let valid = good_handler
+        .new_payload_with_seal(good_payload, vec![], beacon_root, &good_companion)
+        .await
+        .unwrap();
+
+    let bad_handler = seal_import_handler(client, context, validator, closed_engine());
+    let invalid = bad_handler
+        .new_payload_with_seal(bad_payload, vec![], beacon_root, &bad_companion)
+        .await
+        .unwrap();
+
     assert!(valid.is_valid());
     assert!(invalid.is_invalid());
     for status in [valid, invalid] {
@@ -1142,29 +1251,115 @@ fn new_payload_with_seal_never_returns_accepted() {
 }
 
 #[test]
-fn the_parent_token_recorded_by_an_import_is_usable_by_a_later_build() {
+fn block_execution_registry_is_idempotent_and_refuses_conflicts() {
+    let (_client, parent, root, _attrs, _context, _validator) = seal_fixture();
+    let input = bound_input(&root, &parent);
+    let commitment = input.root_input().input_commitment().unwrap();
+
+    let registry = UnicityBlockExecutionRegistry::with_capacity(2);
+    registry.insert(commitment, input.clone()).unwrap();
+    // The same input under the same commitment is idempotent, because a block may be offered twice.
+    registry.insert(commitment, input).unwrap();
+    assert_eq!(registry.len(), 1);
+
+    // A different input declared under the existing commitment is refused, because its own
+    // commitment differs and replacing the entry would change what the commitment executes.
+    let conflicting = bound_input(&root_with_tree_root(&root, B256::repeat_byte(0xab)), &parent);
+    let error = registry.insert(commitment, conflicting).unwrap_err();
+    assert!(matches!(error, BlockExecutionRegistryError::CommitmentMismatch { .. }));
+    assert_eq!(registry.get(&commitment).unwrap().root_input(), &root);
+
+    // Eviction is oldest-first.
+    let second = bound_input(&root_with_tree_root(&root, B256::repeat_byte(0xcd)), &parent);
+    let second_commitment = second.root_input().input_commitment().unwrap();
+    registry.insert(second_commitment, second).unwrap();
+    assert_eq!(registry.len(), 2);
+    let third = bound_input(&root_with_tree_root(&root, B256::repeat_byte(0xef)), &parent);
+    let third_commitment = third.root_input().input_commitment().unwrap();
+    registry.insert(third_commitment, third).unwrap();
+    assert_eq!(registry.len(), 2);
+    assert!(registry.get(&commitment).is_none(), "the oldest commitment was evicted");
+    assert!(registry.get(&second_commitment).is_some());
+    assert!(registry.get(&third_commitment).is_some());
+}
+
+#[test]
+fn node_evm_resolves_each_block_to_its_own_bound_input() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let block = payload.block().clone();
+    let commitment = B256::from_slice(&block.header().extra_data);
+
+    let registry = UnicityBlockExecutionRegistry::default();
+    registry.insert(commitment, bound_input(&root, &parent)).unwrap();
+    // A second, unrelated commitment must not be selected for this block. If the dispatch were
+    // wrong, the header validation against the other input would fail.
+    let other = bound_input(&root_with_tree_root(&root, B256::repeat_byte(0xab)), &parent);
+    let other_commitment = other.root_input().input_commitment().unwrap();
+    registry.insert(other_commitment, other).unwrap();
+
+    let node_config = UnicityNodeEvmConfig::new(EthEvmConfig::new(client.chain_spec()), registry);
+    let ctx = node_config.context_for_block(&block).unwrap();
+    assert_eq!(ctx.extra_data, block.header().extra_data);
+
+    // An unregistered commitment fails with the named error instead of falling back.
+    let mut orphan = block.clone().into_block();
+    orphan.header.extra_data = B256::repeat_byte(0x99).to_vec().into();
+    let orphan = reth_primitives_traits::SealedBlock::seal_slow(orphan);
+    let error = node_config.context_for_block(&orphan).unwrap_err();
+    assert!(matches!(error, UnicityNodeEvmError::MissingInput(_)));
+}
+
+#[test]
+fn node_evm_executes_a_registered_block_and_fails_closed_without_an_input() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let block = payload.block().clone();
+    let commitment = B256::from_slice(&block.header().extra_data);
+    let recovered =
+        RecoveredBlock::try_new(block.clone().into_block(), vec![], block.hash()).unwrap();
+
+    let registry = UnicityBlockExecutionRegistry::default();
+    registry.insert(commitment, bound_input(&root, &parent)).unwrap();
+    let registered = UnicityNodeEvmConfig::new(EthEvmConfig::new(client.chain_spec()), registry);
+    let output = registered.executor(client.state.clone()).execute(&recovered).unwrap();
+    assert_eq!(output.result.gas_used, block.header().gas_used);
+
+    // Without the input the executor fails closed with the named error, not stock execution.
+    let bare = UnicityNodeEvmConfig::new(
+        EthEvmConfig::new(client.chain_spec()),
+        UnicityBlockExecutionRegistry::default(),
+    );
+    let error = bare.executor(client.state).execute(&recovered).unwrap_err();
+    assert!(error.to_string().contains(MISSING_EXECUTION_INPUT_ERROR));
+}
+
+#[tokio::test]
+async fn the_parent_token_recorded_by_an_import_is_usable_by_a_later_build() {
     // This test proves only the token mechanism: an import records the parent accounting token and
     // a later `prepare_seal_build` can bind a child job with it. It does NOT demonstrate the
-    // production follower-becomes-leader path, because the import does not persist the block or its
-    // post-state, so in production the provider would not resolve this block as a parent at all.
-    // The README and UNICITY.md record that persistence gap; a Unicity-aware executor component
-    // (planned as U3f) closes it. The test installs the imported header in the test provider
-    // deliberately, to isolate the token mechanism from that gap.
+    // production follower-becomes-leader path on its own, because the test installs the imported
+    // header in the test provider. U3f now supplies the node executor that lets the engine persist
+    // and re-execute an imported block, so the production gap is closing, but this test does not
+    // exercise a real engine.
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let imported_header = payload.block().header().clone();
     let imported_hash = payload.block().hash();
     let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
 
-    let handler = seal_import_handler(client.clone(), context.clone(), validator.clone());
-    let status =
-        handler.new_payload_with_seal(execution_payload, vec![], beacon_root, &companion).unwrap();
+    let (engine, _seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
+    let handler = seal_import_handler(client.clone(), context.clone(), validator.clone(), engine);
+    let status = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap();
     assert!(status.is_valid());
     assert!(context.parent_accounting.get(&imported_hash).is_some());
 
     // The build binds the child to the imported parent using the token the import just recorded.
     // Without that recording this call would be SYNCING with a missing parent accounting token.
-    // The provider's `extra_headers` above isolates this mechanism from the persistence gap.
+    // The provider's `extra_headers` above isolates this mechanism from the block-persistence path.
     let leader_client = Client {
         parent_hash: imported_hash,
         extra_headers: vec![imported_header.clone()],

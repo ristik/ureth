@@ -22,15 +22,17 @@ use reth_engine_primitives::{EngineApiValidator, PayloadValidator};
 use reth_ethereum_payload_builder::{EthereumBuilderConfig, EthereumExecutionPayloadValidator};
 use reth_ethereum_primitives::{EthPrimitives, TransactionSigned};
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
+use reth_evm_ethereum::EthEvmConfig;
 use reth_node_builder::{
-    components::{BasicPayloadServiceBuilder, ComponentsBuilder, PayloadBuilderBuilder},
+    components::{
+        BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, PayloadBuilderBuilder,
+    },
     rpc::{BasicEngineValidatorBuilder, Identity, PayloadValidatorBuilder, RpcAddOns},
     AddOnsContext, BuilderContext, FullNodeComponents, FullNodeTypes, Node, NodeAdapter, NodeTypes,
     PayloadBuilderConfig,
 };
 use reth_node_ethereum::{
-    EthereumConsensusBuilder, EthereumEthApiBuilder, EthereumExecutorBuilder,
-    EthereumNetworkBuilder, EthereumPoolBuilder,
+    EthereumConsensusBuilder, EthereumEthApiBuilder, EthereumNetworkBuilder, EthereumPoolBuilder,
 };
 use reth_payload_primitives::{
     validate_execution_requests, validate_version_specific_fields, EngineApiMessageVersion,
@@ -39,7 +41,10 @@ use reth_payload_primitives::{
 use reth_primitives_traits::SealedBlock;
 use reth_provider::EthStorage;
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
-use reth_unicity_execution::block::BlockProfile;
+use reth_unicity_execution::{
+    block::BlockProfile,
+    node_evm::{UnicityBlockExecutionRegistry, UnicityNodeEvmConfig},
+};
 
 use crate::{
     registry::UnicityParentAccountings,
@@ -76,6 +81,7 @@ pub struct UnicityNode {
     builder_config: Arc<OnceLock<EthereumBuilderConfig>>,
     seal: UnicitySealConfig,
     parent_accounting: UnicityParentAccountings,
+    execution_inputs: UnicityBlockExecutionRegistry,
 }
 
 impl UnicityNode {
@@ -86,6 +92,7 @@ impl UnicityNode {
             builder_config: Arc::new(OnceLock::new()),
             seal,
             parent_accounting: UnicityParentAccountings::default(),
+            execution_inputs: UnicityBlockExecutionRegistry::default(),
         }
     }
 
@@ -102,6 +109,11 @@ impl UnicityNode {
     /// Returns the parent-accounting store shared with the payload builder and the seal method.
     pub const fn parent_accounting(&self) -> &UnicityParentAccountings {
         &self.parent_accounting
+    }
+
+    /// Returns the execution-input registry shared with the node EVM config.
+    pub const fn execution_inputs(&self) -> &UnicityBlockExecutionRegistry {
+        &self.execution_inputs
     }
 
     /// Returns the exact payload builder configuration the node resolved, once the payload builder
@@ -133,7 +145,7 @@ where
         EthereumPoolBuilder,
         BasicPayloadServiceBuilder<UnicityPayloadBuilderBuilder>,
         EthereumNetworkBuilder,
-        EthereumExecutorBuilder,
+        UnicityExecutorBuilder,
         EthereumConsensusBuilder,
     >;
     type AddOns = UnicityNodeAddOns<NodeAdapter<N>>;
@@ -142,7 +154,7 @@ where
         ComponentsBuilder::default()
             .node_types::<N>()
             .pool(EthereumPoolBuilder::default())
-            .executor(EthereumExecutorBuilder::default())
+            .executor(UnicityExecutorBuilder::new(self.execution_inputs.clone()))
             .payload(BasicPayloadServiceBuilder::new(UnicityPayloadBuilderBuilder::new(
                 self.registry.clone(),
                 self.builder_config.clone(),
@@ -161,11 +173,41 @@ where
                 builder_config: self.builder_config.clone(),
                 seal: self.seal,
                 parent_accounting: self.parent_accounting.clone(),
+                execution_inputs: self.execution_inputs.clone(),
             }),
             BasicEngineValidatorBuilder::default(),
             Default::default(),
             Identity::new(),
         )
+    }
+}
+
+/// Builds [`UnicityNodeEvmConfig`], so the engine tree executes seal blocks with their bound input.
+///
+/// This replaces the stock Ethereum executor component. Without it the engine tree would execute an
+/// imported seal block with the stock EVM, whose pre-execution rules reject the privileged system
+/// prefix, so a valid seal block would be rejected after the import path already accepted it.
+#[derive(Clone, Debug)]
+pub struct UnicityExecutorBuilder {
+    execution_inputs: UnicityBlockExecutionRegistry,
+}
+
+impl UnicityExecutorBuilder {
+    /// Creates the builder from the registry shared with the import path.
+    pub const fn new(execution_inputs: UnicityBlockExecutionRegistry) -> Self {
+        Self { execution_inputs }
+    }
+}
+
+impl<Types, Node> ExecutorBuilder<Node> for UnicityExecutorBuilder
+where
+    Types: NodeTypes<ChainSpec = ChainSpec, Primitives = EthPrimitives>,
+    Node: FullNodeTypes<Types = Types>,
+{
+    type EVM = UnicityNodeEvmConfig;
+
+    async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
+        Ok(UnicityNodeEvmConfig::new(EthEvmConfig::new(ctx.chain_spec()), self.execution_inputs))
     }
 }
 

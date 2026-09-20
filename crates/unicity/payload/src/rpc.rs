@@ -60,7 +60,8 @@ use reth_rpc_engine_api::EngineApiError;
 use reth_storage_api::{HeaderProvider, StateProviderFactory};
 use reth_unicity_execution::{
     block::BlockAccountingError,
-    block_executor::{replay_complete, UnicityEvmConfig},
+    block_executor::{replay_complete, BoundExecutionInput, UnicityEvmConfig},
+    node_evm::UnicityBlockExecutionRegistry,
     wire::{
         bind_completed_parent, bind_validated_genesis, CanonicalCborError, SealBuildInput,
         SealCompanion,
@@ -251,6 +252,16 @@ impl fmt::Display for SealImportError {
 
 impl std::error::Error for SealImportError {}
 
+/// A validated import ready to be registered and forwarded to the consensus engine.
+struct PreparedSealImport {
+    /// The payload to forward, unchanged from the caller.
+    execution_data: ExecutionData,
+    /// The header commitment the bound input resolves under.
+    commitment: B256,
+    /// The bound execution input the engine tree will resolve when it executes the block.
+    input: Arc<BoundExecutionInput>,
+}
+
 /// Resolves and installs the seal job for one build request.
 ///
 /// This is the ordered flow the RPC handler runs, factored out so it can be exercised without a
@@ -395,6 +406,9 @@ pub struct SealBuildContext {
     pub seal: UnicitySealConfig,
     /// Completed parent-accounting tokens published by the build path.
     pub parent_accounting: UnicityParentAccountings,
+    /// Bound execution inputs the node's EVM config resolves when the engine executes a seal
+    /// block.
+    pub execution_inputs: UnicityBlockExecutionRegistry,
 }
 
 /// Maps a preparation refusal to the handler's response.
@@ -535,31 +549,47 @@ where
         + Sync
         + 'static,
 {
-    /// Validates and records one imported seal block.
+    /// Validates and records one imported seal block, registers its bound input and forwards the
+    /// payload to the consensus engine.
     ///
-    /// The verdicts are [`PayloadStatus`] values: VALID, INVALID with the refusal in
-    /// `validationError`, or SYNCING. A provider read failure is an internal error. This method
-    /// does not verify witnesses and does not forward to the consensus engine; the shard-node
-    /// adapter has already authenticated the companion over the JWT channel.
-    pub fn new_payload_with_seal(
+    /// The pre-checks run before the forward and keep their verdicts: VALID is not assumed, an
+    /// unknown parent or a parent without a token is SYNCING, and a malformed or unbound payload is
+    /// INVALID with the refusal in `validationError`. A provider read failure is an internal error.
+    /// The method does not verify witnesses; the shard-node adapter has already authenticated the
+    /// companion over the JWT channel. It never constructs `ACCEPTED`.
+    pub async fn new_payload_with_seal(
         &self,
         payload: ExecutionPayloadV3,
         expected_blob_versioned_hashes: Vec<B256>,
         parent_beacon_block_root: B256,
         seal_companion: &SealCompanion,
     ) -> Result<PayloadStatus, EngineApiError> {
-        match self.try_import_seal_payload(
+        let prepared = match self.try_import_seal_payload(
             payload,
             expected_blob_versioned_hashes,
             parent_beacon_block_root,
             seal_companion,
         ) {
-            Ok(block_hash) => Ok(PayloadStatus::new(PayloadStatusEnum::Valid, Some(block_hash))),
-            Err(error) => import_response(error),
-        }
+            Ok(prepared) => prepared,
+            Err(error) => return import_response(error),
+        };
+
+        // The engine tree resolves this input when it executes the forwarded block. Register it
+        // before the forward, because the engine can begin executing as soon as the message is
+        // sent.
+        self.context
+            .execution_inputs
+            .insert(prepared.commitment, prepared.input)
+            .map_err(|error| EngineApiError::Internal(Box::new(error)))?;
+
+        // Forward to the engine as the stock `newPayloadV3` path does and return its verdict.
+        self.beacon_consensus
+            .new_payload(prepared.execution_data)
+            .await
+            .map_err(EngineApiError::NewPayload)
     }
 
-    /// Runs the ordered import flow and returns the imported block hash on success.
+    /// Runs the ordered import flow and returns the pieces the forward needs on success.
     ///
     /// Sender recovery is this path's responsibility: `replay_complete` documents that it does not
     /// recover senders and requires the caller to have verified them, so the payload validator's
@@ -570,7 +600,7 @@ where
         expected_blob_versioned_hashes: Vec<B256>,
         parent_beacon_block_root: B256,
         seal_companion: &SealCompanion,
-    ) -> Result<B256, SealImportError> {
+    ) -> Result<PreparedSealImport, SealImportError> {
         // 1. Decode the canonical root input.
         let root = seal_companion.decode_root_input().map_err(SealImportError::RootInput)?;
         // 2. The bounded profile disables blobs, so any expected hash is a refusal rather than
@@ -600,7 +630,7 @@ where
             .map_err(|error| SealImportError::VersionFields(error.to_string()))?;
         let block = self
             .validator
-            .ensure_well_formed_payload(execution_data)
+            .ensure_well_formed_payload(execution_data.clone())
             .map_err(|error| SealImportError::Payload(error.to_string()))?;
 
         // 4. Resolve the payload parent. Absence is a sync condition, not a bad block.
@@ -639,7 +669,8 @@ where
             )
             .map_err(SealImportError::Binding)?
         };
-        let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec), Arc::new(bound));
+        let input = Arc::new(bound);
+        let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec), input.clone());
 
         // 6. Re-use the shared replay rather than a second execution or comparison path.
         let state_provider = self
@@ -657,7 +688,14 @@ where
         // 7. Record the imported block's accounting so a node that followed it can lead on it next.
         let block_hash = block.hash();
         self.context.parent_accounting.insert(block_hash, replay.parent);
-        Ok(block_hash)
+
+        // 8. The engine executes the forwarded block and its EVM config resolves this input by the
+        //    commitment in the header's extraData. Derive that key from the input itself.
+        let commitment = input
+            .root_input()
+            .input_commitment()
+            .map_err(|_| SealImportError::Payload("bound input has no commitment".to_owned()))?;
+        Ok(PreparedSealImport { execution_data, commitment, input })
     }
 }
 
@@ -712,12 +750,14 @@ where
         parent_beacon_block_root: B256,
         seal_companion: SealCompanion,
     ) -> RpcResult<PayloadStatus> {
-        Ok(self.new_payload_with_seal(
-            payload,
-            expected_blob_versioned_hashes,
-            parent_beacon_block_root,
-            &seal_companion,
-        )?)
+        Ok(self
+            .new_payload_with_seal(
+                payload,
+                expected_blob_versioned_hashes,
+                parent_beacon_block_root,
+                &seal_companion,
+            )
+            .await?)
     }
 }
 
