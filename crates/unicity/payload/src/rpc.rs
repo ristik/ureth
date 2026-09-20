@@ -37,13 +37,14 @@ use alloy_consensus::Header;
 use alloy_rpc_types_engine::{ForkchoiceState, ForkchoiceUpdated, PayloadStatusEnum};
 use jsonrpsee::{core::RpcResult, proc_macros::rpc, RpcModule};
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
-use reth_engine_primitives::ConsensusEngineHandle;
+use reth_engine_primitives::{ConsensusEngineHandle, EngineApiValidator};
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_evm_ethereum::EthEvmConfig;
 use reth_node_builder::{
     rpc::{BasicEngineApiBuilder, EngineApiBuilder},
     AddOnsContext, FullNodeComponents,
 };
+use reth_payload_primitives::EngineApiMessageVersion;
 use reth_rpc_api::IntoEngineApiRpcModule;
 use reth_rpc_engine_api::EngineApiError;
 use reth_storage_api::HeaderProvider;
@@ -54,7 +55,7 @@ use reth_unicity_execution::{
 };
 
 use crate::{
-    node::{UnicityEngineValidatorBuilder, UnicityNode, UnicitySealConfig},
+    node::{UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityNode, UnicitySealConfig},
     registry::{SealJobRegistry, UnicityParentAccountings},
     PayloadJobResolutionError, ResolvedPayloadJob, UnicityEngineTypes, UnicityPayloadAttributes,
 };
@@ -84,6 +85,8 @@ pub trait UnicityEngineApi {
 pub enum SealBuildError {
     /// The required `payloadAttributes` parameter was absent.
     AttributesMissing,
+    /// The validator refused the payload attributes.
+    Attributes(String),
     /// `sealBuildInput.rootInput` is not a canonical root input.
     RootInput(CanonicalCborError),
     /// The provider failed to read the parent header.
@@ -106,6 +109,7 @@ impl fmt::Display for SealBuildError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::AttributesMissing => formatter.write_str("payload attributes are required"),
+            Self::Attributes(message) => formatter.write_str(message),
             Self::RootInput(error) => {
                 write!(formatter, "rootInput is not a canonical root input: {error}")
             }
@@ -139,6 +143,7 @@ impl std::error::Error for SealBuildError {}
 pub fn prepare_seal_build<P>(
     provider: &P,
     context: &SealBuildContext,
+    validator: &UnicityEngineValidator,
     state: &ForkchoiceState,
     attributes: Option<&UnicityPayloadAttributes>,
     seal_build_input: &SealBuildInput,
@@ -147,6 +152,12 @@ where
     P: HeaderProvider<Header = Header> + ChainSpecProvider<ChainSpec = ChainSpec>,
 {
     let attributes = attributes.cloned().ok_or(SealBuildError::AttributesMissing)?;
+    // Match the stock `fork_choice_updated_v3` path: reject malformed attributes before any state
+    // change, so a refusal cannot leave a registry entry behind for input that should never have
+    // been accepted. The refusal stays INVALID with the validator's message.
+    validator
+        .ensure_well_formed_attributes(EngineApiMessageVersion::V3, &attributes)
+        .map_err(|error| SealBuildError::Attributes(error.to_string()))?;
     let root = seal_build_input.decode_root_input().map_err(SealBuildError::RootInput)?;
     let parent = provider
         .sealed_header_by_hash(state.head_block_hash)
@@ -230,16 +241,19 @@ pub struct UnicityEngineApiImpl<Provider> {
     provider: Provider,
     beacon_consensus: ConsensusEngineHandle<UnicityEngineTypes>,
     context: SealBuildContext,
+    validator: UnicityEngineValidator,
 }
 
 impl<Provider> UnicityEngineApiImpl<Provider> {
-    /// Creates the handler over the node's provider, consensus handle and shared build state.
+    /// Creates the handler over the node's provider, consensus handle, shared build state and
+    /// attribute validator.
     pub const fn new(
         provider: Provider,
         beacon_consensus: ConsensusEngineHandle<UnicityEngineTypes>,
         context: SealBuildContext,
+        validator: UnicityEngineValidator,
     ) -> Self {
-        Self { provider, beacon_consensus, context }
+        Self { provider, beacon_consensus, context, validator }
     }
 }
 
@@ -271,6 +285,7 @@ where
         let attributes = match prepare_seal_build(
             &self.provider,
             &self.context,
+            &self.validator,
             &fork_choice_state,
             payload_attributes.as_ref(),
             &seal_build_input,
@@ -351,6 +366,7 @@ where
     >;
 
     async fn build_engine_api(self, ctx: &AddOnsContext<'_, N>) -> eyre::Result<Self::EngineApi> {
+        let validator = UnicityEngineValidator::new(ctx.config.chain.clone());
         let inner = BasicEngineApiBuilder::<UnicityEngineValidatorBuilder>::default()
             .build_engine_api(ctx)
             .await?;
@@ -358,6 +374,7 @@ where
             ctx.node.provider().clone(),
             ctx.beacon_engine_handle.clone(),
             self.context,
+            validator,
         );
         Ok(UnicityEngineApiModule::new(inner, sibling))
     }

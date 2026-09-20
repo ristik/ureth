@@ -37,8 +37,9 @@ use reth_unicity_execution::{
 use reth_unicity_payload::{
     prepare_seal_build, refusal_response, ExecutionPayloadJobResolver, FixedPayloadJobResolver,
     PayloadJobResolutionError, ResolvedPayloadJob, SealBuildContext, SealBuildError,
-    SealJobRegistry, UnicityExecutionPayloadBuilder, UnicityParentAccountings,
-    UnicityPayloadAttributes, UnicitySealConfig, DEFAULT_SEAL_JOB_CAPACITY,
+    SealJobRegistry, UnicityEngineValidator, UnicityExecutionPayloadBuilder,
+    UnicityParentAccountings, UnicityPayloadAttributes, UnicitySealConfig,
+    DEFAULT_SEAL_JOB_CAPACITY,
 };
 use std::{
     ops::RangeBounds,
@@ -646,16 +647,22 @@ fn seal_job_registry_is_bounded_shared_and_refuses_duplicates() {
     registry.insert(job_d).unwrap();
     assert!(shared.resolve(&config(&attrs_d)).is_ok());
 }
-
 /// A genesis-parent fixture for the seal build handler.
 ///
 /// The provider serves only the genesis header, and the state is the signed real genesis so a job
 /// inserted by the handler can be resolved and built.
-fn seal_fixture(
-) -> (Client, Arc<SealedHeader>, RootInputV2, UnicityPayloadAttributes, SealBuildContext) {
+fn seal_fixture() -> (
+    Client,
+    Arc<SealedHeader>,
+    RootInputV2,
+    UnicityPayloadAttributes,
+    SealBuildContext,
+    UnicityEngineValidator,
+) {
     let genesis: Genesis =
         serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
+    let validator = UnicityEngineValidator::new(chain_spec.clone());
     let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH));
     let mut state = FixtureProvider::signed_genesis();
     state.set_block_hash(0, GENESIS_HASH);
@@ -676,7 +683,7 @@ fn seal_fixture(
         seal: UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR },
         parent_accounting: UnicityParentAccountings::default(),
     };
-    (client, parent, root, attrs, context)
+    (client, parent, root, attrs, context, validator)
 }
 
 fn seal_input(root: &RootInputV2) -> SealBuildInput {
@@ -685,11 +692,12 @@ fn seal_input(root: &RootInputV2) -> SealBuildInput {
 
 #[test]
 fn seal_build_rejects_non_canonical_root_input_as_invalid() {
-    let (client, _parent, _root, attrs, context) = seal_fixture();
+    let (client, _parent, _root, attrs, context, validator) = seal_fixture();
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
     let bad = SealBuildInput { root_input: vec![0x80].into(), transitions: vec![] };
 
-    let error = prepare_seal_build(&client, &context, &state, Some(&attrs), &bad).unwrap_err();
+    let error =
+        prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &bad).unwrap_err();
     assert!(matches!(error, SealBuildError::RootInput(_)));
 
     let response = refusal_response(error).unwrap();
@@ -704,12 +712,38 @@ fn seal_build_rejects_non_canonical_root_input_as_invalid() {
 }
 
 #[test]
+fn seal_build_rejects_malformed_attributes_as_invalid_before_inserting() {
+    let (client, _parent, root, mut attrs, context, validator) = seal_fixture();
+    // Cancun requires withdrawals in the attributes; ResolvedPayloadJob alone would tolerate a
+    // missing list, so this exercises the validator parity.
+    attrs.inner.withdrawals = None;
+    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+
+    let error =
+        prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &seal_input(&root))
+            .unwrap_err();
+    assert!(matches!(error, SealBuildError::Attributes(_)));
+    assert!(context.registry.is_empty(), "the refusal must happen before any job is inserted");
+
+    let response = refusal_response(error).unwrap();
+    assert!(response.payload_status.is_invalid());
+    assert!(response.payload_status.status.validation_error().is_some());
+}
+
+#[test]
 fn seal_build_reports_an_unknown_parent_as_syncing() {
-    let (client, _parent, root, attrs, context) = seal_fixture();
+    let (client, _parent, root, attrs, context, validator) = seal_fixture();
     let unknown = ForkchoiceState::same_hash(B256::repeat_byte(0x99));
 
-    let error = prepare_seal_build(&client, &context, &unknown, Some(&attrs), &seal_input(&root))
-        .unwrap_err();
+    let error = prepare_seal_build(
+        &client,
+        &context,
+        &validator,
+        &unknown,
+        Some(&attrs),
+        &seal_input(&root),
+    )
+    .unwrap_err();
     assert_eq!(error, SealBuildError::UnknownParent);
     assert!(refusal_response(error).unwrap().is_syncing());
     assert!(context.registry.is_empty());
@@ -717,11 +751,11 @@ fn seal_build_reports_an_unknown_parent_as_syncing() {
 
 #[test]
 fn seal_build_requires_payload_attributes() {
-    let (client, _parent, root, _attrs, context) = seal_fixture();
+    let (client, _parent, root, _attrs, context, validator) = seal_fixture();
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
 
-    let error =
-        prepare_seal_build(&client, &context, &state, None, &seal_input(&root)).unwrap_err();
+    let error = prepare_seal_build(&client, &context, &validator, &state, None, &seal_input(&root))
+        .unwrap_err();
     assert_eq!(error, SealBuildError::AttributesMissing);
 
     let response = refusal_response(error).unwrap();
@@ -734,12 +768,13 @@ fn seal_build_requires_payload_attributes() {
 
 #[test]
 fn seal_build_refuses_a_duplicate_payload_id() {
-    let (client, _parent, root, attrs, context) = seal_fixture();
+    let (client, _parent, root, attrs, context, validator) = seal_fixture();
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
     let input = seal_input(&root);
 
-    prepare_seal_build(&client, &context, &state, Some(&attrs), &input).unwrap();
-    let error = prepare_seal_build(&client, &context, &state, Some(&attrs), &input).unwrap_err();
+    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input).unwrap();
+    let error = prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input)
+        .unwrap_err();
     assert_eq!(error, SealBuildError::DuplicatePayloadId);
     assert_eq!(
         refusal_response(error).unwrap().payload_status.status.validation_error(),
@@ -750,11 +785,12 @@ fn seal_build_refuses_a_duplicate_payload_id() {
 
 #[test]
 fn seal_build_job_resolves_with_the_published_builder_config() {
-    let (client, parent, root, attrs, context) = seal_fixture();
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
 
     let returned =
-        prepare_seal_build(&client, &context, &state, Some(&attrs), &seal_input(&root)).unwrap();
+        prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &seal_input(&root))
+            .unwrap();
     assert_eq!(returned, attrs);
     assert_eq!(context.registry.len(), 1);
 
