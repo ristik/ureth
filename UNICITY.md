@@ -156,7 +156,7 @@ file is edited and no new package enters `Cargo.lock`.
 `crates/unicity/payload` adds the first actual seal method: a jsonrpsee sibling trait in the
 `engine` namespace with `forkchoiceUpdatedWithSealV1`. It is registered on the authenticated engine
 module alongside the stock Engine API, so it is reachable, but `engine_exchangeCapabilities` is the
-stock list and no capability name is added. U3f advertises all three seal methods together or none.
+stock list and no capability name is added. U3g advertises all three seal methods together or none.
 
 The handler runs the fixed D2 order: decode the canonical root input, resolve the parent header
 (unknown is SYNCING), bind it through the U3a entry points, build the `UnicityEvmConfig` and
@@ -220,10 +220,13 @@ been seal-executed locally through this same path. This is what makes the seal c
 contiguous, and it is why U3e records the token for an imported block. The method does not
 re-execute the parent recursively and does not mint a token from a header.
 
-The import path does not persist the block or its post-state. `replay_complete` validates the block
-and mints the token, but the node database is unchanged, so a later import or build cannot resolve
-this block as a parent until it is persisted. This unit does not close that gap; the adapter or a
-later unit owns persistence.
+The import path validates the block, mints and records the parent token, and returns VALID, but it
+does NOT persist the block or its post-state and does NOT forward to the consensus engine. The node
+database and the engine tree are unchanged, so the seal chain does not yet run contiguously in
+production: a later import or build cannot resolve the imported block as a parent, and the stock
+executor would reject a seal block anyway because only the payload-builder job path is
+Unicity-aware. Closing that needs a Unicity-aware executor component that resolves a per-block bound
+input, planned as U3f. This unit does not attempt it.
 
 This adds the method and one dependency edge from `reth-unicity-payload` to `reth-revm`. No upstream
 source file is edited.

@@ -9,7 +9,7 @@
 //! build, which resolves that exact job.
 //!
 //! The sibling is reachable but not advertised: `engine_exchangeCapabilities` is the stock list and
-//! no capability string names the method. U3f advertises all three seal methods together or none.
+//! no capability string names the method. U3g advertises all three seal methods together or none.
 //! The stock `engine_*` surface is assembled from upstream components exactly as the plain Ethereum
 //! node assembles it.
 
@@ -351,7 +351,7 @@ where
 /// Standard RPC add-ons for a Unicity node.
 ///
 /// The engine API builder is the stock [`BasicEngineApiBuilder`] plus the seal sibling method, so
-/// the sibling is reachable but no capability is advertised. U3f will advertise the three seal
+/// the sibling is reachable but no capability is advertised. U3g will advertise the three seal
 /// methods together or not at all.
 pub type UnicityNodeAddOns<N> =
     RpcAddOns<N, EthereumEthApiBuilder, UnicityEngineValidatorBuilder, UnicityEngineApiBuilder>;

@@ -7,7 +7,7 @@ attributes end to end and use that builder with a bounded `SealJobRegistry`. The
 `engine_forkchoiceUpdatedWithSealV1` sibling is registered on the authenticated engine module.
 
 The method is reachable but not advertised: `engine_exchangeCapabilities` is the stock list and no
-capability names it, so the standard `engine_*` surface a client can discover is unchanged. U3f
+capability names it, so the standard `engine_*` surface a client can discover is unchanged. U3g
 advertises all three seal methods together or none.
 
 ## Per-job authority
@@ -138,10 +138,13 @@ seal-executed locally through this same path. Treating a never-seal-executed par
 is what makes the seal chain import contiguous. The method never re-executes the parent recursively
 and never mints a token from a header.
 
-The import path does not persist the block or its post-state. `replay_complete` validates the block
-and mints the accounting token, but the node's database is unchanged, so a later import or build
-cannot resolve this block as a parent until it is persisted. That is an open gap this unit does not
-close; the adapter or a later unit owns persistence.
+The import path validates the block, mints and records the parent token, and returns VALID, but it
+does NOT persist the block or its post-state and does NOT forward to the consensus engine. The node
+database and the engine tree are unchanged, so the seal chain does not yet run contiguously in
+production: a later import or build cannot resolve the imported block as a parent, and the stock
+executor would reject a seal block anyway because only the payload-builder job path is
+Unicity-aware. Closing that needs a Unicity-aware executor component that resolves a per-block bound
+input, planned as U3f. This unit does not attempt it.
 
 The node keeps the stock EVM configuration out of Unicity builds. `UnicityExecutionPayloadBuilder`
 resolves the per-job `UnicityEvmConfig` instead, so an operator's EVM caches or JIT settings do not

@@ -25,7 +25,7 @@
 //!
 //! THE SEAL METHODS ARE NOT ADVERTISED. The siblings are registered on the authenticated engine
 //! module, but `engine_exchangeCapabilities` is the stock list and no capability names them, so a
-//! client cannot discover them. U3f advertises all three seal methods together or none. The
+//! client cannot discover them. U3g advertises all three seal methods together or none. The
 //! execution-aware path remains structurally bound only: its resolver performs structural binding,
 //! while certificate/JWT authentication and exact-parent state provenance remain caller
 //! prerequisites. The import path does not verify witnesses, and the build-path companion carries
