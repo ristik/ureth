@@ -34,7 +34,12 @@ use reth_evm_ethereum::{EthBlockAssembler, EthEvmConfig, RethReceiptBuilder};
 use reth_primitives_traits::{RecoveredBlock, SealedBlock, SealedHeader};
 use reth_storage_api::StateProvider;
 use revm::{database::State, DatabaseCommit, Inspector};
-use std::{convert::Infallible, error::Error, fmt, sync::Arc};
+use std::{
+    convert::Infallible,
+    error::Error,
+    fmt,
+    sync::{Arc, Mutex},
+};
 
 /// Immutable data bound to one build or replay job.
 #[derive(Clone, Debug)]
@@ -288,14 +293,48 @@ pub struct UnicityEvmConfig {
     executor_factory:
         UnicityBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, alloy_evm::EthEvmFactory>,
     bound: Arc<BoundExecutionInput>,
+    /// Gross system gas of the last block this configuration finished, if any.
+    system_gas: Arc<Mutex<Option<u64>>>,
 }
 
 impl UnicityEvmConfig {
     /// Creates one immutable block-job configuration for both build and replay.
     pub fn new(inner: EthEvmConfig, bound: Arc<BoundExecutionInput>) -> Self {
-        let executor_factory =
-            UnicityBlockExecutorFactory::new(inner.executor_factory.clone(), bound.clone());
-        Self { inner, executor_factory, bound }
+        let system_gas = Arc::new(Mutex::new(None));
+        let executor_factory = UnicityBlockExecutorFactory::new(
+            inner.executor_factory.clone(),
+            bound.clone(),
+            system_gas.clone(),
+        );
+        Self { inner, executor_factory, bound, system_gas }
+    }
+
+    /// Mints the opaque parent-accounting token for a block this configuration finished.
+    ///
+    /// The executor records the gross system gas it charged. Reconcile it with the block's header
+    /// gas and base fee. A configuration that has not finished a block yet has no recorded gas and
+    /// refuses, so a caller cannot mint a token from a header alone.
+    pub fn completed_parent_for(
+        &self,
+        sealed: &SealedBlock<Block>,
+    ) -> Result<CompletedParent, crate::block::BlockAccountingError> {
+        let system = self
+            .system_gas
+            .lock()
+            .ok()
+            .and_then(|slot| *slot)
+            .ok_or(crate::block::BlockAccountingError::ParentGasMismatch)?;
+        let accounting = ParentExecutionOutcome::reconcile(
+            self.bound.profile,
+            sealed.hash(),
+            sealed.header().gas_used,
+            system,
+            sealed
+                .header()
+                .base_fee_per_gas
+                .ok_or(crate::block::BlockAccountingError::InvalidParentBaseFee)?,
+        )?;
+        Ok(CompletedParent(accounting))
     }
 
     /// Checks that payload-builder inputs select this configuration's exact immutable job.
@@ -340,6 +379,7 @@ impl UnicityEvmConfig {
 pub struct UnicityBlockExecutorFactory<R, Spec, EvmF> {
     inner: EthBlockExecutorFactory<R, Spec, EvmF>,
     bound: Arc<BoundExecutionInput>,
+    system_gas: Arc<Mutex<Option<u64>>>,
 }
 
 impl<R, Spec, EvmF> UnicityBlockExecutorFactory<R, Spec, EvmF> {
@@ -347,8 +387,9 @@ impl<R, Spec, EvmF> UnicityBlockExecutorFactory<R, Spec, EvmF> {
     pub const fn new(
         inner: EthBlockExecutorFactory<R, Spec, EvmF>,
         bound: Arc<BoundExecutionInput>,
+        system_gas: Arc<Mutex<Option<u64>>>,
     ) -> Self {
-        Self { inner, bound }
+        Self { inner, bound, system_gas }
     }
 }
 
@@ -356,6 +397,8 @@ impl<R, Spec, EvmF> UnicityBlockExecutorFactory<R, Spec, EvmF> {
 pub struct UnicityBlockExecutor<'a, E, Spec, R: ReceiptBuilder> {
     inner: EthBlockExecutor<'a, E, Spec, R>,
     bound: Arc<BoundExecutionInput>,
+    /// Shared slot where `finish` records the gross system gas it charged.
+    system_gas: Arc<Mutex<Option<u64>>>,
     prefix: PrefixState,
 }
 
@@ -410,6 +453,7 @@ where
         UnicityBlockExecutor {
             inner: self.inner.create_executor(evm, ctx),
             bound: self.bound.clone(),
+            system_gas: self.system_gas.clone(),
             prefix: PrefixState::Pending,
         }
     }
@@ -507,6 +551,11 @@ where
         let PrefixState::Ready(system) = self.prefix else {
             return Err(BlockExecutionError::msg("pre-execution changes not applied"));
         };
+        // Record the gross system work so `completed_parent_for` can mint the parent-accounting
+        // token without inventing the split from the header alone.
+        if let Ok(mut slot) = self.system_gas.lock() {
+            *slot = Some(system);
+        }
         let profile = self.bound.profile;
         let (evm, mut result) = self.inner.finish()?;
         if result.blob_gas_used != 0 {
