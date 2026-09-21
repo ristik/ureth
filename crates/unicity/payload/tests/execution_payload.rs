@@ -53,11 +53,11 @@ use reth_unicity_execution::{
 use reth_unicity_payload::{
     build_seal_companion, prepare_seal_build, refusal_response, unicity_engine_capabilities,
     CompanionSink, ExecutionPayloadJobResolver, FixedPayloadJobResolver, PayloadJobResolutionError,
-    ResolvedPayloadJob, SealBuildContext, SealBuildError, SealBuildState, SealJobRegistry,
-    UnicityEngineApiImpl, UnicityEngineTypes, UnicityEngineValidator,
-    UnicityExecutionPayloadBuilder, UnicityParentAccountings, UnicityPayloadAttributes,
-    UnicityRetentionConfig, UnicitySealConfig, COMPANION_NOT_RETAINED_CODE,
-    DEFAULT_SEAL_JOB_CAPACITY, SEAL_CAPABILITIES,
+    ResolvedPayloadJob, SealBuildContext, SealBuildError, SealBuildState, SealCompanionLookup,
+    SealJobRegistry, UnicityEngineApiImpl, UnicityEngineTypes, UnicityEngineValidator,
+    UnicityExecutionPayloadBuilder, UnicityNode, UnicityParentAccountings,
+    UnicityPayloadAttributes, UnicityRetentionConfig, UnicityRpcModuleImpl, UnicityRpcServer,
+    UnicitySealConfig, COMPANION_NOT_RETAINED_CODE, DEFAULT_SEAL_JOB_CAPACITY, SEAL_CAPABILITIES,
 };
 use reth_unicity_store::{open as open_companion_store, CompanionStore, Lookup, StoreError};
 use std::{
@@ -144,7 +144,16 @@ impl BlockNumReader for Client {
         Ok(0)
     }
     fn block_number(&self, hash: B256) -> ProviderResult<Option<u64>> {
-        Ok((hash == self.parent_hash).then_some(0))
+        if hash == self.parent_hash {
+            return Ok(Some(0));
+        }
+        // The read-surface tests serve canonical headers above genesis through `extra_headers`,
+        // so a hash in that set resolves to the number it carries.
+        Ok(self
+            .extra_headers
+            .iter()
+            .find(|header| header.hash_slow() == hash)
+            .map(|header| header.number))
     }
 }
 
@@ -1663,4 +1672,117 @@ fn unicity_capabilities_are_the_stock_set_plus_the_three_seal_methods() {
     for capability in SEAL_CAPABILITIES {
         assert!(!stock.as_set().contains(*capability), "stock must not advertise {capability}");
     }
+}
+
+#[tokio::test]
+async fn get_seal_companion_returns_a_stored_companion() {
+    let (client, _parent, root, _attrs, _context, _validator) = seal_fixture();
+    let (_dir, store) = temp_store();
+    let companion = build_seal_companion(&root).unwrap();
+    store.put(GENESIS_HASH, 0, &companion).unwrap();
+
+    let rpc = UnicityRpcModuleImpl::new(client, store);
+    let lookup = rpc.get_seal_companion_v1(GENESIS_HASH).await.unwrap();
+    assert_eq!(lookup, SealCompanionLookup::Found { companion });
+}
+
+#[tokio::test]
+async fn get_seal_companion_reports_unavailable_below_the_horizon() {
+    let (client, _parent, root, _attrs, _context, _validator) = seal_fixture();
+    let (_dir, store) = temp_store();
+    let companion = build_seal_companion(&root).unwrap();
+    // A genuine prune: `prune_below` drops block 0 and raises the horizon to 5.
+    store.put(GENESIS_HASH, 0, &companion).unwrap();
+    store.prune_below(5).unwrap();
+
+    let rpc = UnicityRpcModuleImpl::new(client, store);
+    assert_eq!(
+        rpc.get_seal_companion_v1(GENESIS_HASH).await.unwrap(),
+        SealCompanionLookup::Unavailable { horizon: 5 },
+        "a pruned block below the horizon is unavailable"
+    );
+}
+
+#[tokio::test]
+async fn get_seal_companion_reports_unknown_for_a_canonical_block_at_the_horizon() {
+    let (client, _parent, _root, _attrs, _context, _validator) = seal_fixture();
+    // A canonical header exactly at the horizon. Pruning drops only numbers below the horizon, so
+    // this block was never dropped; an absent entry means the node never saw it, not that it was
+    // pruned.
+    let mut at_horizon = client.chain_spec.genesis_header().clone();
+    at_horizon.number = 5;
+    let at_hash = at_horizon.hash_slow();
+    let client = Client { extra_headers: vec![at_horizon], ..client };
+
+    let (_dir, store) = temp_store();
+    store.set_horizon(5).unwrap();
+
+    let rpc = UnicityRpcModuleImpl::new(client, store);
+    assert_eq!(
+        rpc.get_seal_companion_v1(at_hash).await.unwrap(),
+        SealCompanionLookup::Unknown,
+        "a block at the horizon was never pruned, so its absence is unknown"
+    );
+}
+
+#[tokio::test]
+async fn get_seal_companion_reports_unknown_for_a_hash_the_node_never_saw_with_a_horizon() {
+    let (client, _parent, _root, _attrs, _context, _validator) = seal_fixture();
+    let (_dir, store) = temp_store();
+    store.set_horizon(5).unwrap();
+
+    let rpc = UnicityRpcModuleImpl::new(client, store);
+    assert_eq!(
+        rpc.get_seal_companion_v1(B256::repeat_byte(0x99)).await.unwrap(),
+        SealCompanionLookup::Unknown,
+        "a horizon does not make a hash the chain does not know unavailable"
+    );
+}
+
+#[tokio::test]
+async fn get_seal_companion_reports_unknown_for_a_canonical_hash_above_the_horizon() {
+    let (client, _parent, _root, _attrs, _context, _validator) = seal_fixture();
+    let mut above = client.chain_spec.genesis_header().clone();
+    above.number = 7;
+    let above_hash = above.hash_slow();
+    let client = Client { extra_headers: vec![above], ..client };
+
+    let (_dir, store) = temp_store();
+    store.set_horizon(5).unwrap();
+
+    let rpc = UnicityRpcModuleImpl::new(client, store);
+    assert_eq!(
+        rpc.get_seal_companion_v1(above_hash).await.unwrap(),
+        SealCompanionLookup::Unknown,
+        "a canonical block above the horizon is unknown, not unavailable"
+    );
+}
+
+#[tokio::test]
+async fn seal_companion_horizon_is_null_before_pruning_even_with_a_retention_configured() {
+    let (client, _parent, _root, _attrs, _context, _validator) = seal_fixture();
+    let node = UnicityNode::new(
+        SealJobRegistry::new(),
+        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR },
+    )
+    .with_retention(UnicityRetentionConfig::with_horizon(5));
+    assert_eq!(node.retention().horizon(), Some(5), "the retention policy is carried");
+
+    let (_dir, store) = temp_store();
+    let rpc = UnicityRpcModuleImpl::new(client, store);
+    assert_eq!(
+        rpc.seal_companion_horizon_v1().await.unwrap(),
+        None,
+        "a configured retention is not a published horizon until pruning runs"
+    );
+}
+
+#[tokio::test]
+async fn seal_companion_horizon_reports_a_published_horizon() {
+    let (client, _parent, _root, _attrs, _context, _validator) = seal_fixture();
+    let (_dir, store) = temp_store();
+    store.set_horizon(7).unwrap();
+
+    let rpc = UnicityRpcModuleImpl::new(client, store);
+    assert_eq!(rpc.seal_companion_horizon_v1().await.unwrap(), Some(7));
 }

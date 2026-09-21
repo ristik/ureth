@@ -77,8 +77,8 @@ pub enum Lookup {
     ///
     /// The horizon accompanies the answer. A node with no horizon never returns this variant.
     Unavailable {
-        /// The node's published retention boundary: it does not serve a companion for a block at
-        /// or below this number.
+        /// The node's published retention boundary: pruning removes the companions with a block
+        /// number below this number. A companion at this number was not dropped by pruning.
         horizon: u64,
     },
     /// This node has no record of the block hash, and has never published a horizon.

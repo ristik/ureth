@@ -10,6 +10,9 @@
 //! The sibling is reachable and advertised: a Unicity node's `engine_exchangeCapabilities` is the
 //! stock list plus all three seal methods together. The stock `engine_*` surface is otherwise
 //! assembled from upstream components exactly as the plain Ethereum node assembles it.
+//!
+//! The add-ons also mount the `unicity_getSealCompanionV1` and `unicity_sealCompanionHorizonV1`
+//! read methods on the standard transports, over the same companion store the seal paths write.
 
 use std::sync::{Arc, OnceLock};
 
@@ -25,7 +28,7 @@ use reth_node_builder::{
     components::{
         BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, PayloadBuilderBuilder,
     },
-    rpc::{BasicEngineValidatorBuilder, Identity, PayloadValidatorBuilder, RpcAddOns},
+    rpc::{BasicEngineValidatorBuilder, Identity, PayloadValidatorBuilder, RpcAddOns, RpcContext},
     AddOnsContext, BuilderContext, FullNodeComponents, FullNodeTypes, Node, NodeAdapter, NodeTypes,
     PayloadBuilderConfig,
 };
@@ -38,15 +41,17 @@ use reth_payload_primitives::{
 };
 use reth_primitives_traits::SealedBlock;
 use reth_provider::EthStorage;
+use reth_storage_api::BlockNumReader;
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use reth_unicity_execution::{
     block::BlockProfile,
     node_evm::{UnicityBlockExecutionRegistry, UnicityNodeEvmConfig},
 };
+use reth_unicity_store::CompanionStore;
 
 use crate::{
     registry::UnicityParentAccountings,
-    rpc::{SealBuildState, UnicityEngineApiBuilder},
+    rpc::{companion_store, unicity_rpc_module, SealBuildState, UnicityEngineApiBuilder},
     SealJobRegistry, UnicityEngineTypes, UnicityExecutionPayloadBuilder, UnicityPayloadAttributes,
     DEFAULT_SEAL_JOB_CAPACITY,
 };
@@ -63,9 +68,9 @@ pub struct UnicitySealConfig {
 /// Retention policy for the node's companion store.
 ///
 /// The default is D2's full-node behaviour: retain every companion indefinitely and publish no
-/// retention horizon. A pruned node opts in by naming a horizon. This unit only carries the
-/// setting; the pruning path and the horizon RPC consume it later, so nothing here prunes or
-/// advertises.
+/// retention horizon. A pruned node opts in by naming a horizon. Pruning consumes the setting. The
+/// horizon read surface deliberately does not: it reports only what the node has actually dropped,
+/// so a node configured to prune that has not yet pruned still answers `null`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UnicityRetentionConfig {
     horizon: Option<u64>,
@@ -77,7 +82,7 @@ impl UnicityRetentionConfig {
         Self { horizon: None }
     }
 
-    /// Prunes at or below `horizon` once the pruning path consumes the setting.
+    /// Prunes below `horizon` once the pruning path consumes the setting.
     pub const fn with_horizon(horizon: u64) -> Self {
         Self { horizon: Some(horizon) }
     }
@@ -109,6 +114,7 @@ pub struct UnicityNode {
     parent_accounting: UnicityParentAccountings,
     execution_inputs: UnicityBlockExecutionRegistry,
     retention: UnicityRetentionConfig,
+    companion_store: Arc<OnceLock<Arc<CompanionStore>>>,
 }
 
 impl UnicityNode {
@@ -121,6 +127,7 @@ impl UnicityNode {
             parent_accounting: UnicityParentAccountings::default(),
             execution_inputs: UnicityBlockExecutionRegistry::default(),
             retention: UnicityRetentionConfig::default(),
+            companion_store: Arc::new(OnceLock::new()),
         }
     }
 
@@ -136,6 +143,14 @@ impl UnicityNode {
     /// Returns the companion retention policy.
     pub const fn retention(&self) -> UnicityRetentionConfig {
         self.retention
+    }
+
+    /// Returns the shared companion store cell.
+    ///
+    /// The engine API add-on and the standard RPC read surface resolve this one cell, so the store
+    /// is opened once and both see the same entries and horizon.
+    pub const fn companion_store(&self) -> &Arc<OnceLock<Arc<CompanionStore>>> {
+        &self.companion_store
     }
 
     /// Returns the seal job registry shared with the payload builder.
@@ -181,6 +196,7 @@ impl NodeTypes for UnicityNode {
 impl<N> Node<N> for UnicityNode
 where
     N: FullNodeTypes<Types = Self>,
+    N::Provider: BlockNumReader,
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
@@ -207,20 +223,38 @@ where
     }
 
     fn add_ons(&self) -> Self::AddOns {
+        // The engine API add-on and the RPC hook share this one store cell. `build_engine_api` runs
+        // first inside `RpcAddOns`, but the hook resolves the same cell rather than a second
+        // environment, so the order is not load-bearing.
+        let store = self.companion_store.clone();
         RpcAddOns::new(
             EthereumEthApiBuilder::default(),
             UnicityEngineValidatorBuilder,
-            UnicityEngineApiBuilder::new(SealBuildState {
-                registry: self.registry.clone(),
-                builder_config: self.builder_config.clone(),
-                seal: self.seal,
-                parent_accounting: self.parent_accounting.clone(),
-                execution_inputs: self.execution_inputs.clone(),
-                retention: self.retention,
-            }),
+            UnicityEngineApiBuilder::new(
+                SealBuildState {
+                    registry: self.registry.clone(),
+                    builder_config: self.builder_config.clone(),
+                    seal: self.seal,
+                    parent_accounting: self.parent_accounting.clone(),
+                    execution_inputs: self.execution_inputs.clone(),
+                    retention: self.retention,
+                },
+                self.companion_store.clone(),
+            ),
             BasicEngineValidatorBuilder::default(),
             Default::default(),
             Identity::new(),
+        )
+        .extend_rpc_modules(
+            move |ctx: RpcContext<'_, NodeAdapter<N>, _>| -> eyre::Result<()> {
+                // The context's eth-api type is concrete here, so `config` and `provider` are
+                // reachable without naming the eth-api trait. The store cell is the same one the
+                // engine API add-on resolved.
+                let provider = ctx.provider().clone();
+                let store = companion_store(&store, ctx.config().datadir().data_dir())?;
+                ctx.modules.merge_configured(unicity_rpc_module(provider, store))?;
+                Ok(())
+            },
         )
     }
 }
@@ -435,7 +469,8 @@ where
 /// Standard RPC add-ons for a Unicity node.
 ///
 /// The engine API builder registers the seal siblings and advertises the three seal capabilities
-/// together with the stock list. No stock method changes.
+/// together with the stock list. The `extend_rpc_modules` hook adds the `unicity` read methods on
+/// the standard transports, sharing the same companion store. No stock method changes.
 pub type UnicityNodeAddOns<N> =
     RpcAddOns<N, EthereumEthApiBuilder, UnicityEngineValidatorBuilder, UnicityEngineApiBuilder>;
 

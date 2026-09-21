@@ -43,7 +43,12 @@ use alloy_rpc_types_engine::{
     ExecutionPayloadEnvelopeV3, ExecutionPayloadSidecar, ExecutionPayloadV3, ForkchoiceState,
     ForkchoiceUpdated, PayloadId, PayloadStatus, PayloadStatusEnum,
 };
-use jsonrpsee::{core::RpcResult, proc_macros::rpc, types::ErrorObject, RpcModule};
+use jsonrpsee::{
+    core::RpcResult,
+    proc_macros::rpc,
+    types::{ErrorObject, ErrorObjectOwned},
+    RpcModule,
+};
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
 use reth_engine_primitives::{ConsensusEngineHandle, EngineApiValidator, PayloadValidator};
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
@@ -63,7 +68,7 @@ use reth_rpc_engine_api::{
     capabilities::{EngineCapabilities, CAPABILITIES},
     EngineApi, EngineApiError,
 };
-use reth_storage_api::{HeaderProvider, StateProviderFactory};
+use reth_storage_api::{BlockNumReader, HeaderProvider, StateProviderFactory};
 use reth_unicity_execution::{
     block::BlockAccountingError,
     block_executor::{replay_complete, BoundExecutionInput, UnicityEvmConfig},
@@ -74,7 +79,7 @@ use reth_unicity_execution::{
     },
     RootInputV2,
 };
-use reth_unicity_store::{open as open_companion_store, CompanionStore, StoreError};
+use reth_unicity_store::{open as open_companion_store, CompanionStore, Lookup, StoreError};
 use serde::{Deserialize, Serialize};
 
 use crate::{
@@ -903,19 +908,20 @@ where
 
 /// Builds the stock Engine API plus the seal sibling, sharing the node's build state.
 ///
-/// The companion store is deliberately not held here. Its path comes from the node's datadir,
-/// which is only reachable from the add-ons context, so the builder carries the store-independent
-/// state and opens the store in [`EngineApiBuilder::build_engine_api`].
+/// The companion store is not held here. Its path comes from the node's datadir, which is only
+/// reachable from the add-ons context, so the builder carries the store-independent state and the
+/// shared store cell, and resolves the cell in [`EngineApiBuilder::build_engine_api`].
 #[derive(Clone, Debug)]
 pub struct UnicityEngineApiBuilder {
     state: SealBuildState,
+    store: Arc<OnceLock<Arc<CompanionStore>>>,
 }
 
 impl UnicityEngineApiBuilder {
-    /// Creates the builder from the store-independent state [`UnicityNode`] shares with the
-    /// payload service.
-    pub const fn new(state: SealBuildState) -> Self {
-        Self { state }
+    /// Creates the builder from the store-independent state and shared store cell [`UnicityNode`]
+    /// holds.
+    pub const fn new(state: SealBuildState, store: Arc<OnceLock<Arc<CompanionStore>>>) -> Self {
+        Self { state, store }
     }
 }
 
@@ -956,12 +962,12 @@ where
     >;
 
     async fn build_engine_api(self, ctx: &AddOnsContext<'_, N>) -> eyre::Result<Self::EngineApi> {
-        // The node's datadir is only reachable from the add-ons context, so the companion store is
-        // opened here rather than in `UnicityNode::add_ons`. It lives under a Unicity-specific
-        // subdirectory of the chain datadir, never inside reth's own database directory, so the
-        // fork never shares an MDBX environment with reth's consistency checks and migrations.
-        let store_path = companion_store_path(ctx.config.datadir().data_dir());
-        let store: Arc<dyn CompanionSink> = Arc::new(open_companion_store(store_path)?);
+        // The node's datadir is only reachable from the add-ons context, so the shared store cell
+        // is resolved here. The engine API add-on is the first of the two hooks to run, but
+        // the cell is the single instance either hook may initialise, never a second
+        // environment.
+        let store = companion_store(&self.store, ctx.config.datadir().data_dir())?;
+        let store: Arc<dyn CompanionSink> = store;
         let context = SealBuildContext { state: self.state, store };
 
         // Build the validator once and share it between the stock Engine API and the seal sibling.
@@ -1006,6 +1012,196 @@ where
 /// the fork never shares an MDBX environment with reth's consistency checks and migrations.
 fn companion_store_path(chain_data_dir: &Path) -> PathBuf {
     chain_data_dir.join("unicity").join("companions")
+}
+
+/// Returns the shared companion store, opening it on first use and reusing it afterwards.
+///
+/// The engine API add-on and the standard RPC read surface both need the store, so `UnicityNode`
+/// holds one cell and both hooks resolve it through here. In `RpcAddOns`, `build_engine_api` runs
+/// before the `extend_rpc_modules` hook, so the engine API add-on is the one that opens it in
+/// practice; the RPC hook reuses the same cell rather than opening a second environment on the
+/// same path. If two callers ever raced, the loser drops the environment it opened and returns the
+/// shared one.
+pub fn companion_store(
+    cell: &Arc<OnceLock<Arc<CompanionStore>>>,
+    chain_data_dir: &Path,
+) -> Result<Arc<CompanionStore>, StoreError> {
+    if let Some(store) = cell.get() {
+        return Ok(store.clone());
+    }
+    let opened = Arc::new(open_companion_store(companion_store_path(chain_data_dir))?);
+    match cell.set(opened) {
+        Ok(()) => Ok(cell.get().expect("the store was just set").clone()),
+        Err(_) => Ok(cell.get().expect("another caller set the store").clone()),
+    }
+}
+
+/// Outcome of a `unicity_getSealCompanionV1` query, refined against the canonical chain.
+///
+/// This is deliberately not [`Lookup`] passed through. The store cannot tell a pruned hash from one
+/// it never saw, so the handler resolves the hash to a canonical block number before answering:
+/// only a number below the published horizon answers `Unavailable`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", tag = "status")]
+pub enum SealCompanionLookup {
+    /// The companion is present in this node's store.
+    Found {
+        /// The companion, byte-identical to what was stored.
+        companion: SealCompanion,
+    },
+    /// The hash resolves to a canonical block below the published retention horizon, so pruning
+    /// dropped the companion and this node cannot produce it.
+    Unavailable {
+        /// The node's published retention horizon.
+        horizon: u64,
+    },
+    /// Everything else: the hash is not in this node's canonical chain, or it resolves to a number
+    /// at or above the horizon, or no horizon is published.
+    ///
+    /// This is not a statement about the block's validity or certification, per D2 part 3.
+    Unknown,
+}
+
+/// JSON-RPC code for an internal failure in the `unicity` read methods.
+const UNICITY_INTERNAL_ERROR_CODE: i32 = -32603;
+
+/// Error type for the `unicity` read methods.
+#[derive(Debug)]
+#[non_exhaustive]
+pub enum UnicityRpcError {
+    /// The companion store could not be read.
+    Store(StoreError),
+    /// The provider could not resolve the block hash.
+    Provider(String),
+}
+
+impl std::fmt::Display for UnicityRpcError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Store(error) => write!(formatter, "companion store error: {error}"),
+            Self::Provider(error) => {
+                write!(formatter, "could not resolve the block hash: {error}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for UnicityRpcError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Store(error) => Some(error),
+            Self::Provider(_) => None,
+        }
+    }
+}
+
+impl From<StoreError> for UnicityRpcError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+
+impl From<UnicityRpcError> for ErrorObjectOwned {
+    fn from(error: UnicityRpcError) -> Self {
+        ErrorObject::owned(UNICITY_INTERNAL_ERROR_CODE, error.to_string(), None::<()>)
+    }
+}
+
+/// The `unicity` read methods on the standard RPC transports.
+///
+/// These are on the standard namespace, not `engine`, because their consumers are proof export and
+/// an operator rather than a consensus client on the JWT channel.
+#[rpc(server, namespace = "unicity")]
+pub trait UnicityRpc {
+    /// Returns the retained companion for `block_hash`, refined against the canonical chain.
+    ///
+    /// An `unknown` answer means this node has no record of the hash or the hash resolves to a
+    /// block at or above the published horizon. It is not a statement about the block's validity
+    /// or certification.
+    #[method(name = "getSealCompanionV1")]
+    async fn get_seal_companion_v1(&self, block_hash: B256) -> RpcResult<SealCompanionLookup>;
+
+    /// Returns the published retention horizon, or `null` if this node has not pruned.
+    #[method(name = "sealCompanionHorizonV1")]
+    async fn seal_companion_horizon_v1(&self) -> RpcResult<Option<u64>>;
+}
+
+/// Runtime state of the `unicity` read surface.
+#[derive(Debug)]
+pub struct UnicityRpcModuleImpl<Provider> {
+    provider: Provider,
+    store: Arc<CompanionStore>,
+}
+
+impl<Provider> UnicityRpcModuleImpl<Provider> {
+    /// Creates the handler over the node's provider and the shared companion store.
+    pub const fn new(provider: Provider, store: Arc<CompanionStore>) -> Self {
+        Self { provider, store }
+    }
+}
+
+impl<Provider> UnicityRpcModuleImpl<Provider>
+where
+    Provider: BlockNumReader,
+{
+    /// Answers a lookup, refining the store's lossy result against the canonical chain.
+    ///
+    /// [`CompanionStore::get`] cannot compare an absent hash's number to the horizon, because an
+    /// absent hash has no number it can read. Once a horizon exists it therefore answers
+    /// `Unavailable` for any hash it does not hold, including one this node never saw. Here the
+    /// provider resolves the hash to its canonical block number, and only a number below the
+    /// horizon answers `Unavailable`; anything else answers `Unknown`. The boundary is exclusive
+    /// because `prune_below` drops only numbers below the horizon, so a block at the horizon was
+    /// never pruned.
+    fn lookup(&self, block_hash: B256) -> Result<SealCompanionLookup, UnicityRpcError> {
+        if let Lookup::Found(companion) = self.store.get(block_hash)? {
+            return Ok(SealCompanionLookup::Found { companion });
+        }
+
+        // `block_number` reads the canonical hash-to-number index, so `None` means the hash is not
+        // a canonical block this node holds.
+        let Some(number) = self
+            .provider
+            .block_number(block_hash)
+            .map_err(|error| UnicityRpcError::Provider(error.to_string()))?
+        else {
+            return Ok(SealCompanionLookup::Unknown);
+        };
+        let Some(horizon) = self.store.horizon()? else {
+            return Ok(SealCompanionLookup::Unknown);
+        };
+        if number < horizon {
+            Ok(SealCompanionLookup::Unavailable { horizon })
+        } else {
+            Ok(SealCompanionLookup::Unknown)
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl<Provider> UnicityRpcServer for UnicityRpcModuleImpl<Provider>
+where
+    Provider: BlockNumReader + Send + Sync + 'static,
+{
+    async fn get_seal_companion_v1(&self, block_hash: B256) -> RpcResult<SealCompanionLookup> {
+        Ok(self.lookup(block_hash)?)
+    }
+
+    async fn seal_companion_horizon_v1(&self) -> RpcResult<Option<u64>> {
+        Ok(self.store.horizon().map_err(UnicityRpcError::from)?)
+    }
+}
+
+/// Builds the `unicity` read module over `provider` and the shared companion store.
+///
+/// The caller merges the returned module into the standard transports. This is the module half of
+/// the `extend_rpc_modules` hook; the context half stays in the node wiring, where the concrete
+/// eth-api type is known.
+pub fn unicity_rpc_module<Provider>(provider: Provider, store: Arc<CompanionStore>) -> RpcModule<()>
+where
+    Provider: BlockNumReader + Send + Sync + 'static,
+{
+    UnicityRpcModuleImpl::new(provider, store).into_rpc().remove_context()
 }
 
 #[cfg(test)]

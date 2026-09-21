@@ -49,10 +49,11 @@ pub use registry::{
 };
 pub use rpc::{
     build_seal_companion, companion_not_retained_error, import_response, prepare_seal_build,
-    refusal_response, unicity_engine_capabilities, CompanionSink, GetPayloadWithSealV1Response,
-    SealBuildContext, SealBuildError, SealBuildState, SealCompanionError, SealImportError,
-    UnicityEngineApiBuilder, UnicityEngineApiImpl, UnicityEngineApiModule, BUILD_PROVENANCE,
-    COMPANION_NOT_RETAINED_CODE, SEAL_CAPABILITIES,
+    refusal_response, unicity_engine_capabilities, unicity_rpc_module, CompanionSink,
+    GetPayloadWithSealV1Response, SealBuildContext, SealBuildError, SealBuildState,
+    SealCompanionError, SealCompanionLookup, SealImportError, UnicityEngineApiBuilder,
+    UnicityEngineApiImpl, UnicityEngineApiModule, UnicityRpcError, UnicityRpcModuleImpl,
+    UnicityRpcServer, BUILD_PROVENANCE, COMPANION_NOT_RETAINED_CODE, SEAL_CAPABILITIES,
 };
 
 use alloy_eips::eip4895::Withdrawal;
