@@ -35,6 +35,7 @@ reth-rpc-engine-api.workspace = true
 reth-storage-api.workspace = true
 reth-transaction-pool.workspace = true
 reth-unicity-execution.workspace = true
+reth-unicity-store.workspace = true
 
 # alloy
 alloy-consensus.workspace = true
@@ -48,6 +49,7 @@ eyre.workspace = true
 jsonrpsee = { workspace = true, features = ["server", "macros"] }
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true
+tracing.workspace = true
 
 [dev-dependencies]
 alloy-genesis.workspace = true
@@ -58,4 +60,5 @@ reth-transaction-pool = { workspace = true, features = ["test-utils"] }
 reth-trie-common = { workspace = true, features = ["std"] }
 revm.workspace = true
 serde_json = { workspace = true, features = ["std"] }
+tempfile.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "sync"] }

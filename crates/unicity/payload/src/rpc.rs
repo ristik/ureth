@@ -32,6 +32,7 @@
 
 use std::{
     fmt,
+    path::{Path, PathBuf},
     sync::{Arc, OnceLock},
 };
 
@@ -73,10 +74,14 @@ use reth_unicity_execution::{
     },
     RootInputV2,
 };
+use reth_unicity_store::{open as open_companion_store, CompanionStore, StoreError};
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    node::{UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityNode, UnicitySealConfig},
+    node::{
+        UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityNode, UnicityRetentionConfig,
+        UnicitySealConfig,
+    },
     registry::{SealJobRegistry, UnicityParentAccountings},
     PayloadJobResolutionError, ResolvedPayloadJob, UnicityEngineTypes, UnicityPayloadAttributes,
 };
@@ -265,6 +270,10 @@ struct PreparedSealImport {
     commitment: B256,
     /// The bound execution input the engine tree will resolve when it executes the block.
     input: Arc<BoundExecutionInput>,
+    /// Hash of the imported block, captured before `execution_data` is moved to the engine.
+    block_hash: B256,
+    /// Number of the imported block, captured before `execution_data` is moved to the engine.
+    block_number: u64,
 }
 
 /// Resolves and installs the seal job for one build request.
@@ -397,12 +406,41 @@ pub fn build_seal_companion(root_input: &RootInputV2) -> Result<SealCompanion, S
     })
 }
 
-/// Node-owned state the seal build flow resolves against.
+/// The write surface the seal handlers use to record a companion.
+///
+/// This is deliberately one method: this unit only writes. The read lookup, pruning and horizon
+/// surfaces stay on [`CompanionStore`] and are wired by the later unit. The trait exists so a test
+/// can substitute a sink whose write fails and prove that a store failure cannot change a verdict.
+pub trait CompanionSink: fmt::Debug + Send + Sync {
+    /// Records `companion` under `block_hash`, durable on return.
+    fn put(
+        &self,
+        block_hash: B256,
+        block_number: u64,
+        companion: &SealCompanion,
+    ) -> Result<(), StoreError>;
+}
+
+impl CompanionSink for CompanionStore {
+    fn put(
+        &self,
+        block_hash: B256,
+        block_number: u64,
+        companion: &SealCompanion,
+    ) -> Result<(), StoreError> {
+        Self::put(self, block_hash, block_number, companion)
+    }
+}
+
+/// Node-owned build state the seal build flow resolves against, before the store is opened.
 ///
 /// The payload service and the handler share every field, so the job the handler installs is
-/// resolved by the builder with the same configuration, registry and parent accounting.
+/// resolved by the builder with the same configuration, registry and parent accounting. This is
+/// [`SealBuildContext`] without the companion store: it can be built by `UnicityNode::add_ons`,
+/// which has no datadir. Keeping it as one named value avoids a positional constructor that is
+/// easy to transpose at the call site.
 #[derive(Clone, Debug)]
-pub struct SealBuildContext {
+pub struct SealBuildState {
     /// Registry the resolved job is installed into.
     pub registry: SealJobRegistry,
     /// Exact payload builder configuration the node resolved, once the payload service is built.
@@ -414,6 +452,28 @@ pub struct SealBuildContext {
     /// Bound execution inputs the node's EVM config resolves when the engine executes a seal
     /// block.
     pub execution_inputs: UnicityBlockExecutionRegistry,
+    /// Retention policy carried for the pruning path. This unit only carries it.
+    pub retention: UnicityRetentionConfig,
+}
+
+/// Node-owned state the seal build flow resolves against, including the durable companion store.
+///
+/// The store-independent fields live in [`SealBuildState`] and are reachable by deref, so callers
+/// read `context.registry` and the rest exactly as before while the store stays a distinct field.
+#[derive(Clone, Debug)]
+pub struct SealBuildContext {
+    /// Store-independent build state shared with the payload service.
+    pub state: SealBuildState,
+    /// Durable companion store both seal paths write to.
+    pub store: Arc<dyn CompanionSink>,
+}
+
+impl std::ops::Deref for SealBuildContext {
+    type Target = SealBuildState;
+
+    fn deref(&self) -> &Self::Target {
+        &self.state
+    }
 }
 
 /// Maps a preparation refusal to the handler's response.
@@ -476,6 +536,23 @@ impl<Provider> UnicityEngineApiImpl<Provider> {
     ) -> Self {
         Self { provider, beacon_consensus, context, validator, payload_store }
     }
+
+    /// Records `companion` for `block_hash`, logging a failure instead of returning it.
+    ///
+    /// D2 part 3 says an unproducible companion does not un-certify a block, so a store failure
+    /// must not change a verdict. Returning a `Result` here would invite a `?` at the call sites,
+    /// which is the bug this method exists to prevent.
+    fn record_companion(&self, block_hash: B256, block_number: u64, companion: &SealCompanion) {
+        if let Err(error) = self.context.store.put(block_hash, block_number, companion) {
+            tracing::error!(
+                target: "reth::unicity",
+                %block_hash,
+                block_number,
+                %error,
+                "failed to retain the seal companion; the verdict is unchanged"
+            );
+        }
+    }
 }
 
 impl<Provider> fmt::Debug for UnicityEngineApiImpl<Provider> {
@@ -535,8 +612,19 @@ where
         let seal_companion = build_seal_companion(&root_input)
             .map_err(|error| EngineApiError::Internal(Box::new(error)))?;
 
+        // Capture the key before the payload is consumed by the conversion. The store key is the
+        // same block hash the import path will compute for this block.
+        let block_hash = payload.block().hash();
+        let block_number = payload.block().header().number;
+
         let envelope: ExecutionPayloadEnvelopeV3 =
             payload.try_into().map_err(|_| EngineApiError::UnknownPayload)?;
+
+        // Write the companion this method is about to return. A store failure is logged and does
+        // not change the response: D2 part 3 says an unproducible companion does not un-certify a
+        // block, so this must not become a `?`.
+        self.record_companion(block_hash, block_number, &seal_companion);
+
         Ok(GetPayloadWithSealV1Response {
             execution_payload: envelope.execution_payload,
             block_value: envelope.block_value,
@@ -579,6 +667,10 @@ where
             Err(error) => return import_response(error),
         };
 
+        // Capture the key before `execution_data` is moved into the forward.
+        let block_hash = prepared.block_hash;
+        let block_number = prepared.block_number;
+
         // The engine tree resolves this input when it executes the forwarded block. Register it
         // before the forward, because the engine can begin executing as soon as the message is
         // sent.
@@ -588,10 +680,19 @@ where
             .map_err(|error| EngineApiError::Internal(Box::new(error)))?;
 
         // Forward to the engine as the stock `newPayloadV3` path does and return its verdict.
-        self.beacon_consensus
+        let status = self
+            .beacon_consensus
             .new_payload(prepared.execution_data)
             .await
-            .map_err(EngineApiError::NewPayload)
+            .map_err(EngineApiError::NewPayload)?;
+
+        // Retain only a block the engine accepted. An INVALID or SYNCING verdict leaves no entry,
+        // and a store failure is logged rather than allowed to change the verdict.
+        if status.is_valid() {
+            self.record_companion(block_hash, block_number, seal_companion);
+        }
+
+        Ok(status)
     }
 
     /// Runs the ordered import flow and returns the pieces the forward needs on success.
@@ -692,6 +793,7 @@ where
 
         // 7. Record the imported block's accounting so a node that followed it can lead on it next.
         let block_hash = block.hash();
+        let block_number = block.header().number;
         self.context.parent_accounting.insert(block_hash, replay.parent);
 
         // 8. The engine executes the forwarded block and its EVM config resolves this input by the
@@ -700,7 +802,7 @@ where
             .root_input()
             .input_commitment()
             .map_err(|_| SealImportError::Payload("bound input has no commitment".to_owned()))?;
-        Ok(PreparedSealImport { execution_data, commitment, input })
+        Ok(PreparedSealImport { execution_data, commitment, input, block_hash, block_number })
     }
 }
 
@@ -800,15 +902,20 @@ where
 }
 
 /// Builds the stock Engine API plus the seal sibling, sharing the node's build state.
+///
+/// The companion store is deliberately not held here. Its path comes from the node's datadir,
+/// which is only reachable from the add-ons context, so the builder carries the store-independent
+/// state and opens the store in [`EngineApiBuilder::build_engine_api`].
 #[derive(Clone, Debug)]
 pub struct UnicityEngineApiBuilder {
-    context: SealBuildContext,
+    state: SealBuildState,
 }
 
 impl UnicityEngineApiBuilder {
-    /// Creates the builder from the state [`UnicityNode`] shares with the payload service.
-    pub const fn new(context: SealBuildContext) -> Self {
-        Self { context }
+    /// Creates the builder from the store-independent state [`UnicityNode`] shares with the
+    /// payload service.
+    pub const fn new(state: SealBuildState) -> Self {
+        Self { state }
     }
 }
 
@@ -849,6 +956,14 @@ where
     >;
 
     async fn build_engine_api(self, ctx: &AddOnsContext<'_, N>) -> eyre::Result<Self::EngineApi> {
+        // The node's datadir is only reachable from the add-ons context, so the companion store is
+        // opened here rather than in `UnicityNode::add_ons`. It lives under a Unicity-specific
+        // subdirectory of the chain datadir, never inside reth's own database directory, so the
+        // fork never shares an MDBX environment with reth's consistency checks and migrations.
+        let store_path = companion_store_path(ctx.config.datadir().data_dir());
+        let store: Arc<dyn CompanionSink> = Arc::new(open_companion_store(store_path)?);
+        let context = SealBuildContext { state: self.state, store };
+
         // Build the validator once and share it between the stock Engine API and the seal sibling.
         let validator = UnicityEngineValidatorBuilder.build(ctx).await?;
         let client = ClientVersionV1 {
@@ -877,10 +992,32 @@ where
         let sibling = UnicityEngineApiImpl::new(
             ctx.node.provider().clone(),
             ctx.beacon_engine_handle.clone(),
-            self.context,
+            context,
             validator,
             PayloadStore::new(ctx.node.payload_builder_handle().clone()),
         );
         Ok(UnicityEngineApiModule::new(inner, sibling))
+    }
+}
+
+/// Path of the companion store under the chain's data directory.
+///
+/// The store is a sibling of reth's own `db` and `static_files` directories, never inside `db`, so
+/// the fork never shares an MDBX environment with reth's consistency checks and migrations.
+fn companion_store_path(chain_data_dir: &Path) -> PathBuf {
+    chain_data_dir.join("unicity").join("companions")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::companion_store_path;
+    use std::path::Path;
+
+    #[test]
+    fn companion_store_path_is_a_unicity_subdirectory_of_the_chain_datadir() {
+        assert_eq!(
+            companion_store_path(Path::new("/data/mainnet")),
+            Path::new("/data/mainnet/unicity/companions")
+        );
     }
 }

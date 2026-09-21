@@ -41,7 +41,7 @@ pub mod rpc;
 pub use engine::UnicityEngineTypes;
 pub use node::{
     UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityExecutorBuilder, UnicityNode,
-    UnicityNodeAddOns, UnicityPayloadBuilderBuilder, UnicitySealConfig,
+    UnicityNodeAddOns, UnicityPayloadBuilderBuilder, UnicityRetentionConfig, UnicitySealConfig,
 };
 pub use registry::{
     SealJobRegistry, UnicityParentAccountings, DEFAULT_PARENT_ACCOUNTING_CAPACITY,
@@ -49,10 +49,10 @@ pub use registry::{
 };
 pub use rpc::{
     build_seal_companion, companion_not_retained_error, import_response, prepare_seal_build,
-    refusal_response, unicity_engine_capabilities, GetPayloadWithSealV1Response, SealBuildContext,
-    SealBuildError, SealCompanionError, SealImportError, UnicityEngineApiBuilder,
-    UnicityEngineApiImpl, UnicityEngineApiModule, BUILD_PROVENANCE, COMPANION_NOT_RETAINED_CODE,
-    SEAL_CAPABILITIES,
+    refusal_response, unicity_engine_capabilities, CompanionSink, GetPayloadWithSealV1Response,
+    SealBuildContext, SealBuildError, SealBuildState, SealCompanionError, SealImportError,
+    UnicityEngineApiBuilder, UnicityEngineApiImpl, UnicityEngineApiModule, BUILD_PROVENANCE,
+    COMPANION_NOT_RETAINED_CODE, SEAL_CAPABILITIES,
 };
 
 use alloy_eips::eip4895::Withdrawal;

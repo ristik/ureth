@@ -243,4 +243,26 @@ mod tests {
             other => panic!("expected trailing bytes to be refused, got {other:?}"),
         }
     }
+
+    #[test]
+    fn a_forged_witness_count_is_refused_without_a_large_reservation() {
+        // The record is well formed up to the count: version, an empty root-input frame, then a
+        // witness count of `u32::MAX` and one real witness frame. Decoding must refuse it rather
+        // than reserve room for the count. Removing the `MAX_WITNESS_PREALLOC` cap in `decode`
+        // would make this test attempt an allocation of roughly `u32::MAX * size_of::<Bytes>()`,
+        // so the assertion is load-bearing rather than documentation.
+        let mut record = Vec::new();
+        record.push(RECORD_VERSION);
+        record.extend_from_slice(&0u32.to_be_bytes());
+        record.extend_from_slice(&u32::MAX.to_be_bytes());
+        record.extend_from_slice(&1u32.to_be_bytes());
+        record.push(0xAB);
+
+        match decode(&record) {
+            Err(StoreError::MalformedRecord(_)) => {}
+            other => {
+                panic!("expected a malformed record for a forged witness count, got {other:?}")
+            }
+        }
+    }
 }
