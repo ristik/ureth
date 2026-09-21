@@ -2,9 +2,9 @@
 //! `engine_newPayloadWithSealV1` siblings.
 //!
 //! This is a jsonrpsee trait in the `engine` namespace, separate from reth's own
-//! [`reth_rpc_api::EngineApi`], so the fork adds methods without editing an upstream file. It is
-//! shaped after `EngineApiInner` in `reth_rpc_engine_api`: the same provider, consensus handle and
-//! shared node state.
+//! [`reth_rpc_api::EngineApiServer`], so the fork adds methods without editing an upstream file. It
+//! is shaped after `EngineApiInner` in `reth_rpc_engine_api`: the same provider, consensus handle
+//! and shared node state.
 //!
 //! The methods are reachable and advertised. A Unicity node's `engine_exchangeCapabilities` adds
 //! all three seal methods together; the stock Ethereum set is unchanged and the three are never

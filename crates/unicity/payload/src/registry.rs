@@ -43,10 +43,9 @@ struct SealJobRegistryInner {
 /// Bounded, shareable registry of seal build jobs waiting to be resolved.
 ///
 /// A future authenticated caller (the U3c to U3f methods) inserts one [`ResolvedPayloadJob`] per
-/// request. The payload service clones the resolved
-/// [`UnicityEvmConfig`](reth_unicity_execution::block_executor::UnicityEvmConfig) on every
-/// `try_build`, `build_empty_payload` and missing-payload path, so the registry only has to keep a
-/// job until its build has started.
+/// request. The payload service clones the resolved [`UnicityEvmConfig`] on every `try_build`,
+/// `build_empty_payload` and missing-payload path, so the registry only has to keep a job until its
+/// build has started.
 ///
 /// The capacity is at least [`DEFAULT_SEAL_JOB_CAPACITY`] and tracks the node's
 /// `max_payload_tasks` through [`SealJobRegistry::grow_capacity`]. It evicts in insertion order:

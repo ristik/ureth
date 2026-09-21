@@ -1,11 +1,10 @@
 //! Unicity node wiring.
 //!
 //! [`UnicityNode`] implements [`NodeTypes`] with [`UnicityEngineTypes`] and replaces the stock
-//! payload builder with [`UnicityExecutionPayloadBuilder`](crate::UnicityExecutionPayloadBuilder)
-//! resolving through a shared [`SealJobRegistry`]. The node's add-ons register the
-//! `engine_forkchoiceUpdatedWithSealV1` sibling through
-//! [`UnicityEngineApiBuilder`](crate::rpc::UnicityEngineApiBuilder), so a future method can insert
-//! a [`ResolvedPayloadJob`](crate::ResolvedPayloadJob) into the registry and then start an ordinary
+//! payload builder with [`UnicityExecutionPayloadBuilder`] resolving through a shared
+//! [`SealJobRegistry`]. The node's add-ons register the `engine_forkchoiceUpdatedWithSealV1`
+//! sibling through [`UnicityEngineApiBuilder`], so a future method can insert a
+//! [`ResolvedPayloadJob`](crate::ResolvedPayloadJob) into the registry and then start an ordinary
 //! build, which resolves that exact job.
 //!
 //! The sibling is reachable and advertised: a Unicity node's `engine_exchangeCapabilities` is the
@@ -65,9 +64,9 @@ pub struct UnicitySealConfig {
 ///
 /// This is the plain Ethereum node with two changes: [`NodeTypes::Payload`] is
 /// [`UnicityEngineTypes`], and the payload component builds through
-/// [`UnicityExecutionPayloadBuilder`](crate::UnicityExecutionPayloadBuilder) with the registry this
-/// node holds. Everything else, including the network, pool, executor, consensus and the standard
-/// Engine API, is the stock Ethereum component plus the seal sibling method.
+/// [`UnicityExecutionPayloadBuilder`] with the registry this node holds. Everything else, including
+/// the network, pool, executor, consensus and the standard Engine API, is the stock Ethereum
+/// component plus the seal sibling method.
 ///
 /// A caller that needs to insert seal jobs shares the registry with the node by constructing it
 /// with [`UnicityNode::new`]; all clones observe the same entries. The node also publishes the
@@ -210,8 +209,7 @@ where
     }
 }
 
-/// Builds [`UnicityExecutionPayloadBuilder`](crate::UnicityExecutionPayloadBuilder) for the
-/// payload service.
+/// Builds [`UnicityExecutionPayloadBuilder`] for the payload service.
 ///
 /// The builder owns a clone of the node's [`SealJobRegistry`] and a clone of the node's shared
 /// builder-configuration slot. On construction it derives the configuration once, publishes it in
