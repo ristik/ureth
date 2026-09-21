@@ -10859,6 +10859,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "reth-unicity-store"
+version = "2.5.0"
+dependencies = [
+ "alloy-primitives",
+ "reth-libmdbx",
+ "reth-unicity-execution",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "reth-zstd-compressors"
 version = "0.6.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

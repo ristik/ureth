@@ -1,0 +1,23 @@
+[package]
+name = "reth-unicity-store"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Inactive durable block-hash-keyed companion store for Unicity."
+readme = "README.md"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+reth-libmdbx.workspace = true
+reth-unicity-execution.workspace = true
+thiserror = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+tempfile.workspace = true
