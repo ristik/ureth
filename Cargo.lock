@@ -10851,11 +10851,14 @@ dependencies = [
  "reth-transaction-pool",
  "reth-trie-common",
  "reth-unicity-execution",
+ "reth-unicity-store",
  "revm",
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tempfile",
  "tokio",
+ "tracing",
 ]
 
 [[package]]

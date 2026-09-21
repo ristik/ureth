@@ -52,12 +52,14 @@ use reth_unicity_execution::{
 };
 use reth_unicity_payload::{
     build_seal_companion, prepare_seal_build, refusal_response, unicity_engine_capabilities,
-    ExecutionPayloadJobResolver, FixedPayloadJobResolver, PayloadJobResolutionError,
-    ResolvedPayloadJob, SealBuildContext, SealBuildError, SealJobRegistry, UnicityEngineApiImpl,
-    UnicityEngineTypes, UnicityEngineValidator, UnicityExecutionPayloadBuilder,
-    UnicityParentAccountings, UnicityPayloadAttributes, UnicitySealConfig,
-    COMPANION_NOT_RETAINED_CODE, DEFAULT_SEAL_JOB_CAPACITY, SEAL_CAPABILITIES,
+    CompanionSink, ExecutionPayloadJobResolver, FixedPayloadJobResolver, PayloadJobResolutionError,
+    ResolvedPayloadJob, SealBuildContext, SealBuildError, SealBuildState, SealJobRegistry,
+    UnicityEngineApiImpl, UnicityEngineTypes, UnicityEngineValidator,
+    UnicityExecutionPayloadBuilder, UnicityParentAccountings, UnicityPayloadAttributes,
+    UnicityRetentionConfig, UnicitySealConfig, COMPANION_NOT_RETAINED_CODE,
+    DEFAULT_SEAL_JOB_CAPACITY, SEAL_CAPABILITIES,
 };
+use reth_unicity_store::{open as open_companion_store, CompanionStore, Lookup, StoreError};
 use std::{
     ops::RangeBounds,
     sync::{
@@ -66,6 +68,7 @@ use std::{
     },
 };
 use support::provider::FixtureProvider;
+use tempfile::tempdir;
 
 const GENESIS_HASH: B256 =
     b256!("82430ee9e534f0e454399cdaa06042c5dcc52b0378f48609e9c45c3cc1ae01f0");
@@ -707,13 +710,64 @@ fn seal_fixture() -> (
         )
         .unwrap();
     let context = SealBuildContext {
-        registry: SealJobRegistry::new(),
-        builder_config,
-        seal: UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR },
-        parent_accounting: UnicityParentAccountings::default(),
-        execution_inputs: UnicityBlockExecutionRegistry::default(),
+        state: SealBuildState {
+            registry: SealJobRegistry::new(),
+            builder_config,
+            seal: UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR },
+            parent_accounting: UnicityParentAccountings::default(),
+            execution_inputs: UnicityBlockExecutionRegistry::default(),
+            retention: UnicityRetentionConfig::default(),
+        },
+        store: Arc::new(NoopCompanionSink),
     };
     (client, parent, root, attrs, context, validator)
+}
+
+/// A sink that accepts every write and stores nothing.
+///
+/// The shared fixture uses it so tests that do not exercise retention stay uniform and do not each
+/// have to own a temporary store. Tests that do assert retention replace `context.store` with a
+/// real [`CompanionStore`] or a [`FailingCompanionSink`].
+#[derive(Debug)]
+struct NoopCompanionSink;
+
+impl CompanionSink for NoopCompanionSink {
+    fn put(
+        &self,
+        _block_hash: B256,
+        _block_number: u64,
+        _companion: &SealCompanion,
+    ) -> Result<(), StoreError> {
+        Ok(())
+    }
+}
+
+/// A sink whose every write fails.
+///
+/// This is the seam the write-failure test needs: a real store cannot be made to fail a single
+/// write deterministically. It is one trait method, added for the test rather than for production.
+#[derive(Debug)]
+struct FailingCompanionSink;
+
+impl CompanionSink for FailingCompanionSink {
+    fn put(
+        &self,
+        _block_hash: B256,
+        _block_number: u64,
+        _companion: &SealCompanion,
+    ) -> Result<(), StoreError> {
+        Err(StoreError::Io(std::io::Error::other("forced store failure")))
+    }
+}
+
+/// Opens a fresh, empty companion store in a temporary directory.
+///
+/// The returned [`tempfile::TempDir`] must be kept alive: dropping it removes the directory the
+/// environment lives in.
+fn temp_store() -> (tempfile::TempDir, Arc<CompanionStore>) {
+    let dir = tempdir().unwrap();
+    let store = Arc::new(open_companion_store(dir.path()).unwrap());
+    (dir, store)
 }
 
 fn seal_input(root: &RootInputV2) -> SealBuildInput {
@@ -828,8 +882,9 @@ fn seal_build_job_resolves_with_the_published_builder_config() {
     // into the job, and the built block carries the commitment the attributes named.
     let base = context.builder_config.get().unwrap().clone();
     let accounting = context.parent_accounting.clone();
-    let builder = UnicityExecutionPayloadBuilder::new(client, test_pool(), context.registry, base)
-        .with_parent_accounting(accounting.clone());
+    let builder =
+        UnicityExecutionPayloadBuilder::new(client, test_pool(), context.registry.clone(), base)
+            .with_parent_accounting(accounting.clone());
     let config =
         PayloadConfig::new(parent.clone(), attrs.clone(), attrs.payload_id(&parent.hash()));
     let payload = builder.build_empty_payload(config).unwrap();
@@ -996,6 +1051,15 @@ fn payload_for_import(
     (execution_payload, companion, beacon_root)
 }
 
+/// The block hash an `ExecutionPayloadV3` declares to the caller.
+///
+/// This is the key a client knows and would look a companion up by. The retention tests use it
+/// rather than the pre-conversion built block, so a divergence between the hash the method reports
+/// and the hash it stores under cannot pass unnoticed.
+const fn declared_block_hash(payload: &ExecutionPayloadV3) -> B256 {
+    payload.payload_inner.payload_inner.block_hash
+}
+
 /// Builds the import handler over a consensus handle and a closed payload store. The import path
 /// does not use the payload store; only the forward uses the consensus handle.
 fn seal_import_handler(
@@ -1093,6 +1157,185 @@ async fn new_payload_with_seal_imports_a_built_block_and_records_its_token() {
     );
     // The forward actually reached the engine with this block.
     assert_eq!(seen.await.unwrap().block_hash(), block_hash);
+}
+
+#[tokio::test]
+async fn new_payload_with_seal_stores_the_companion_of_an_accepted_import() {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    let (_dir, store) = temp_store();
+    context.store = store.clone();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let block_hash = payload.block().hash();
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    // The key a client knows, taken from the payload it sends rather than the pre-conversion block.
+    let client_hash = declared_block_hash(&execution_payload);
+
+    let (engine, _seen) =
+        fake_engine(PayloadStatus::new(PayloadStatusEnum::Valid, Some(block_hash))).await;
+    let handler = seal_import_handler(client, context, validator, engine);
+    let status = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap();
+    assert!(status.is_valid());
+
+    match store.get(client_hash).unwrap() {
+        Lookup::Found(found) => assert_eq!(found, companion),
+        other => panic!("expected the accepted companion to be stored, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn new_payload_with_seal_leaves_no_entry_for_a_rejected_import() {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    let (_dir, store) = temp_store();
+    context.store = store.clone();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let client_hash = declared_block_hash(&execution_payload);
+
+    // The handler resolves and forwards the block, and the engine rejects it. This is the case
+    // where the write-on-VALID-only rule matters, because the forward did happen.
+    let rejected = PayloadStatus::from_status(PayloadStatusEnum::Invalid {
+        validation_error: "engine verdict".into(),
+    });
+    let (engine, _seen) = fake_engine(rejected.clone()).await;
+    let handler = seal_import_handler(client, context, validator, engine);
+    let status = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap();
+    assert_eq!(status, rejected);
+    assert!(status.is_invalid());
+
+    // No horizon is set, so an absent hash is exactly Unknown rather than Unavailable.
+    match store.get(client_hash).unwrap() {
+        Lookup::Unknown => {}
+        other => panic!("a rejected import must leave no entry, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn new_payload_with_seal_leaves_no_entry_for_a_syncing_import() {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    let (_dir, store) = temp_store();
+    context.store = store.clone();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let client_hash = declared_block_hash(&execution_payload);
+
+    // The handler forwards the block and the engine answers SYNCING. SYNCING is not VALID, so the
+    // write-on-VALID-only rule must skip it. This is the case a reader of the comment would ask
+    // about, because the import was not rejected and might look like something to retain.
+    let syncing = PayloadStatus::from_status(PayloadStatusEnum::Syncing);
+    let (engine, _seen) = fake_engine(syncing.clone()).await;
+    let handler = seal_import_handler(client, context, validator, engine);
+    let status = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap();
+    assert_eq!(status, syncing);
+    assert!(status.is_syncing());
+
+    match store.get(client_hash).unwrap() {
+        Lookup::Unknown => {}
+        other => panic!("a syncing import must leave no entry, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_failing_store_write_does_not_change_a_valid_verdict() {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    context.store = Arc::new(FailingCompanionSink);
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let block_hash = payload.block().hash();
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+
+    let (engine, _seen) =
+        fake_engine(PayloadStatus::new(PayloadStatusEnum::Valid, Some(block_hash))).await;
+    let handler = seal_import_handler(client, context, validator, engine);
+    let status = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap();
+    assert!(status.is_valid(), "a store failure must not change the engine's VALID verdict");
+    assert_eq!(status.latest_valid_hash, Some(block_hash));
+}
+
+#[tokio::test]
+async fn get_payload_with_seal_stores_the_companion_it_returns() {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    let (_dir, store) = temp_store();
+    context.store = store.clone();
+
+    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let payload_id = attrs.payload_id(&parent.hash());
+    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &seal_input(&root))
+        .unwrap();
+    let base = context.builder_config.get().unwrap().clone();
+    let builder = UnicityExecutionPayloadBuilder::new(
+        client.clone(),
+        test_pool(),
+        context.registry.clone(),
+        base,
+    );
+    let payload =
+        builder.build_empty_payload(PayloadConfig::new(parent, attrs, payload_id)).unwrap();
+    let expected = build_seal_companion(&root).unwrap();
+
+    let (store_tx, store_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(serve_resolved_payload(store_rx, payload));
+    let (beacon_tx, _beacon_rx) = tokio::sync::mpsc::unbounded_channel();
+    let handler = UnicityEngineApiImpl::new(
+        client,
+        ConsensusEngineHandle::new(beacon_tx),
+        context,
+        validator,
+        PayloadStore::new(PayloadBuilderHandle::new(store_tx)),
+    );
+
+    let response = handler.get_payload_with_seal(payload_id).await.unwrap();
+    assert_eq!(response.seal_companion, expected);
+    // Look up by the hash in the response, not the pre-conversion block. If the method reported a
+    // different hash than it keyed the store with, this must fail.
+    match store.get(declared_block_hash(&response.execution_payload)).unwrap() {
+        Lookup::Found(found) => assert_eq!(found, response.seal_companion),
+        other => panic!("expected the returned companion to be stored, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn a_failing_store_write_does_not_change_the_get_payload_response() {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    context.store = Arc::new(FailingCompanionSink);
+
+    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let payload_id = attrs.payload_id(&parent.hash());
+    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &seal_input(&root))
+        .unwrap();
+    let base = context.builder_config.get().unwrap().clone();
+    let builder = UnicityExecutionPayloadBuilder::new(
+        client.clone(),
+        test_pool(),
+        context.registry.clone(),
+        base,
+    );
+    let payload =
+        builder.build_empty_payload(PayloadConfig::new(parent, attrs, payload_id)).unwrap();
+
+    let (store_tx, store_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(serve_resolved_payload(store_rx, payload));
+    let (beacon_tx, _beacon_rx) = tokio::sync::mpsc::unbounded_channel();
+    let handler = UnicityEngineApiImpl::new(
+        client,
+        ConsensusEngineHandle::new(beacon_tx),
+        context,
+        validator,
+        PayloadStore::new(PayloadBuilderHandle::new(store_tx)),
+    );
+
+    let response = handler.get_payload_with_seal(payload_id).await.unwrap();
+    assert_eq!(response.seal_companion, build_seal_companion(&root).unwrap());
 }
 
 #[tokio::test]

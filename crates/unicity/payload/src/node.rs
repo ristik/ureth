@@ -46,7 +46,7 @@ use reth_unicity_execution::{
 
 use crate::{
     registry::UnicityParentAccountings,
-    rpc::{SealBuildContext, UnicityEngineApiBuilder},
+    rpc::{SealBuildState, UnicityEngineApiBuilder},
     SealJobRegistry, UnicityEngineTypes, UnicityExecutionPayloadBuilder, UnicityPayloadAttributes,
     DEFAULT_SEAL_JOB_CAPACITY,
 };
@@ -58,6 +58,34 @@ pub struct UnicitySealConfig {
     pub profile: BlockProfile,
     /// Beneficiary the payload attributes must name.
     pub fee_collector: Address,
+}
+
+/// Retention policy for the node's companion store.
+///
+/// The default is D2's full-node behaviour: retain every companion indefinitely and publish no
+/// retention horizon. A pruned node opts in by naming a horizon. This unit only carries the
+/// setting; the pruning path and the horizon RPC consume it later, so nothing here prunes or
+/// advertises.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct UnicityRetentionConfig {
+    horizon: Option<u64>,
+}
+
+impl UnicityRetentionConfig {
+    /// Retains every companion indefinitely and publishes no horizon. This is the default.
+    pub const fn retain_indefinitely() -> Self {
+        Self { horizon: None }
+    }
+
+    /// Prunes at or below `horizon` once the pruning path consumes the setting.
+    pub const fn with_horizon(horizon: u64) -> Self {
+        Self { horizon: Some(horizon) }
+    }
+
+    /// The configured horizon, or `None` when the node retains indefinitely.
+    pub const fn horizon(&self) -> Option<u64> {
+        self.horizon
+    }
 }
 
 /// A Unicity execution node.
@@ -80,6 +108,7 @@ pub struct UnicityNode {
     seal: UnicitySealConfig,
     parent_accounting: UnicityParentAccountings,
     execution_inputs: UnicityBlockExecutionRegistry,
+    retention: UnicityRetentionConfig,
 }
 
 impl UnicityNode {
@@ -91,7 +120,22 @@ impl UnicityNode {
             seal,
             parent_accounting: UnicityParentAccountings::default(),
             execution_inputs: UnicityBlockExecutionRegistry::default(),
+            retention: UnicityRetentionConfig::default(),
         }
+    }
+
+    /// Sets the companion retention policy.
+    ///
+    /// The default retains every companion indefinitely and publishes no horizon. A pruned node
+    /// opts in with [`UnicityRetentionConfig::with_horizon`].
+    pub const fn with_retention(mut self, retention: UnicityRetentionConfig) -> Self {
+        self.retention = retention;
+        self
+    }
+
+    /// Returns the companion retention policy.
+    pub const fn retention(&self) -> UnicityRetentionConfig {
+        self.retention
     }
 
     /// Returns the seal job registry shared with the payload builder.
@@ -166,12 +210,13 @@ where
         RpcAddOns::new(
             EthereumEthApiBuilder::default(),
             UnicityEngineValidatorBuilder,
-            UnicityEngineApiBuilder::new(SealBuildContext {
+            UnicityEngineApiBuilder::new(SealBuildState {
                 registry: self.registry.clone(),
                 builder_config: self.builder_config.clone(),
                 seal: self.seal,
                 parent_accounting: self.parent_accounting.clone(),
                 execution_inputs: self.execution_inputs.clone(),
+                retention: self.retention,
             }),
             BasicEngineValidatorBuilder::default(),
             Default::default(),

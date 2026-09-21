@@ -47,7 +47,7 @@ fn a_written_companion_survives_a_reopen_unchanged() {
 }
 
 #[test]
-fn a_store_without_a_horizon_answers_unknown_and_never_unavailable() {
+fn a_store_without_a_horizon_answers_unknown_for_an_unseen_hash() {
     let (_dir, store) = store();
 
     assert_eq!(store.horizon().unwrap(), None);
