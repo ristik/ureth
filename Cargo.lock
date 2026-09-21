@@ -10818,6 +10818,7 @@ dependencies = [
  "alloy-trie",
  "async-trait",
  "eyre",
+ "futures-util",
  "jsonrpsee",
  "reth-basic-payload-builder",
  "reth-chainspec",
