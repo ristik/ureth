@@ -19,10 +19,11 @@ a fork of public `paradigmxyz/reth` cannot itself be private. `upstream` is conf
 so `git fetch upstream` and ordinary rebases onto a later tag work exactly as they would in a fork.
 
 At the fork point `unicity/main` was byte-identical to upstream `v2.5.0`. The current divergence is
-limited to two inactive crates: the U2 per-payload commitment provision in
-`crates/unicity/payload` and the bounded `SealRegistry` kernel plus shared block adapter in
-`crates/unicity/execution`. Neither is wired into an `EngineTypes`, node, RPC module or capability,
-so normal node operation and live execution semantics remain unchanged.
+limited to three inactive crates: the U2 per-payload commitment provision in
+`crates/unicity/payload`, the bounded `SealRegistry` kernel plus shared block adapter in
+`crates/unicity/execution`, and the durable companion store in `crates/unicity/store`. None is wired
+into an `EngineTypes`, node, RPC module or capability, so normal node operation and live execution
+semantics remain unchanged.
 
 ## What this fork is allowed to change
 
@@ -279,16 +280,52 @@ node, which remains the M1 gate.
 This adds one dependency edge from `reth-unicity-payload` to `reth-node-core` for the client-version
 helpers that `BasicEngineApiBuilder` used internally. No upstream source file is edited.
 
+## U3h (bft-core #11): the companion store crate, not wired
+
+`crates/unicity/store` (package `reth-unicity-store`) is the persistence half of companion
+retention: a durable, block-hash-keyed store for `SealCompanion` values, a settable retention
+horizon and pruning. It is a library only. There is no node wiring, no RPC, no reth component and no
+notion of canonicality; the crate is told what to keep and what to drop.
+
+The store owns a separate MDBX environment under the directory it is given, with its own three
+named databases. It registers no table in `reth-db`'s `tables!` registry and never opens reth's
+environment. A `put` commits its own transaction and forces an environment sync before returning,
+so a reopen in a fresh process observes the write.
+
+`get` has three outcomes. `Found` carries the companion, decoded from exactly the bytes stored.
+`Unavailable` says the node cannot produce the companion and has published a retention horizon,
+which accompanies the answer; the horizon is the node's retention boundary, not a claim about the
+block's number. `Unknown` says the node has no record of the hash and has never published a horizon.
+The store keeps no tombstones, because a tombstone for every
+dropped hash would retain the unbounded set that pruning exists to drop. The accepted consequence
+is that `Unknown` is only reachable on a node that has never published a horizon; once a horizon
+exists, any absent hash answers `Unavailable`. Both are statements about what the node can serve,
+never about the validity or certification of a block, which the crate docs state in full.
+
+The horizon is durable and monotonic: a backwards `set_horizon` is refused with a typed error.
+`prune_below(number)` removes every entry with `block_number < number` and then raises the horizon,
+inside one read-write transaction, so a crash can never publish a horizon that covers an entry which
+is still present. `remove` handles the non-canonical case and does not touch the horizon.
+
+Values use the crate's own versioned, length-prefixed record encoding, so a stored companion decodes
+back to exactly the bytes written without a serde or JSON round trip. The tests cover reopen
+persistence, the three-outcome boundary, monotonicity, removal isolation and the encoding round trip
+in both directions, and an unknown version byte is a typed error.
+
+This unit is not wired into any node. Writing on both seal paths, pruning against the canonical
+chain, publishing the horizon and the `unicity_` RPC read surface are U3i, which is not started.
+
 ## Current total fork inventory
 
 Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface1bd72cceb4`:
 
 | Change | Kind |
 | --- | --- |
-| `Cargo.toml`: two workspace member lines and one local dependency entry for `reth-unicity-execution` | makes the two inactive crates workspace-visible and lets payload reuse execution |
-| `Cargo.lock`: two added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring, the U3c to U3e seal methods, the U3f node executor and the U3g capability set, and to the `reth-unicity-execution` entry for U3f; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
+| `Cargo.toml`: three workspace member lines and two local dependency entries for `reth-unicity-execution` and `reth-unicity-store` | makes the inactive crates workspace-visible and lets payload reuse execution |
+| `Cargo.lock`: three added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring, the U3c to U3e seal methods, the U3f node executor and the U3g capability set, and to the `reth-unicity-execution` entry for U3f; the `reth-unicity-store` entry for U3h; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
 | `crates/unicity/payload/` | per-payload commitment provision, execution builder, bounded seal-job registry, Unicity node wiring, the `engine_forkchoiceUpdatedWithSealV1`, `engine_getPayloadWithSealV1` and `engine_newPayloadWithSealV1` siblings, the node executor component and the seal capability advertisement |
 | `crates/unicity/execution/` | bounded registry kernel, shared build/replay adapter, fixtures, the completed-parent token mint, the job root-input accessor and the node EVM dispatch (`node_evm`) |
+| `crates/unicity/store/` | durable block-hash-keyed companion store with the three-outcome lookup, a monotonic horizon, pruning and its own versioned record codec; library only, not wired |
 | Ten upstream Rust source files formatted by the current nightly rustfmt | repairs hosted formatting drift only |
 | `crates/trie/sparse/src/arena/mod.rs` | removes one redundant clone rejected by current Clippy |
 | `crates/net/network/src/config.rs` | removes one redundant rustdoc link target rejected by current rustdoc |
