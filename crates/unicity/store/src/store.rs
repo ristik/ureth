@@ -42,6 +42,9 @@ const META: &str = "meta";
 /// Key under which the retention horizon is stored in `meta`.
 const HORIZON_KEY: &[u8] = b"horizon";
 
+/// Key under which the eviction cursor is stored in `meta`.
+const EVICTION_CURSOR_KEY: &[u8] = b"eviction_cursor";
+
 /// Length of a block hash in bytes.
 const HASH_LEN: usize = 32;
 
@@ -184,7 +187,7 @@ impl CompanionStore {
             return Ok(Lookup::Found(decode(record)?));
         }
 
-        match read_horizon(&txn, &self.meta)? {
+        match read_meta_number(&txn, &self.meta, HORIZON_KEY)? {
             Some(horizon) => Ok(Lookup::Unavailable { horizon }),
             None => Ok(Lookup::Unknown),
         }
@@ -208,6 +211,39 @@ impl CompanionStore {
         Ok(())
     }
 
+    /// Returns the `(block_hash, block_number)` pairs whose number lies in the half-open range
+    /// `from..to`.
+    ///
+    /// `from` is included and `to` is excluded, matching [`Self::prune_below`]'s exclusive
+    /// boundary. The read walks only the `by_number` index keys inside the range, so the caller
+    /// bounds the cost by choosing the range; there is deliberately no way to ask for every entry.
+    /// A caller that wants the whole index has to say so by name and accept the cost.
+    ///
+    /// The returned pairs are ordered by `(block_number, block_hash)`, the `by_number` key order.
+    pub fn entries_in_range(&self, from: u64, to: u64) -> Result<Vec<(B256, u64)>, StoreError> {
+        let txn = self.env.begin_ro_txn()?;
+        let mut cursor = txn.cursor(self.by_number.dbi())?;
+        // The first key not below `from`. Every key starts with the big-endian number, so an
+        // eight-byte prefix positions the cursor at the first entry whose number is at least
+        // `from`.
+        let mut entry = cursor.set_range::<Vec<u8>, ()>(&from.to_be_bytes())?;
+        let mut entries = Vec::new();
+        while let Some((key, ())) = entry {
+            if key.len() != INDEX_KEY_LEN {
+                return Err(StoreError::Corrupt("index key has the wrong length"));
+            }
+            let mut raw = [0u8; NUMBER_LEN];
+            raw.copy_from_slice(&key[..NUMBER_LEN]);
+            let number = u64::from_be_bytes(raw);
+            if number >= to {
+                break;
+            }
+            entries.push((B256::from_slice(&key[NUMBER_LEN..]), number));
+            entry = cursor.next::<Vec<u8>, ()>()?;
+        }
+        Ok(entries)
+    }
+
     /// Removes every entry with `block_number < number`, then raises the horizon to `number`.
     ///
     /// The removals happen before the horizon write, inside one read-write transaction. MDBX makes
@@ -222,7 +258,7 @@ impl CompanionStore {
     pub fn prune_below(&self, number: u64) -> Result<(), StoreError> {
         let txn = self.env.begin_rw_txn()?;
 
-        let current = read_horizon(&txn, &self.meta)?;
+        let current = read_meta_number(&txn, &self.meta, HORIZON_KEY)?;
         let target = current.map_or(number, |current| current.max(number));
 
         {
@@ -262,7 +298,9 @@ impl CompanionStore {
     pub fn set_horizon(&self, number: u64) -> Result<(), StoreError> {
         let txn = self.env.begin_rw_txn()?;
 
-        if let Some(current) = read_horizon(&txn, &self.meta)?.filter(|current| number < *current) {
+        if let Some(current) =
+            read_meta_number(&txn, &self.meta, HORIZON_KEY)?.filter(|current| number < *current)
+        {
             return Err(StoreError::HorizonRegression { current, requested: number });
         }
 
@@ -275,7 +313,35 @@ impl CompanionStore {
     /// Returns the published retention horizon, or `None` when the node has never pruned.
     pub fn horizon(&self) -> Result<Option<u64>, StoreError> {
         let txn = self.env.begin_ro_txn()?;
-        read_horizon(&txn, &self.meta)
+        read_meta_number(&txn, &self.meta, HORIZON_KEY)
+    }
+
+    /// Returns the durable eviction cursor: the next block number an eviction pass should read.
+    ///
+    /// This is bookkeeping the caller keeps beside the horizon so a restart resumes instead of
+    /// rescanning the chain. The store only stores the number and never interprets it; it has no
+    /// notion of canonicality or eviction.
+    pub fn eviction_cursor(&self) -> Result<Option<u64>, StoreError> {
+        let txn = self.env.begin_ro_txn()?;
+        read_meta_number(&txn, &self.meta, EVICTION_CURSOR_KEY)
+    }
+
+    /// Persists the eviction cursor, never moving it backwards.
+    ///
+    /// The cursor is monotonic for the same reason the horizon is: the caller only advances it over
+    /// numbers that finality has settled, so a lower value would only cause needless rescans. A
+    /// lower request is clamped to the published value rather than refused, matching
+    /// [`Self::prune_below`].
+    pub fn set_eviction_cursor(&self, number: u64) -> Result<(), StoreError> {
+        let txn = self.env.begin_rw_txn()?;
+
+        let current = read_meta_number(&txn, &self.meta, EVICTION_CURSOR_KEY)?;
+        let target = current.map_or(number, |current| current.max(number));
+
+        txn.put(self.meta.dbi(), EVICTION_CURSOR_KEY, target.to_be_bytes(), WriteFlags::empty())?;
+        txn.commit()?;
+        self.env.sync(true)?;
+        Ok(())
     }
 }
 
@@ -302,18 +368,19 @@ fn stored_record(value: &[u8]) -> Result<&[u8], StoreError> {
     value.get(NUMBER_LEN..).ok_or(StoreError::Corrupt("stored value has no record"))
 }
 
-/// Reads the durable horizon from the metadata keyspace.
-fn read_horizon<K: TransactionKind>(
+/// Reads an eight-byte big-endian number stored under `key` in the metadata keyspace.
+fn read_meta_number<K: TransactionKind>(
     txn: &Transaction<K>,
     meta: &Database,
+    key: &[u8],
 ) -> Result<Option<u64>, StoreError> {
-    match txn.get::<Vec<u8>>(meta.dbi(), HORIZON_KEY)? {
+    match txn.get::<Vec<u8>>(meta.dbi(), key)? {
         None => Ok(None),
         Some(bytes) => {
             let raw: [u8; NUMBER_LEN] = bytes
                 .as_slice()
                 .try_into()
-                .map_err(|_| StoreError::Corrupt("horizon is not eight bytes"))?;
+                .map_err(|_| StoreError::Corrupt("metadata number is not eight bytes"))?;
             Ok(Some(u64::from_be_bytes(raw)))
         }
     }

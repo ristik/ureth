@@ -52,10 +52,10 @@ use reth_unicity_execution::{
 };
 use reth_unicity_payload::{
     build_seal_companion, prepare_seal_build, refusal_response, unicity_engine_capabilities,
-    CompanionSink, ExecutionPayloadJobResolver, FixedPayloadJobResolver, PayloadJobResolutionError,
-    ResolvedPayloadJob, SealBuildContext, SealBuildError, SealBuildState, SealCompanionLookup,
-    SealJobRegistry, UnicityEngineApiImpl, UnicityEngineTypes, UnicityEngineValidator,
-    UnicityExecutionPayloadBuilder, UnicityNode, UnicityParentAccountings,
+    CompanionPruner, CompanionSink, ExecutionPayloadJobResolver, FixedPayloadJobResolver,
+    PayloadJobResolutionError, ResolvedPayloadJob, SealBuildContext, SealBuildError,
+    SealBuildState, SealCompanionLookup, SealJobRegistry, UnicityEngineApiImpl, UnicityEngineTypes,
+    UnicityEngineValidator, UnicityExecutionPayloadBuilder, UnicityNode, UnicityParentAccountings,
     UnicityPayloadAttributes, UnicityRetentionConfig, UnicityRpcModuleImpl, UnicityRpcServer,
     UnicitySealConfig, COMPANION_NOT_RETAINED_CODE, DEFAULT_SEAL_JOB_CAPACITY, SEAL_CAPABILITIES,
 };
@@ -99,6 +99,7 @@ struct Client {
     parent_hash: B256,
     state: FixtureProvider,
     extra_headers: Vec<Header>,
+    finalized: u64,
 }
 
 #[derive(Clone)]
@@ -126,10 +127,25 @@ impl ChainSpecProvider for Client {
 
 impl BlockHashReader for Client {
     fn block_hash(&self, number: u64) -> ProviderResult<Option<B256>> {
-        Ok((number == 0).then_some(self.parent_hash))
+        if number == 0 {
+            return Ok(Some(self.parent_hash));
+        }
+        // The pruner compares an entry's hash to the canonical hash at its number, so the mock
+        // serves every header it was given by number.
+        Ok(self
+            .extra_headers
+            .iter()
+            .find(|header| header.number == number)
+            .map(|header| header.hash_slow()))
     }
     fn canonical_hashes_range(&self, start: u64, end: u64) -> ProviderResult<Vec<B256>> {
-        Ok((start..end).filter_map(|n| (n == 0).then_some(self.parent_hash)).collect())
+        let mut hashes = Vec::new();
+        for number in start..end {
+            if let Some(hash) = self.block_hash(number)? {
+                hashes.push(hash);
+            }
+        }
+        Ok(hashes)
     }
 }
 
@@ -202,7 +218,10 @@ impl BlockIdReader for Client {
         Ok(Some(BlockNumHash { number: 0, hash: self.parent_hash }))
     }
     fn finalized_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
-        Ok(Some(BlockNumHash { number: 0, hash: self.parent_hash }))
+        // A real chain always has a finalized block once finality exists. The hash is the canonical
+        // one when the mock was given a header at that number; the pruner only reads the number.
+        let hash = self.block_hash(self.finalized)?.unwrap_or_default();
+        Ok(Some(BlockNumHash { number: self.finalized, hash }))
     }
 }
 
@@ -376,6 +395,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         parent_hash: GENESIS_HASH,
         state: state.clone(),
         extra_headers: Vec::new(),
+        finalized: 0,
     };
     let root = Arc::new(input(1, 1, GENESIS_HASH));
     let attrs = attributes(&root, parent.timestamp);
@@ -470,6 +490,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         parent_hash: first_header.hash(),
         state: state.clone(),
         extra_headers: Vec::new(),
+        finalized: 0,
     };
     let second_builder = UnicityExecutionPayloadBuilder::new(
         second_client,
@@ -707,7 +728,13 @@ fn seal_fixture() -> (
     let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH));
     let mut state = FixtureProvider::signed_genesis();
     state.set_block_hash(0, GENESIS_HASH);
-    let client = Client { chain_spec, parent_hash: GENESIS_HASH, state, extra_headers: Vec::new() };
+    let client = Client {
+        chain_spec,
+        parent_hash: GENESIS_HASH,
+        state,
+        extra_headers: Vec::new(),
+        finalized: 0,
+    };
     let root = input(1, 1, GENESIS_HASH);
     let attrs = attributes(&root, parent.timestamp);
     let builder_config = Arc::new(OnceLock::new());
@@ -1765,8 +1792,8 @@ async fn seal_companion_horizon_is_null_before_pruning_even_with_a_retention_con
         SealJobRegistry::new(),
         UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR },
     )
-    .with_retention(UnicityRetentionConfig::with_horizon(5));
-    assert_eq!(node.retention().horizon(), Some(5), "the retention policy is carried");
+    .with_retention(UnicityRetentionConfig::retain_last(5));
+    assert_eq!(node.retention().depth(), Some(5), "the retention policy is carried");
 
     let (_dir, store) = temp_store();
     let rpc = UnicityRpcModuleImpl::new(client, store);
@@ -1785,4 +1812,127 @@ async fn seal_companion_horizon_reports_a_published_horizon() {
 
     let rpc = UnicityRpcModuleImpl::new(client, store);
     assert_eq!(rpc.seal_companion_horizon_v1().await.unwrap(), Some(7));
+}
+
+/// Builds a pruning fixture: a client whose canonical chain is genesis at 0 plus a header at each
+/// number in `numbers`, the finalized number set to `finalized`, a fresh store, and a companion.
+///
+/// The `TempDir` is returned so the caller keeps the store's directory alive.
+fn pruner_fixture(
+    finalized: u64,
+    numbers: &[u64],
+) -> (Client, Arc<CompanionStore>, tempfile::TempDir, SealCompanion) {
+    let (client, _parent, root, _attrs, _context, _validator) = seal_fixture();
+    let companion = build_seal_companion(&root).unwrap();
+    let extra_headers = numbers
+        .iter()
+        .map(|number| {
+            let mut header = client.chain_spec.genesis_header().clone();
+            header.number = *number;
+            header
+        })
+        .collect();
+    let client = Client { extra_headers, finalized, ..client };
+    let (dir, store) = temp_store();
+    (client, store, dir, companion)
+}
+
+#[test]
+fn a_non_canonical_entry_at_or_below_finalized_is_evicted() {
+    // A canonical header at 3 so the provider can answer affirmatively: the entry's hash is not the
+    // canonical one, which is what eviction requires.
+    let (client, store, _dir, companion) = pruner_fixture(5, &[3]);
+    let orphan = B256::repeat_byte(0x11);
+    store.put(orphan, 3, &companion).unwrap();
+
+    let pruner = CompanionPruner::new(client, store.clone(), None);
+    pruner.prune_once(10).unwrap();
+
+    // Block 3 is canonical as a different hash and 3 <= finalized 5, so the entry is dropped. No
+    // horizon was published, so the absent hash is Unknown.
+    assert!(matches!(store.get(orphan).unwrap(), Lookup::Unknown));
+}
+
+#[test]
+fn an_entry_the_provider_cannot_resolve_is_kept_and_rechecked() {
+    let (client, store, _dir, companion) = pruner_fixture(5, &[]);
+    let unresolved = B256::repeat_byte(0x33);
+    store.put(unresolved, 3, &companion).unwrap();
+
+    let pruner = CompanionPruner::new(client, store.clone(), None);
+    pruner.prune_once(10).unwrap();
+
+    // The provider has no hash at 3. That is not an affirmative mismatch, so the companion is kept
+    // and the cursor does not advance past the number, which is re-read next pass.
+    assert!(matches!(store.get(unresolved).unwrap(), Lookup::Found(_)));
+    assert_eq!(store.eviction_cursor().unwrap(), Some(3));
+}
+
+#[test]
+fn a_non_canonical_entry_above_finalized_is_kept() {
+    let (client, store, _dir, companion) = pruner_fixture(0, &[]);
+    let orphan = B256::repeat_byte(0x11);
+    store.put(orphan, 3, &companion).unwrap();
+
+    let pruner = CompanionPruner::new(client, store.clone(), None);
+    pruner.prune_once(10).unwrap();
+
+    // 3 is above finalized 0, so either branch could still win; the entry stays.
+    assert!(matches!(store.get(orphan).unwrap(), Lookup::Found(_)));
+}
+
+#[test]
+fn eviction_without_a_retention_leaves_the_horizon_unset() {
+    let (client, store, _dir, companion) = pruner_fixture(5, &[3]);
+    let orphan = B256::repeat_byte(0x11);
+    store.put(orphan, 3, &companion).unwrap();
+
+    let pruner = CompanionPruner::new(client, store.clone(), None);
+    pruner.prune_once(10).unwrap();
+
+    assert!(matches!(store.get(orphan).unwrap(), Lookup::Unknown), "the entry was evicted");
+    assert_eq!(store.horizon().unwrap(), None, "eviction must not publish a horizon");
+}
+
+#[test]
+fn a_retention_depth_prunes_below_the_horizon_and_publishes_it() {
+    let (client, store, _dir, companion) = pruner_fixture(0, &[95]);
+    let below = B256::repeat_byte(0x22);
+    let inside = client.block_hash(95).unwrap().unwrap();
+    store.put(below, 80, &companion).unwrap();
+    store.put(inside, 95, &companion).unwrap();
+
+    let pruner = CompanionPruner::new(client, store.clone(), Some(10));
+    pruner.prune_once(100).unwrap();
+
+    // tip 100 - depth 10 = horizon 90. Block 80 is below it and dropped; block 95 is retained.
+    assert_eq!(store.horizon().unwrap(), Some(90));
+    assert!(matches!(store.get(below).unwrap(), Lookup::Unavailable { horizon: 90 }));
+    assert!(matches!(store.get(inside).unwrap(), Lookup::Found(_)));
+}
+
+#[test]
+fn the_published_horizon_does_not_move_backwards_when_the_tip_does() {
+    let (client, store, _dir, _companion) = pruner_fixture(0, &[]);
+    let pruner = CompanionPruner::new(client, store.clone(), Some(10));
+
+    pruner.prune_once(100).unwrap();
+    assert_eq!(store.horizon().unwrap(), Some(90));
+
+    // A reorg lowers the tip. The horizon is monotonic, so it stays where pruning already put it.
+    pruner.prune_once(80).unwrap();
+    assert_eq!(store.horizon().unwrap(), Some(90));
+}
+
+#[test]
+fn a_canonical_entry_above_the_horizon_and_below_finalized_survives_both_paths() {
+    let (client, store, _dir, companion) = pruner_fixture(95, &[95]);
+    let inside = client.block_hash(95).unwrap().unwrap();
+    store.put(inside, 95, &companion).unwrap();
+
+    let pruner = CompanionPruner::new(client, store.clone(), Some(10));
+    // Eviction scans [0, 96) and finds block 95 canonical; the horizon is 90, below 95.
+    pruner.prune_once(100).unwrap();
+
+    assert!(matches!(store.get(inside).unwrap(), Lookup::Found(_)));
 }

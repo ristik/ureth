@@ -35,6 +35,7 @@
 
 pub mod engine;
 pub mod node;
+pub mod prune;
 pub mod registry;
 pub mod rpc;
 
@@ -43,6 +44,7 @@ pub use node::{
     UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityExecutorBuilder, UnicityNode,
     UnicityNodeAddOns, UnicityPayloadBuilderBuilder, UnicityRetentionConfig, UnicitySealConfig,
 };
+pub use prune::{run_companion_pruner, CompanionPruneError, CompanionPruner};
 pub use registry::{
     SealJobRegistry, UnicityParentAccountings, DEFAULT_PARENT_ACCOUNTING_CAPACITY,
     DEFAULT_SEAL_JOB_CAPACITY,

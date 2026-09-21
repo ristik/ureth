@@ -46,6 +46,7 @@ alloy-rpc-types-engine = { workspace = true, features = ["serde"] }
 # misc
 async-trait.workspace = true
 eyre.workspace = true
+futures-util.workspace = true
 jsonrpsee = { workspace = true, features = ["server", "macros"] }
 serde = { workspace = true, features = ["derive"] }
 sha2.workspace = true

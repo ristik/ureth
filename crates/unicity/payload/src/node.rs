@@ -40,8 +40,8 @@ use reth_payload_primitives::{
     EngineObjectValidationError, NewPayloadError, PayloadOrAttributes,
 };
 use reth_primitives_traits::SealedBlock;
-use reth_provider::EthStorage;
-use reth_storage_api::BlockNumReader;
+use reth_provider::{CanonStateSubscriptions, EthStorage};
+use reth_storage_api::BlockIdReader;
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use reth_unicity_execution::{
     block::BlockProfile,
@@ -50,6 +50,7 @@ use reth_unicity_execution::{
 use reth_unicity_store::CompanionStore;
 
 use crate::{
+    prune::run_companion_pruner,
     registry::UnicityParentAccountings,
     rpc::{companion_store, unicity_rpc_module, SealBuildState, UnicityEngineApiBuilder},
     SealJobRegistry, UnicityEngineTypes, UnicityExecutionPayloadBuilder, UnicityPayloadAttributes,
@@ -68,28 +69,32 @@ pub struct UnicitySealConfig {
 /// Retention policy for the node's companion store.
 ///
 /// The default is D2's full-node behaviour: retain every companion indefinitely and publish no
-/// retention horizon. A pruned node opts in by naming a horizon. Pruning consumes the setting. The
-/// horizon read surface deliberately does not: it reports only what the node has actually dropped,
-/// so a node configured to prune that has not yet pruned still answers `null`.
+/// retention horizon. A pruned node opts in by naming a retention **depth**: the number of blocks
+/// to keep behind the tip. It is not an absolute block number, because a running node moves and an
+/// operator should not have to reconfigure the value every block. The published horizon stays
+/// absolute and is computed as `tip - depth` by the pruning path.
+///
+/// The horizon read surface reports only what the node has actually dropped, so a node configured
+/// with a depth that has not yet pruned still answers `null`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct UnicityRetentionConfig {
-    horizon: Option<u64>,
+    depth: Option<u64>,
 }
 
 impl UnicityRetentionConfig {
     /// Retains every companion indefinitely and publishes no horizon. This is the default.
     pub const fn retain_indefinitely() -> Self {
-        Self { horizon: None }
+        Self { depth: None }
     }
 
-    /// Prunes below `horizon` once the pruning path consumes the setting.
-    pub const fn with_horizon(horizon: u64) -> Self {
-        Self { horizon: Some(horizon) }
+    /// Retains the last `depth` blocks behind the tip and prunes below the published horizon.
+    pub const fn retain_last(depth: u64) -> Self {
+        Self { depth: Some(depth) }
     }
 
-    /// The configured horizon, or `None` when the node retains indefinitely.
-    pub const fn horizon(&self) -> Option<u64> {
-        self.horizon
+    /// The configured retention depth, or `None` when the node retains indefinitely.
+    pub const fn depth(&self) -> Option<u64> {
+        self.depth
     }
 }
 
@@ -134,7 +139,7 @@ impl UnicityNode {
     /// Sets the companion retention policy.
     ///
     /// The default retains every companion indefinitely and publishes no horizon. A pruned node
-    /// opts in with [`UnicityRetentionConfig::with_horizon`].
+    /// opts in with [`UnicityRetentionConfig::retain_last`].
     pub const fn with_retention(mut self, retention: UnicityRetentionConfig) -> Self {
         self.retention = retention;
         self
@@ -196,7 +201,7 @@ impl NodeTypes for UnicityNode {
 impl<N> Node<N> for UnicityNode
 where
     N: FullNodeTypes<Types = Self>,
-    N::Provider: BlockNumReader,
+    N::Provider: BlockIdReader + CanonStateSubscriptions,
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
@@ -223,10 +228,11 @@ where
     }
 
     fn add_ons(&self) -> Self::AddOns {
-        // The engine API add-on and the RPC hook share this one store cell. `build_engine_api` runs
-        // first inside `RpcAddOns`, but the hook resolves the same cell rather than a second
-        // environment, so the order is not load-bearing.
+        // The engine API add-on, the RPC read surface and the pruning task share this one store
+        // cell. `build_engine_api` runs first inside `RpcAddOns`, but the hook resolves the same
+        // cell rather than a second environment, so the order is not load-bearing.
         let store = self.companion_store.clone();
+        let depth = self.retention.depth();
         RpcAddOns::new(
             EthereumEthApiBuilder::default(),
             UnicityEngineValidatorBuilder,
@@ -252,7 +258,13 @@ where
                 // engine API add-on resolved.
                 let provider = ctx.provider().clone();
                 let store = companion_store(&store, ctx.config().datadir().data_dir())?;
-                ctx.modules.merge_configured(unicity_rpc_module(provider, store))?;
+                ctx.modules
+                    .merge_configured(unicity_rpc_module(provider.clone(), store.clone()))?;
+                // Retention is driven by the canonical-state stream on the node's own executor.
+                // The stream fires on every canonical change, including reorgs, so the block
+                // cadence is the rate limit and no timer is needed. A failed pass is logged inside
+                // the task and never takes the node down.
+                ctx.node().task_executor().spawn_task(run_companion_pruner(provider, store, depth));
                 Ok(())
             },
         )

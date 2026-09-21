@@ -237,3 +237,35 @@ fn open_creates_a_missing_directory() {
     assert_eq!(store.horizon().unwrap(), None);
     assert!(nested.is_dir());
 }
+
+#[test]
+fn entries_in_range_returns_only_the_requested_range() {
+    let (_dir, store) = store();
+    for number in [1u64, 3, 5, 7] {
+        store.put(hash(number as u8), number, &companion(number as u8)).unwrap();
+    }
+
+    // Half-open: 3 and 5 are inside, while 1 below and 7 above must not leak in.
+    assert_eq!(store.entries_in_range(3, 6).unwrap(), vec![(hash(3), 3), (hash(5), 5)]);
+    // The low bound is exclusive too.
+    assert_eq!(store.entries_in_range(4, 8).unwrap(), vec![(hash(5), 5), (hash(7), 7)]);
+    // Empty when the bounds meet or cross.
+    assert!(store.entries_in_range(4, 4).unwrap().is_empty());
+    assert!(store.entries_in_range(9, 4).unwrap().is_empty());
+}
+
+#[test]
+fn the_eviction_cursor_is_durable_and_never_moves_backwards() {
+    let dir = tempdir().unwrap();
+    {
+        let store = open(dir.path()).unwrap();
+        assert_eq!(store.eviction_cursor().unwrap(), None);
+        store.set_eviction_cursor(10).unwrap();
+        // A lower request is clamped, because the cursor only ever advances.
+        store.set_eviction_cursor(4).unwrap();
+        assert_eq!(store.eviction_cursor().unwrap(), Some(10));
+    }
+
+    let reopened = open(dir.path()).unwrap();
+    assert_eq!(reopened.eviction_cursor().unwrap(), Some(10));
+}
