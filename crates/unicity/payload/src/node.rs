@@ -41,6 +41,8 @@ use reth_payload_primitives::{
 };
 use reth_primitives_traits::SealedBlock;
 use reth_provider::{CanonStateSubscriptions, EthStorage};
+use reth_rpc_eth_api::helpers::config::{EthConfigApiServer, EthConfigHandler};
+use reth_rpc_server_types::RethRpcModule;
 use reth_storage_api::BlockIdReader;
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use reth_unicity_execution::{
@@ -260,6 +262,29 @@ where
                 let store = companion_store(&store, ctx.config().datadir().data_dir())?;
                 ctx.modules
                     .merge_configured(unicity_rpc_module(provider.clone(), store.clone()))?;
+
+                // eth_config (EIP-7910), which the stock node registers in EthereumNode's
+                // launch_add_ons (crates/ethereum/node/src/node.rs) and this node otherwise loses
+                // by assembling its own add-ons. It is not optional here: a
+                // consensus client reads it to refuse an execution client whose
+                // loaded chain spec is not the one it expects, so a Unicity node
+                // without it is a node nothing will pair with. Same handler, same
+                // module guard, and the value is derived from this node's own provider and EVM
+                // config rather than restated, because the point of the check is to report the real
+                // loaded fork schedule.
+                ctx.modules.merge_if_module_configured(
+                    RethRpcModule::Eth,
+                    EthConfigHandler::new(provider.clone(), ctx.node().evm_config().clone())
+                        .into_rpc(),
+                )?;
+                // The same stock function also registers the Flashbots `ValidationApi` and the
+                // hidden `TestingApi`, and this node deliberately keeps neither. Both are
+                // block-production surfaces built on stock Ethereum rules: the first validates a
+                // builder submission with an `EthereumEngineValidator`, the second builds a block
+                // straight through the engine handle. On this node a block is valid only when it
+                // carries the root input it is bound to, so either handler would answer
+                // confidently under rules this node does not execute — worse than not answering.
+                // Their absence costs nothing by default, since both sit behind opt-in modules.
                 // Retention is driven by the canonical-state stream on the node's own executor.
                 // The stream fires on every canonical change, including reorgs, so the block
                 // cadence is the rate limit and no timer is needed. A failed pass is logged inside
