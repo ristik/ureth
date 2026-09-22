@@ -11,6 +11,7 @@ exclude = [".github/"]
 members = [
     "bin/reth-bb/",
     "bin/reth/",
+    "bin/unicity-reth/",
     "crates/storage/rpc-provider/",
     "crates/chain-state/",
     "crates/chainspec/",
@@ -356,6 +357,7 @@ reth-eth-wire = { path = "crates/net/eth-wire" }
 reth-eth-wire-types = { path = "crates/net/eth-wire-types" }
 reth-ethereum-payload-builder = { path = "crates/ethereum/payload" }
 reth-unicity-execution = { path = "crates/unicity/execution" }
+reth-unicity-payload = { path = "crates/unicity/payload" }
 reth-unicity-store = { path = "crates/unicity/store" }
 reth-ethereum-cli = { path = "crates/ethereum/cli", default-features = false }
 reth-ethereum-consensus = { path = "crates/ethereum/consensus", default-features = false }

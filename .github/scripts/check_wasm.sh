@@ -56,6 +56,7 @@ exclude_crates=(
   # The following are not supposed to be working
   reth # all of the crates below
   reth-bb # binary-only, uses tokio features unsupported on wasm
+  unicity-reth # binary-only, launches a full node
   reth-storage-rpc-provider
   reth-invalid-block-hooks # reth-provider
   reth-libmdbx # mdbx

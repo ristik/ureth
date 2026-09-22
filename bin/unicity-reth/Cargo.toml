@@ -1,0 +1,45 @@
+[package]
+name = "unicity-reth"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Reth node binary that launches the Unicity seal-capable node"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+# reth
+reth-ethereum-cli.workspace = true
+reth-unicity-payload.workspace = true
+reth-unicity-execution.workspace = true
+reth-cli-util.workspace = true
+
+# alloy
+alloy-primitives.workspace = true
+
+# misc
+clap = { workspace = true, features = ["derive", "env"] }
+eyre.workspace = true
+tracing.workspace = true
+
+[features]
+default = ["jemalloc"]
+
+jemalloc = [
+    "reth-cli-util/jemalloc",
+    "reth-ethereum-cli/jemalloc",
+]
+jemalloc-prof = [
+    "jemalloc",
+    "reth-cli-util/jemalloc-prof",
+    "reth-ethereum-cli/jemalloc-prof",
+]
+
+[[bin]]
+name = "unicity-reth"
+path = "src/main.rs"
