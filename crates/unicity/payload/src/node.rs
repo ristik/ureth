@@ -221,6 +221,9 @@ where
                 self.builder_config.clone(),
                 self.parent_accounting.clone(),
             )))
+            // M1 blocks P2P block admission here, but this also disables transaction gossip.
+            // Transactions must reach the leader directly until ristik/ureth#34 restores
+            // gossip without admitting P2P blocks.
             .network(NoopNetworkBuilder::eth())
             .consensus(UnicityConsensusBuilder::new(
                 self.seal.profile,
