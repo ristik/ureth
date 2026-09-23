@@ -14,6 +14,8 @@ use reth_basic_payload_builder::{
     BuildArguments, BuildOutcome, MissingPayloadBehaviour, PayloadBuilder, PayloadConfig,
 };
 use reth_chainspec::{ChainInfo, ChainSpec, ChainSpecProvider};
+use reth_consensus::{Consensus, ConsensusError, HeaderValidator};
+use reth_consensus_common::validation::validate_against_parent_eip1559_base_fee;
 use reth_engine_primitives::{BeaconEngineMessage, ConsensusEngineHandle};
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_ethereum_primitives::{Transaction, TransactionSigned};
@@ -54,10 +56,11 @@ use reth_unicity_payload::{
     build_seal_companion, prepare_seal_build, refusal_response, unicity_engine_capabilities,
     CompanionPruner, CompanionSink, ExecutionPayloadJobResolver, FixedPayloadJobResolver,
     PayloadJobResolutionError, ResolvedPayloadJob, SealBuildContext, SealBuildError,
-    SealBuildState, SealCompanionLookup, SealJobRegistry, UnicityEngineApiImpl, UnicityEngineTypes,
-    UnicityEngineValidator, UnicityExecutionPayloadBuilder, UnicityNode, UnicityParentAccountings,
-    UnicityPayloadAttributes, UnicityRetentionConfig, UnicityRpcModuleImpl, UnicityRpcServer,
-    UnicitySealConfig, COMPANION_NOT_RETAINED_CODE, DEFAULT_SEAL_JOB_CAPACITY, SEAL_CAPABILITIES,
+    SealBuildState, SealCompanionLookup, SealJobRegistry, UnicityConsensus, UnicityEngineApiImpl,
+    UnicityEngineTypes, UnicityEngineValidator, UnicityExecutionPayloadBuilder, UnicityNode,
+    UnicityParentAccountings, UnicityPayloadAttributes, UnicityRetentionConfig,
+    UnicityRpcModuleImpl, UnicityRpcServer, UnicitySealConfig, COMPANION_NOT_RETAINED_CODE,
+    DEFAULT_SEAL_JOB_CAPACITY, SEAL_CAPABILITIES,
 };
 use reth_unicity_store::{open as open_companion_store, CompanionStore, Lookup, StoreError};
 use std::{
@@ -486,7 +489,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     )
     .unwrap();
     let second_client = Client {
-        chain_spec,
+        chain_spec: chain_spec.clone(),
         parent_hash: first_header.hash(),
         state: state.clone(),
         extra_headers: Vec::new(),
@@ -513,9 +516,157 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         Some(next_base_fee(second_parent.base_fee_per_gas.unwrap(), first_ordinary)),
     );
 
+    let accounting = UnicityParentAccountings::with_capacity(1);
+    let consensus = UnicityConsensus::new(chain_spec.clone(), PROFILE, accounting.clone());
+    let child = second.block().clone().into_sealed_header();
+    let unavailable = consensus.validate_header_against_parent(&child, &second_parent).unwrap_err();
+    assert!(consensus.is_validation_unavailable(&unavailable));
+    accounting.insert_for_chain(
+        second_parent.hash(),
+        replay.parent,
+        chain_spec.chain().id(),
+        chain_spec.genesis_hash(),
+    );
+    assert!(consensus.validate_header_against_parent(&child, &second_parent).is_ok());
+    let stock_fee = match validate_against_parent_eip1559_base_fee(
+        child.header(),
+        second_parent.header(),
+        &chain_spec,
+    ) {
+        Err(ConsensusError::BaseFeeDiff(diff)) => diff.expected,
+        other => panic!("stock parent fee must disagree with ordinary-only fee: {other:?}"),
+    };
+    let lease = reth_unicity_payload::ParentAccountingResolver::resolve(
+        &accounting,
+        &second_parent,
+        &chain_spec,
+        PROFILE,
+    )
+    .unwrap();
+    assert_eq!(lease.next_fee(), child.base_fee_per_gas.unwrap());
+    accounting.insert_for_chain(
+        B256::repeat_byte(0xfa),
+        replay.parent,
+        chain_spec.chain().id(),
+        chain_spec.genesis_hash(),
+    );
+    assert!(
+        reth_unicity_payload::ParentAccountingResolver::resolve(
+            &accounting,
+            &second_parent,
+            &chain_spec,
+            PROFILE,
+        )
+        .is_ok(),
+        "an active parent must survive capacity eviction"
+    );
+    drop(lease);
+    accounting.insert_for_chain(
+        B256::repeat_byte(0xfb),
+        replay.parent,
+        chain_spec.chain().id(),
+        chain_spec.genesis_hash(),
+    );
+    assert!(reth_unicity_payload::ParentAccountingResolver::resolve(
+        &accounting,
+        &second_parent,
+        &chain_spec,
+        PROFILE,
+    )
+    .is_err());
+    accounting.insert_for_chain(
+        second_parent.hash(),
+        replay.parent,
+        chain_spec.chain().id(),
+        chain_spec.genesis_hash(),
+    );
+    let expected_fee = child.base_fee_per_gas.unwrap();
+    std::thread::scope(|scope| {
+        for _ in 0..8 {
+            let accounting = accounting.clone();
+            let chain_spec = chain_spec.clone();
+            let second_parent = second_parent.clone();
+            scope.spawn(move || {
+                let lease = reth_unicity_payload::ParentAccountingResolver::resolve(
+                    &accounting,
+                    &second_parent,
+                    &chain_spec,
+                    PROFILE,
+                )
+                .unwrap();
+                assert_eq!(lease.next_fee(), expected_fee);
+            });
+        }
+    });
+    let mut forged_parent = second_parent.header().clone();
+    forged_parent.state_root = B256::repeat_byte(0xed);
+    let forged_parent = SealedHeader::new(forged_parent, second_parent.hash());
+    assert!(reth_unicity_payload::ParentAccountingResolver::resolve(
+        &accounting,
+        &forged_parent,
+        &chain_spec,
+        PROFILE,
+    )
+    .is_err());
+    assert!(reth_unicity_payload::ParentAccountingResolver::resolve(
+        &accounting,
+        &second_parent,
+        &chain_spec,
+        BlockProfile { base_fee_floor: PROFILE.base_fee_floor + 1, ..PROFILE },
+    )
+    .is_err());
+
+    let mut wrong_fee = child.header().clone();
+    wrong_fee.base_fee_per_gas = Some(stock_fee);
+    let wrong_fee = SealedHeader::new(wrong_fee.clone(), wrong_fee.hash_slow());
+    assert!(matches!(
+        consensus.validate_header_against_parent(&wrong_fee, &second_parent),
+        Err(ConsensusError::BaseFeeDiff(_))
+    ));
+    for change in 0..5 {
+        let mut invalid = child.header().clone();
+        match change {
+            0 => invalid.parent_hash = B256::repeat_byte(0xee),
+            1 => invalid.number += 1,
+            2 => invalid.timestamp = second_parent.timestamp,
+            3 => invalid.gas_limit = second_parent.gas_limit / 2,
+            4 => invalid.excess_blob_gas = invalid.excess_blob_gas.map(|gas| gas + 1),
+            _ => unreachable!(),
+        }
+        let invalid = SealedHeader::new(invalid.clone(), invalid.hash_slow());
+        assert!(
+            consensus.validate_header_against_parent(&invalid, &second_parent).is_err(),
+            "non-fee check {change}"
+        );
+    }
+
     let empty = builder.build_empty_payload(config).unwrap();
     assert!(empty.block().body().transactions.is_empty());
     assert_eq!(empty.block().header().extra_data.as_ref(), attrs.commitment.as_slice());
+    let alternate_parent = empty.block().clone().into_sealed_header();
+    assert_eq!(alternate_parent.number, second_parent.number);
+    assert_ne!(alternate_parent.hash(), second_parent.hash());
+    let alternate_token = evm.completed_parent_for(empty.block()).unwrap();
+    let branch_accounting = UnicityParentAccountings::with_capacity(2);
+    for (header, token) in [(&*second_parent, replay.parent), (&alternate_parent, alternate_token)]
+    {
+        branch_accounting.insert_for_chain(
+            header.hash(),
+            token,
+            chain_spec.chain().id(),
+            chain_spec.genesis_hash(),
+        );
+        let lease = reth_unicity_payload::ParentAccountingResolver::resolve(
+            &branch_accounting,
+            header,
+            &chain_spec,
+            PROFILE,
+        )
+        .unwrap();
+        assert_eq!(lease.next_fee(), token.checked_next_base_fee(header, PROFILE).unwrap(),);
+    }
+    assert!(branch_accounting.get(&second_parent.hash()).is_some());
+    assert!(branch_accounting.get(&alternate_parent.hash()).is_some());
     let resolve_calls = Arc::new(AtomicUsize::new(0));
     let counting = UnicityExecutionPayloadBuilder::new(
         client.clone(),
@@ -866,6 +1017,7 @@ fn seal_build_reports_an_unknown_parent_as_syncing() {
     .unwrap_err();
     assert_eq!(error, SealBuildError::UnknownParent);
     assert!(refusal_response(error).unwrap().is_syncing());
+    assert!(refusal_response(SealBuildError::ParentAccountingUnavailable).unwrap().is_syncing());
     assert!(context.registry.is_empty());
 }
 
@@ -1667,21 +1819,24 @@ async fn the_parent_token_recorded_by_an_import_is_usable_by_a_later_build() {
     assert!(context.registry.resolve(&child_config).is_ok());
 }
 
-/// The Unicity node advertises exactly the stock Ethereum set plus the three seal methods, and the
-/// stock set advertises none of them. The three are asserted as one set so a partial regression
-/// fails rather than passing two of three checks.
+/// The M1 node advertises the three seal methods and withholds stock newPayload admission.
 #[test]
-fn unicity_capabilities_are_the_stock_set_plus_the_three_seal_methods() {
+fn unicity_capabilities_withhold_stock_new_payload() {
     let stock = EngineCapabilities::default();
     let unicity = unicity_engine_capabilities();
 
-    // The full sets differ by exactly the three seal strings.
-    let mut expected = stock.list();
+    let mut expected: Vec<_> = stock
+        .list()
+        .into_iter()
+        .filter(|capability| {
+            !reth_unicity_payload::rpc::DEFERRED_NEW_PAYLOAD_METHODS.contains(&capability.as_str())
+        })
+        .collect();
     expected.extend(SEAL_CAPABILITIES.iter().map(|capability| (*capability).to_owned()));
     expected.sort_unstable();
     let mut actual = unicity.list();
     actual.sort_unstable();
-    assert_eq!(actual, expected, "the Unicity set must be exactly the stock list plus the three");
+    assert_eq!(actual, expected);
 
     // The only additions are those three, so a client never sees a partial seal contract.
     let mut added: Vec<String> = unicity
@@ -1698,6 +1853,9 @@ fn unicity_capabilities_are_the_stock_set_plus_the_three_seal_methods() {
     // A stock Ethereum capability set contains none of them.
     for capability in SEAL_CAPABILITIES {
         assert!(!stock.as_set().contains(*capability), "stock must not advertise {capability}");
+    }
+    for capability in reth_unicity_payload::rpc::DEFERRED_NEW_PAYLOAD_METHODS {
+        assert!(!unicity.as_set().contains(*capability));
     }
 }
 

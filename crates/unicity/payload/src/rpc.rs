@@ -6,9 +6,8 @@
 //! is shaped after `EngineApiInner` in `reth_rpc_engine_api`: the same provider, consensus handle
 //! and shared node state.
 //!
-//! The methods are reachable and advertised. A Unicity node's `engine_exchangeCapabilities` adds
-//! all three seal methods together; the stock Ethereum set is unchanged and the three are never
-//! advertised as a subset.
+//! The three seal methods are reachable and advertised. Stock `newPayload` versions are withheld
+//! because they cannot perform the authenticated seal preflight in M1.
 //!
 //! # Order
 //!
@@ -87,7 +86,9 @@ use crate::{
         UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityNode, UnicityRetentionConfig,
         UnicitySealConfig,
     },
-    registry::{SealJobRegistry, UnicityParentAccountings},
+    registry::{
+        ParentAccountingLease, ParentAccountingResolver, SealJobRegistry, UnicityParentAccountings,
+    },
     PayloadJobResolutionError, ResolvedPayloadJob, UnicityEngineTypes, UnicityPayloadAttributes,
 };
 
@@ -279,6 +280,8 @@ struct PreparedSealImport {
     block_hash: B256,
     /// Number of the imported block, captured before `execution_data` is moved to the engine.
     block_number: u64,
+    /// Prevents concurrent cache eviction before the engine finishes header validation.
+    parent_lease: Option<ParentAccountingLease>,
 }
 
 /// Resolves and installs the seal job for one build request.
@@ -327,15 +330,15 @@ where
         )
         .map_err(SealBuildError::Binding)?
     } else {
-        let token = context
+        let lease = context
             .parent_accounting
-            .get(&parent.hash())
-            .ok_or(SealBuildError::ParentAccountingUnavailable)?;
+            .resolve(&parent, &chain_spec, context.seal.profile)
+            .map_err(|_| SealBuildError::ParentAccountingUnavailable)?;
         bind_completed_parent(
             root,
             context.seal.profile,
             &parent,
-            token,
+            lease.token(),
             context.seal.fee_collector,
         )
         .map_err(SealBuildError::Binding)?
@@ -483,17 +486,13 @@ impl std::ops::Deref for SealBuildContext {
 
 /// Maps a preparation refusal to the handler's response.
 ///
-/// An unknown parent is a sync condition, not a bad input, so it returns SYNCING. A parent whose
-/// accounting token is missing is internal node state, not caller input, so it returns an RPC
-/// error. Every other refusal describes the caller's input and returns INVALID with the refusal's
-/// display text in `validationError`.
+/// An unknown parent or missing local accounting is recoverable, so both return SYNCING. Every
+/// other refusal describes the caller's input and returns INVALID with the refusal's display text
+/// in `validationError`.
 pub fn refusal_response(error: SealBuildError) -> Result<ForkchoiceUpdated, EngineApiError> {
     match error {
-        SealBuildError::UnknownParent => {
+        SealBuildError::UnknownParent | SealBuildError::ParentAccountingUnavailable => {
             Ok(ForkchoiceUpdated::from_status(PayloadStatusEnum::Syncing))
-        }
-        error @ SealBuildError::ParentAccountingUnavailable => {
-            Err(EngineApiError::Internal(Box::new(error)))
         }
         error => Ok(ForkchoiceUpdated::from_status(PayloadStatusEnum::Invalid {
             validation_error: error.to_string(),
@@ -675,6 +674,7 @@ where
         // Capture the key before `execution_data` is moved into the forward.
         let block_hash = prepared.block_hash;
         let block_number = prepared.block_number;
+        let _parent_lease = prepared.parent_lease;
 
         // The engine tree resolves this input when it executes the forwarded block. Register it
         // before the forward, because the engine can begin executing as soon as the message is
@@ -756,7 +756,7 @@ where
         //    build path or a previous import published, never a value derived from the header.
         let chain_spec = self.provider.chain_spec();
         let genesis_hash = chain_spec.genesis_hash();
-        let bound = if parent.number == 0 && parent.hash() == genesis_hash {
+        let (bound, parent_lease) = if parent.number == 0 && parent.hash() == genesis_hash {
             bind_validated_genesis(
                 root,
                 self.context.seal.profile,
@@ -764,24 +764,26 @@ where
                 genesis_hash,
                 self.context.seal.fee_collector,
             )
+            .map(|bound| (bound, None))
             .map_err(SealImportError::Binding)?
         } else {
-            let token = self
+            let lease = self
                 .context
                 .parent_accounting
-                .get(&parent.hash())
-                .ok_or(SealImportError::ParentAccountingMissing)?;
+                .resolve(&parent, &chain_spec, self.context.seal.profile)
+                .map_err(|_| SealImportError::ParentAccountingMissing)?;
             bind_completed_parent(
                 root,
                 self.context.seal.profile,
                 &parent,
-                token,
+                lease.token(),
                 self.context.seal.fee_collector,
             )
+            .map(|bound| (bound, Some(lease)))
             .map_err(SealImportError::Binding)?
         };
         let input = Arc::new(bound);
-        let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec), input.clone());
+        let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec.clone()), input.clone());
 
         // 6. Re-use the shared replay rather than a second execution or comparison path.
         let state_provider = self
@@ -799,7 +801,12 @@ where
         // 7. Record the imported block's accounting so a node that followed it can lead on it next.
         let block_hash = block.hash();
         let block_number = block.header().number;
-        self.context.parent_accounting.insert(block_hash, replay.parent);
+        self.context.parent_accounting.insert_for_chain(
+            block_hash,
+            replay.parent,
+            chain_spec.chain().id(),
+            genesis_hash,
+        );
 
         // 8. The engine executes the forwarded block and its EVM config resolves this input by the
         //    commitment in the header's extraData. Derive that key from the input itself.
@@ -807,7 +814,14 @@ where
             .root_input()
             .input_commitment()
             .map_err(|_| SealImportError::Payload("bound input has no commitment".to_owned()))?;
-        Ok(PreparedSealImport { execution_data, commitment, input, block_hash, block_number })
+        Ok(PreparedSealImport {
+            execution_data,
+            commitment,
+            input,
+            block_hash,
+            block_number,
+            parent_lease,
+        })
     }
 }
 
@@ -899,6 +913,9 @@ where
 {
     fn into_rpc_module(self) -> RpcModule<()> {
         let mut module = self.inner.into_rpc_module();
+        for method in DEFERRED_NEW_PAYLOAD_METHODS {
+            module.remove_method(method);
+        }
         module
             .merge(UnicityEngineApiServer::into_rpc(self.sibling).remove_context())
             .expect("the seal methods are additive and cannot conflict");
@@ -936,13 +953,28 @@ pub const SEAL_CAPABILITIES: &[&str] = &[
     "engine_getPayloadWithSealV1",
 ];
 
-/// Builds the node's capability set: the stock Ethereum list plus the three seal methods.
+/// Stock newPayload methods are unavailable until they can authenticate and bind Unicity inputs.
+pub const DEFERRED_NEW_PAYLOAD_METHODS: &[&str] = &[
+    "engine_newPayloadV1",
+    "engine_newPayloadV2",
+    "engine_newPayloadV3",
+    "engine_newPayloadV4",
+    "engine_newPayloadV5",
+];
+
+/// Builds the node's capability set for authenticated seal admission.
 ///
 /// This is the only place a Unicity node changes the advertised set.
 /// [`EngineCapabilities::default`] is left untouched, so `EthereumNode` still reports exactly the
 /// stock list.
 pub fn unicity_engine_capabilities() -> EngineCapabilities {
-    EngineCapabilities::new(CAPABILITIES.iter().copied().chain(SEAL_CAPABILITIES.iter().copied()))
+    EngineCapabilities::new(
+        CAPABILITIES
+            .iter()
+            .copied()
+            .filter(|capability| !DEFERRED_NEW_PAYLOAD_METHODS.contains(capability))
+            .chain(SEAL_CAPABILITIES.iter().copied()),
+    )
 }
 
 impl<N> EngineApiBuilder<N> for UnicityEngineApiBuilder

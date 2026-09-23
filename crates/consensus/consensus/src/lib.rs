@@ -93,6 +93,12 @@ pub trait FullConsensus<N: NodePrimitives>: Consensus<N::Block> {
 /// Consensus is a protocol that chooses canonical chain.
 #[auto_impl::auto_impl(&, Arc)]
 pub trait Consensus<B: Block>: HeaderValidator<B::Header> {
+    /// Returns true when validation needs local data that can become available later. The engine
+    /// answers SYNCING for this case rather than classifying the block as invalid.
+    fn is_validation_unavailable(&self, _error: &ConsensusError) -> bool {
+        false
+    }
+
     /// Ensures that body field values match the header.
     fn validate_body_against_header(
         &self,

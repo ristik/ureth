@@ -118,6 +118,7 @@ impl BoundExecutionInput {
         {
             return Err(crate::block::BlockAccountingError::ParentGasMismatch);
         }
+        completed.checked_next_base_fee(parent, profile)?;
         Ok(Self {
             input,
             profile,
@@ -138,6 +139,62 @@ impl BoundExecutionInput {
 /// Opaque accounting and identity proof minted only by a completed shared build or replay.
 #[derive(Clone, Copy, Debug)]
 pub struct CompletedParent(ParentExecutionOutcome);
+
+impl CompletedParent {
+    /// Checks a cached locally completed token against the exact parent header and profile, then
+    /// computes the next fee through the same ordinary-gas rule used by build and replay.
+    pub fn checked_next_base_fee(
+        self,
+        parent: &SealedHeader<Header>,
+        profile: BlockProfile,
+    ) -> Result<u64, crate::block::BlockAccountingError> {
+        use crate::block::BlockAccountingError;
+        if parent.header().hash_slow() != parent.hash() ||
+            self.0.parent_hash() != parent.hash() ||
+            self.0.profile() != profile ||
+            parent.gas_limit != profile.max_gas ||
+            parent.gas_used != self.0.header_gas() ||
+            parent.base_fee_per_gas != Some(self.0.base_fee())
+        {
+            return Err(BlockAccountingError::ParentGasMismatch);
+        }
+        let checked = ParentExecutionOutcome::reconcile(
+            profile,
+            parent.hash(),
+            parent.gas_used,
+            self.0.system_gas(),
+            self.0.base_fee(),
+        )?;
+        if checked.ordinary_gas() != self.0.ordinary_gas() {
+            return Err(BlockAccountingError::ParentGasMismatch);
+        }
+        next_base_fee(checked)
+    }
+
+    /// Applies the configured-genesis zero-system-gas rule for the first child.
+    pub fn genesis_next_base_fee(
+        parent: &SealedHeader<Header>,
+        genesis_hash: alloy_primitives::B256,
+        profile: BlockProfile,
+    ) -> Result<u64, crate::block::BlockAccountingError> {
+        use crate::block::BlockAccountingError;
+        if parent.number != 0 ||
+            parent.hash() != genesis_hash ||
+            parent.header().hash_slow() != genesis_hash ||
+            parent.gas_used != 0
+        {
+            return Err(BlockAccountingError::ParentGasMismatch);
+        }
+        let accounting = ParentExecutionOutcome::reconcile(
+            profile,
+            genesis_hash,
+            0,
+            0,
+            parent.base_fee_per_gas.ok_or(BlockAccountingError::InvalidParentBaseFee)?,
+        )?;
+        next_base_fee(accounting)
+    }
+}
 
 /// Fully assembled block plus the opaque token required to configure its child.
 #[derive(Debug)]
