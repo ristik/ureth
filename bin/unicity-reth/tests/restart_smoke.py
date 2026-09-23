@@ -12,6 +12,7 @@ Set U5R_RESTART_AFTER=1 and U5R_PRUNE_ACCOUNTING=1 to exercise B0-anchored B1 re
 Set U5R_RESTART_AFTER=3, U5R_PRUNE_ACCOUNTING=1, U5R_REPAIR_LIMIT=2, and
 U5R_EXPECT_UNAVAILABLE=1 to check refusal beyond the replay bound.
 Set U5R_MAKE_ORPHAN=1 to persist a built sidecar token without importing that block.
+Set U5R_CRASH=1 to SIGKILL the node after B3 import instead of shutting it down cleanly.
 """
 
 import base64
@@ -103,7 +104,7 @@ def stop(process):
         process.wait()
 
 
-def build_import(port, token, round_number, parent_hash, parent_timestamp):
+def build_import(port, token, round_number, parent_hash, parent_timestamp, saved_imports=None):
     generated = json.loads(subprocess.check_output(
         [str(REQUESTS), str(round_number), parent_hash, str(parent_timestamp)], text=True
     ))
@@ -134,6 +135,9 @@ def build_import(port, token, round_number, parent_hash, parent_timestamp):
     result = rpc(port, token, "engine_forkchoiceUpdatedV3", [choice, None])
     if result["payloadStatus"]["status"] != "VALID":
         raise RuntimeError(f"round {round_number}: forkchoice {result}")
+    if saved_imports is not None:
+        saved_imports.append((round_number, payload, generated["attributes"]["parentBeaconBlockRoot"],
+                              envelope["sealCompanion"], head))
     print(f"B{round_number} VALID {head}", flush=True)
     return head, int(payload["timestamp"], 16)
 
@@ -148,7 +152,11 @@ def main():
     prune_accounting = os.environ.get("U5R_PRUNE_ACCOUNTING") == "1"
     expect_unavailable = os.environ.get("U5R_EXPECT_UNAVAILABLE") == "1"
     make_orphan = os.environ.get("U5R_MAKE_ORPHAN") == "1"
+    crash = os.environ.get("U5R_CRASH") == "1"
+    if crash and restart_after != 3:
+        raise RuntimeError("U5R_CRASH requires U5R_RESTART_AFTER=3")
     try:
+        saved_imports = []
         datadir = root / "data"
         secret_path = root / "jwt.hex"
         secret_path.write_text(os.urandom(32).hex())
@@ -158,7 +166,10 @@ def main():
             try:
                 parent, timestamp = GENESIS_HASH, 0x11
                 for round_number in range(1, restart_after + 1):
-                    parent, timestamp = build_import(port, token, round_number, parent, timestamp)
+                    parent, timestamp = build_import(
+                        port, token, round_number, parent, timestamp,
+                        saved_imports if crash else None,
+                    )
                 if make_orphan:
                     generated = json.loads(subprocess.check_output([
                         str(REQUESTS), "99", parent, str(timestamp),
@@ -178,7 +189,12 @@ def main():
                         raise RuntimeError("orphan build never became available")
                     print("orphan build persisted without import", flush=True)
             finally:
-                stop(process)
+                if crash:
+                    process.kill()
+                    process.wait()
+                    print("SIGKILL after B3 import", flush=True)
+                else:
+                    stop(process)
         if prune_accounting:
             if not PRUNE_ACCOUNTING.is_file():
                 raise RuntimeError("build the prune_accounting example first")
@@ -201,6 +217,31 @@ def main():
                     raise RuntimeError("node started beyond the repair limit")
             process, token = start(datadir, secret_path, port, log)
             try:
+                if crash:
+                    state = {"headBlockHash": parent, "safeBlockHash": GENESIS_HASH,
+                             "finalizedBlockHash": GENESIS_HASH}
+                    before = rpc(port, token, "engine_forkchoiceUpdatedV3", [state, None])
+                    if before["payloadStatus"]["status"] not in ("VALID", "SYNCING"):
+                        raise RuntimeError(f"crash recovery: unexpected B3 status {before}")
+                    print(f"B3 after SIGKILL: {before['payloadStatus']['status']}", flush=True)
+                    # The sidecar can be ahead of the main DB. Re-drive the saved certified
+                    # imports in order, including a block the DB already retained.
+                    for round_number, payload, beacon_root, companion, head in saved_imports:
+                        status = rpc(port, token, "engine_newPayloadWithSealV1", [
+                            payload, [], beacon_root, companion,
+                        ])
+                        if status["status"] != "VALID":
+                            raise RuntimeError(f"round {round_number}: replay import {status}")
+                        choice = {"headBlockHash": head, "safeBlockHash": GENESIS_HASH,
+                                  "finalizedBlockHash": GENESIS_HASH}
+                        advanced = rpc(port, token, "engine_forkchoiceUpdatedV3", [choice, None])
+                        if advanced["payloadStatus"]["status"] != "VALID":
+                            raise RuntimeError(f"round {round_number}: replay forkchoice {advanced}")
+                    state = {"headBlockHash": parent, "safeBlockHash": parent,
+                             "finalizedBlockHash": parent}
+                    after = rpc(port, token, "engine_forkchoiceUpdatedV3", [state, None])
+                    if after["payloadStatus"]["status"] != "VALID":
+                        raise RuntimeError(f"crash recovery: B3 forkchoice {after}")
                 for round_number in range(restart_after + 1, 5):
                     parent, timestamp = build_import(port, token, round_number, parent, timestamp)
             finally:

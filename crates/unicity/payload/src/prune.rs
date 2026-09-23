@@ -88,8 +88,13 @@ where
     /// Eviction never raises the horizon, so a node that retains indefinitely still answers
     /// `horizon: null` after dropping a reorged entry.
     pub fn prune_once(&self, tip: u64) -> Result<(), CompanionPruneError> {
-        self.evict_non_canonical()?;
-        self.prune_to_depth(tip)?;
+        let companion_result = self.evict_non_canonical().and_then(|()| self.prune_to_depth(tip));
+        let accounting_result = self.prune_accounting();
+        companion_result?;
+        accounting_result
+    }
+
+    fn prune_accounting(&self) -> Result<(), CompanionPruneError> {
         // The sidecar may be far ahead of the main database when a process dies. Anchor token
         // retention to the persisted DB frontier so a rollback still has a usable token window.
         let persisted = self

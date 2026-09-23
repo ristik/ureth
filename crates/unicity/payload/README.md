@@ -86,6 +86,8 @@ configured-genesis anchor with zero system gas, so B1 can be repaired when its b
 remain available. A longer gap stops startup with an unavailable diagnostic. Accounting retention
 uses the persisted database frontier and keeps the hydration window plus the repair bound,
 independently of companion pruning.
+When companion pruning is configured, its depth must cover the 16-block accounting window plus
+the repair limit. The node rejects a smaller depth at startup because replay needs companions.
 
 ## The seal methods
 
