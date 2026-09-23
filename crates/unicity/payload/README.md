@@ -96,7 +96,8 @@ D2 build flow in order: decode `rootInput` through the canonical CBOR codec; res
 `headBlockHash`, where an unknown parent is SYNCING; bind the decoded input to that parent through
 the U3a entry points; build the `UnicityEvmConfig` and `ResolvedPayloadJob` with the node's
 published `EthereumBuilderConfig`; insert the job into the registry; and forward to the consensus
-handle. A refusal from decoding, binding, the job checks or a duplicate payload id is INVALID with
+handle. An identical build retry reuses its existing payload id and job. A refusal from decoding,
+binding, the job checks or a payload id collision with different input is INVALID with
 the refusal in `validationError`. Absent `payloadAttributes` is INVALID. A missing
 `builder_config` is an internal error. Missing non-genesis parent accounting returns `SYNCING` so
 the same request can be retried when the token becomes available.
@@ -126,6 +127,12 @@ unknown id. The companion's `rootInput` is re-encoded from the job's decoded inp
 canonical codec. That is byte-identical to what the caller supplied, because the decoder accepts
 only canonical encodings and its round-trip invariant is asserted in both directions, so
 re-encoding cannot differ from the caller's bytes. Its `provenance` is `"build"`.
+
+Reth drops the payload build job after `getPayload` resolves it. An identical build retry while the
+job is live reuses it; a retry after delivery creates a fresh job and can select a different
+transaction set if the pool changed. Ureth therefore does not guarantee one block per payload id
+across delivery. The bft-core execution journal is the guard: it prevents publishing a second
+distinct locally built candidate for the same authorization.
 
 The companion's `witnesses` list is empty, and that is correct rather than incomplete.
 
@@ -194,7 +201,7 @@ are retained under `../execution/testdata/`.
 
 These tests exercise in-process payload construction, replay, the bounded job registry, the seal
 build refusals and the seal import verdicts: a non-canonical `rootInput`, an unknown parent, absent
-attributes, a duplicate payload id, a job that resolves to the same configuration the payload
+attributes, an identical build retry, a job that resolves to the same configuration the payload
 service uses, a state-root mismatch, a missing parent, a parent without a token, non-empty blob
 hashes, and that ACCEPTED is never produced. They also cover the execution-input registry
 (idempotent duplicate, conflicting input, oldest-first eviction), node EVM resolution by commitment,

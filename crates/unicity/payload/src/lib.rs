@@ -325,6 +325,14 @@ impl ResolvedPayloadJob {
         }
         Ok(())
     }
+
+    /// An Engine build retry may arrive after its caller restarts while this job remains
+    /// live. Compare the full input; the eight-byte payload id alone is not authority.
+    pub(crate) fn same_build_input(&self, other: &Self) -> bool {
+        self.parent == other.parent &&
+            self.attributes == other.attributes &&
+            self.evm_config.root_input() == other.evm_config.root_input()
+    }
 }
 
 /// A fixed set of independently prepared payload jobs. It has no mutable current-job state.

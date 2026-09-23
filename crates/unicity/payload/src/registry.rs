@@ -53,10 +53,9 @@ struct SealJobRegistryInner {
 ///
 /// The capacity is at least [`DEFAULT_SEAL_JOB_CAPACITY`] and tracks the node's
 /// `max_payload_tasks` through [`SealJobRegistry::grow_capacity`]. It evicts in insertion order:
-/// the oldest job is dropped when a new one would exceed the capacity. A duplicate payload id is
-/// refused instead of replacing the existing job, matching
-/// [`FixedPayloadJobResolver`](crate::FixedPayloadJobResolver) and the fact that a payload id
-/// identifies one exhaustive job. All clones share the same entries, so the payload service and
+/// the oldest job is dropped when a new one would exceed the capacity. An identical retry reuses
+/// its existing job; a payload id collision with different input is refused. All clones share the
+/// same entries, so the payload service and
 /// the method that inserts jobs see one registry.
 #[derive(Clone, Debug)]
 pub struct SealJobRegistry {
@@ -121,14 +120,20 @@ impl SealJobRegistry {
             .map(|job| job.evm_config.root_input().clone())
     }
 
-    /// Installs `job` and refuses a payload id that is already present.
+    /// Installs `job`, accepting an identical retry without replacing the existing job.
     ///
     /// If the registry is full, the oldest insertion is evicted first. Eviction happens only when
-    /// the incoming job is accepted, so a duplicate does not displace the job it collides with.
+    /// the incoming job is new, so a retry or collision does not displace the held job.
     pub fn insert(&self, job: ResolvedPayloadJob) -> Result<(), PayloadJobResolutionError> {
         let mut inner = self.lock();
-        if inner.jobs.iter().any(|existing| existing.payload_id == job.payload_id) {
-            return Err(PayloadJobResolutionError("duplicate payload job"));
+        if let Some(existing) =
+            inner.jobs.iter().find(|existing| existing.payload_id == job.payload_id)
+        {
+            return if existing.same_build_input(&job) {
+                Ok(())
+            } else {
+                Err(PayloadJobResolutionError("duplicate payload job with different input"))
+            };
         }
         if inner.jobs.len() >= inner.capacity {
             inner.jobs.pop_front();
