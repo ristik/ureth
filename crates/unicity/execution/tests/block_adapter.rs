@@ -132,6 +132,39 @@ fn attributes(input: &RootInputV2, parent_timestamp: u64) -> NextBlockEnvAttribu
 }
 
 #[test]
+fn payload_job_binding_names_gas_and_fee_mismatches() {
+    let genesis: Genesis =
+        serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
+    let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
+    let parent = SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH);
+    let root = Arc::new(input(1, 1, GENESIS_HASH));
+    let bound = Arc::new(
+        BoundExecutionInput::from_validated_genesis(
+            root.clone(),
+            PROFILE,
+            &parent,
+            GENESIS_HASH,
+            FEE_COLLECTOR,
+        )
+        .unwrap(),
+    );
+    let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec), bound);
+    let mut attrs = attributes(&root, parent.timestamp);
+
+    attrs.gas_limit += 1;
+    assert_eq!(
+        config.validate_payload_job(&parent, &attrs).unwrap_err().message(),
+        "next-block gas_limit mismatch"
+    );
+    attrs.gas_limit = PROFILE.max_gas;
+    attrs.suggested_fee_recipient = Address::ZERO;
+    assert_eq!(
+        config.validate_payload_job(&parent, &attrs).unwrap_err().message(),
+        "next-block suggested_fee_recipient mismatch"
+    );
+}
+
+#[test]
 fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     let genesis_json = include_str!("../testdata/signed-beacon-genesis.json");
     let genesis: Genesis = serde_json::from_str(genesis_json).unwrap();

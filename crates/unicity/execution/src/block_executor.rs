@@ -276,6 +276,13 @@ fn validate_fixed_block(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BindingError(&'static str);
 
+impl BindingError {
+    /// Stable field or parent binding reason, suitable for the Engine API payload-job response.
+    pub const fn message(&self) -> &'static str {
+        self.0
+    }
+}
+
 impl fmt::Display for BindingError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.write_str(self.0)
@@ -729,29 +736,45 @@ impl UnicityEvmConfig {
         let timestamp =
             derive_timestamp(self.bound.input.origin.reference_time, self.bound.parent_timestamp)
                 .ok_or(BindingError("timestamp overflow"))?;
-        if attributes.timestamp != timestamp ||
-            attributes.prev_randao !=
-                derive_prev_randao(
-                    self.bound.input.origin.root_round,
-                    self.bound.input.authorized_round,
-                ) ||
-            attributes.parent_beacon_block_root !=
-                Some(derive_beacon_root(
-                    self.bound.input.origin.root_round,
-                    self.bound.input.authorized_round,
-                )) ||
-            attributes.gas_limit != self.bound.profile.max_gas ||
-            attributes.suggested_fee_recipient != self.bound.fee_collector ||
-            attributes.withdrawals.as_ref().is_some_and(|w| !w.is_empty()) ||
-            attributes.slot_number.is_some() ||
-            attributes.extra_data.as_ref() !=
-                self.bound
-                    .input
-                    .input_commitment()
-                    .map_err(|_| BindingError("invalid bound root input"))?
-                    .as_slice()
+        if attributes.timestamp != timestamp {
+            return Err(BindingError("next-block timestamp mismatch"));
+        }
+        if attributes.prev_randao !=
+            derive_prev_randao(
+                self.bound.input.origin.root_round,
+                self.bound.input.authorized_round,
+            )
         {
-            return Err(BindingError("next-block attributes diverge from bound execution input"));
+            return Err(BindingError("next-block prev_randao mismatch"));
+        }
+        if attributes.parent_beacon_block_root !=
+            Some(derive_beacon_root(
+                self.bound.input.origin.root_round,
+                self.bound.input.authorized_round,
+            ))
+        {
+            return Err(BindingError("next-block parent_beacon_block_root mismatch"));
+        }
+        if attributes.gas_limit != self.bound.profile.max_gas {
+            return Err(BindingError("next-block gas_limit mismatch"));
+        }
+        if attributes.suggested_fee_recipient != self.bound.fee_collector {
+            return Err(BindingError("next-block suggested_fee_recipient mismatch"));
+        }
+        if attributes.withdrawals.as_ref().is_some_and(|withdrawals| !withdrawals.is_empty()) {
+            return Err(BindingError("next-block withdrawals mismatch"));
+        }
+        if attributes.slot_number.is_some() {
+            return Err(BindingError("next-block slot_number mismatch"));
+        }
+        if attributes.extra_data.as_ref() !=
+            self.bound
+                .input
+                .input_commitment()
+                .map_err(|_| BindingError("invalid bound root input"))?
+                .as_slice()
+        {
+            return Err(BindingError("next-block extra_data mismatch"));
         }
         Ok(())
     }

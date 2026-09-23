@@ -300,7 +300,7 @@ impl ResolvedPayloadJob {
                 &parent,
                 &next_block_attributes(&parent, &attributes, builder_config),
             )
-            .map_err(|_| PayloadJobResolutionError("execution configuration does not match job"))?;
+            .map_err(|error| PayloadJobResolutionError(error.message()))?;
         Ok(Self { parent, attributes, payload_id, evm_config })
     }
 
