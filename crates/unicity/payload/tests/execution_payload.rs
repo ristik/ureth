@@ -1939,7 +1939,7 @@ async fn hydration_restores_persisted_head_when_memory_tip_is_ahead() {
     memory_tip.parent_hash = hash;
     let memory_hash = memory_tip.hash_slow();
     let provider = Client {
-        extra_headers: vec![header.clone(), memory_tip],
+        extra_headers: vec![header, memory_tip],
         best_number: 2,
         persisted_number: 1,
         ..client
