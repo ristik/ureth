@@ -39,9 +39,11 @@
 //! stored companion decodes back to exactly the bytes that were written, with no dependence on a
 //! serde or JSON round trip.
 
+mod accounting;
 mod encoding;
 mod error;
 mod store;
 
+pub use accounting::{StoredAccounting, RULE_VERSION};
 pub use error::StoreError;
 pub use store::{open, CompanionStore, Lookup};

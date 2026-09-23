@@ -1,8 +1,10 @@
 //! Behaviour tests for the durable companion store.
 
 use alloy_primitives::{Bytes, B256};
-use reth_unicity_execution::wire::SealCompanion;
-use reth_unicity_store::{open, CompanionStore, Lookup, StoreError};
+use reth_unicity_execution::{
+    block::BlockProfile, block_executor::LocalParentAccounting, wire::SealCompanion,
+};
+use reth_unicity_store::{open, CompanionStore, Lookup, StoreError, StoredAccounting};
 use tempfile::tempdir;
 
 /// A companion whose fields all differ per `tag`, so a mix-up is visible.
@@ -24,6 +26,56 @@ fn store() -> (tempfile::TempDir, CompanionStore) {
     let dir = tempdir().unwrap();
     let store = open(dir.path()).unwrap();
     (dir, store)
+}
+
+const fn accounting(tag: u8, number: u64) -> StoredAccounting {
+    let profile = BlockProfile {
+        max_gas: 30_000_000,
+        system_gas: 2_000_000,
+        base_fee_floor: 1_000_000,
+        elasticity: 2,
+        change_denominator: 8,
+    };
+    StoredAccounting {
+        chain_id: 1337,
+        genesis_hash: hash(0xa0),
+        block_number: number,
+        accounting: LocalParentAccounting {
+            block_hash: hash(tag),
+            profile,
+            header_gas: 42_000,
+            system_gas: 21_000,
+            ordinary_gas: 21_000,
+            base_fee: 1_000_000,
+        },
+    }
+}
+
+#[test]
+fn accounting_survives_reopen_and_prunes_independently_of_companions() {
+    let dir = tempdir().unwrap();
+    let record = accounting(0x11, 7);
+    {
+        let store = open(dir.path()).unwrap();
+        store.put_accounting(record).unwrap();
+        store.put(hash(0x11), 7, &companion(0x11)).unwrap();
+    }
+    let store = open(dir.path()).unwrap();
+    assert_eq!(store.get_accounting(hash(0x11)).unwrap(), Some(record));
+    store.prune_accounting_below(8).unwrap();
+    assert_eq!(store.get_accounting(hash(0x11)).unwrap(), None);
+    assert!(matches!(store.get(hash(0x11)).unwrap(), Lookup::Found(_)));
+}
+
+#[test]
+fn conflicting_accounting_for_one_hash_is_refused() {
+    let (_dir, store) = store();
+    let record = accounting(0x22, 8);
+    store.put_accounting(record).unwrap();
+    let mut wrong_chain = record;
+    wrong_chain.chain_id += 1;
+    assert!(matches!(store.put_accounting(wrong_chain), Err(StoreError::Corrupt(_))));
+    assert_eq!(store.get_accounting(hash(0x22)).unwrap(), Some(record));
 }
 
 #[test]

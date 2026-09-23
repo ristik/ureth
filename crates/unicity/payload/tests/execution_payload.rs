@@ -667,6 +667,35 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     }
     assert!(branch_accounting.get(&second_parent.hash()).is_some());
     assert!(branch_accounting.get(&alternate_parent.hash()).is_some());
+    let (_dir, store) = temp_store();
+    let durable = UnicityParentAccountings::with_capacity(2).require_durability();
+    durable.attach_store(store.clone());
+    for (header, token) in [(&*second_parent, replay.parent), (&alternate_parent, alternate_token)]
+    {
+        durable
+            .publish(
+                header.hash(),
+                header.number,
+                chain_spec.chain().id(),
+                chain_spec.genesis_hash(),
+                token,
+            )
+            .unwrap();
+    }
+    let cold = UnicityParentAccountings::with_capacity(2).require_durability();
+    cold.attach_store(store);
+    for header in [&*second_parent, &alternate_parent] {
+        assert!(
+            reth_unicity_payload::ParentAccountingResolver::resolve(
+                &cold,
+                header,
+                &chain_spec,
+                PROFILE,
+            )
+            .is_ok(),
+            "cold exact-hash branch accounting"
+        );
+    }
     let resolve_calls = Arc::new(AtomicUsize::new(0));
     let counting = UnicityExecutionPayloadBuilder::new(
         client.clone(),
@@ -1819,7 +1848,74 @@ async fn the_parent_token_recorded_by_an_import_is_usable_by_a_later_build() {
     assert!(context.registry.resolve(&child_config).is_ok());
 }
 
-/// The M1 node advertises the three seal methods and withholds stock newPayload admission.
+#[tokio::test]
+async fn a_reopened_canonical_token_supports_the_next_build() {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let header = payload.block().header().clone();
+    let hash = payload.block().hash();
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (engine, _seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
+    let handler = seal_import_handler(client.clone(), context.clone(), validator.clone(), engine);
+    assert!(handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap()
+        .is_valid());
+    let token = context.parent_accounting.get(&hash).unwrap();
+
+    let dir = tempdir().unwrap();
+    {
+        let store = Arc::new(open_companion_store(dir.path()).unwrap());
+        let durable = UnicityParentAccountings::default().require_durability();
+        durable.attach_store(store);
+        durable.publish(hash, 1, 1337, GENESIS_HASH, token).unwrap();
+    }
+    let restored = UnicityParentAccountings::default().require_durability();
+    restored.attach_store(Arc::new(open_companion_store(dir.path()).unwrap()));
+    let sealed = SealedHeader::new(header.clone(), hash);
+    assert!(restored.restore_exact(&sealed, 1338, GENESIS_HASH, PROFILE).is_err());
+    assert!(restored.restore_exact(&sealed, 1337, B256::ZERO, PROFILE).is_err());
+    assert!(restored
+        .restore_exact(&sealed, 1337, GENESIS_HASH, BlockProfile { base_fee_floor: 8, ..PROFILE })
+        .is_err());
+    assert!(restored.restore_exact(&sealed, 1337, GENESIS_HASH, PROFILE).unwrap().is_some());
+    context.state.parent_accounting = restored;
+    let leader_client = Client { parent_hash: hash, extra_headers: vec![header.clone()], ..client };
+    let child_root = input(2, 2, hash);
+    let child_attrs = attributes(&child_root, header.timestamp);
+    assert!(prepare_seal_build(
+        &leader_client,
+        &context,
+        &validator,
+        &ForkchoiceState::same_hash(hash),
+        Some(&child_attrs),
+        &seal_input(&child_root),
+    )
+    .is_ok());
+}
+
+#[tokio::test]
+async fn accounting_persistence_failure_refuses_import_before_engine_forward() {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    context.state.parent_accounting = UnicityParentAccountings::default().require_durability();
+    let (engine, seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
+    let handler = seal_import_handler(client, context.clone(), validator, engine);
+    let error = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("accounting persistence failed"));
+    assert!(context.parent_accounting.is_empty());
+    drop(handler);
+    assert!(seen.await.is_err(), "the engine must not see the unpersisted payload");
+}
+
+/// The Unicity node advertises exactly the stock Ethereum set plus the three seal methods, and the
+/// stock set advertises none of them. The three are asserted as one set so a partial regression
+/// fails rather than passing two of three checks.
 #[test]
 fn unicity_capabilities_withhold_stock_new_payload() {
     let stock = EngineCapabilities::default();

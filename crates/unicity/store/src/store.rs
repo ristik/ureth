@@ -26,6 +26,7 @@ use reth_libmdbx::{
 use reth_unicity_execution::wire::SealCompanion;
 
 use crate::{
+    accounting::{decode as decode_accounting, encode as encode_accounting, StoredAccounting},
     encoding::{decode, encode},
     StoreError,
 };
@@ -38,6 +39,9 @@ const BY_NUMBER: &str = "by_number";
 
 /// Name of the metadata keyspace.
 const META: &str = "meta";
+
+const ACCOUNTING: &str = "accounting";
+const ACCOUNTING_BY_NUMBER: &str = "accounting_by_number";
 
 /// Key under which the retention horizon is stored in `meta`.
 const HORIZON_KEY: &[u8] = b"horizon";
@@ -55,7 +59,7 @@ const NUMBER_LEN: usize = 8;
 const INDEX_KEY_LEN: usize = NUMBER_LEN + HASH_LEN;
 
 /// Number of named databases the store opens.
-const NAMED_DATABASES: usize = 3;
+const NAMED_DATABASES: usize = 5;
 
 /// Upper bound of the memory map this store's environment may grow to.
 ///
@@ -107,6 +111,8 @@ pub enum Lookup {
 pub struct CompanionStore {
     companions: Database,
     by_number: Database,
+    accounting: Database,
+    accounting_by_number: Database,
     meta: Database,
     env: Environment,
 }
@@ -129,12 +135,75 @@ pub fn open(path: impl AsRef<Path>) -> Result<CompanionStore, StoreError> {
     let companions = txn.create_db(Some(COMPANIONS), DatabaseFlags::empty())?;
     let by_number = txn.create_db(Some(BY_NUMBER), DatabaseFlags::empty())?;
     let meta = txn.create_db(Some(META), DatabaseFlags::empty())?;
+    let accounting = txn.create_db(Some(ACCOUNTING), DatabaseFlags::empty())?;
+    let accounting_by_number = txn.create_db(Some(ACCOUNTING_BY_NUMBER), DatabaseFlags::empty())?;
     txn.commit()?;
 
-    Ok(CompanionStore { companions, by_number, meta, env })
+    Ok(CompanionStore { companions, by_number, accounting, accounting_by_number, meta, env })
 }
 
 impl CompanionStore {
+    /// Durably records a locally completed block before it is advertised to the engine or caller.
+    pub fn put_accounting(&self, record: StoredAccounting) -> Result<(), StoreError> {
+        let hash = record.accounting.block_hash;
+        let value = encode_accounting(record);
+        let txn = self.env.begin_rw_txn()?;
+        if let Some(old) = txn.get::<Vec<u8>>(self.accounting.dbi(), hash.as_slice())? {
+            let old = decode_accounting(&old)?;
+            if old != record {
+                return Err(StoreError::Corrupt("conflicting accounting for block hash"));
+            }
+        }
+        txn.put(self.accounting.dbi(), hash.as_slice(), &value, WriteFlags::empty())?;
+        txn.put(
+            self.accounting_by_number.dbi(),
+            index_key(record.block_number, &hash),
+            [],
+            WriteFlags::empty(),
+        )?;
+        txn.commit()?;
+        self.env.sync(true)?;
+        Ok(())
+    }
+
+    /// Reads one accounting record without assigning canonical status to its hash.
+    pub fn get_accounting(&self, hash: B256) -> Result<Option<StoredAccounting>, StoreError> {
+        let txn = self.env.begin_ro_txn()?;
+        txn.get::<Vec<u8>>(self.accounting.dbi(), hash.as_slice())?
+            .map(|bytes| {
+                let record = decode_accounting(&bytes)?;
+                if record.accounting.block_hash != hash {
+                    return Err(StoreError::Corrupt("accounting key/hash mismatch"));
+                }
+                Ok(record)
+            })
+            .transpose()
+    }
+
+    /// Prunes accounting independently of the companion retention horizon.
+    pub fn prune_accounting_below(&self, number: u64) -> Result<(), StoreError> {
+        let txn = self.env.begin_rw_txn()?;
+        {
+            let mut cursor = txn.cursor(self.accounting_by_number.dbi())?;
+            let mut entry = cursor.first::<Vec<u8>, ()>()?;
+            while let Some((key, ())) = entry {
+                if key.len() != INDEX_KEY_LEN {
+                    return Err(StoreError::Corrupt("accounting index key length"));
+                }
+                let block_number = u64::from_be_bytes(key[..NUMBER_LEN].try_into().unwrap());
+                if block_number >= number {
+                    break;
+                }
+                txn.del(self.accounting.dbi(), &key[NUMBER_LEN..], None)?;
+                cursor.del(WriteFlags::empty())?;
+                entry = cursor.next::<Vec<u8>, ()>()?;
+            }
+        }
+        txn.commit()?;
+        self.env.sync(true)?;
+        Ok(())
+    }
+
     /// Stores `companion` under `block_hash`, indexed by `block_number`.
     ///
     /// The write is durable when the call returns: the transaction commits and the environment is

@@ -17,7 +17,9 @@ use reth_primitives_traits::{
 use reth_storage_api::{AccountReader, StateProvider};
 use reth_unicity_execution::{
     block::BlockProfile,
-    block_executor::{build_complete, replay_complete, BoundExecutionInput, UnicityEvmConfig},
+    block_executor::{
+        build_complete, replay_complete, BoundExecutionInput, CompletedParent, UnicityEvmConfig,
+    },
     derive_beacon_root, derive_prev_randao, derive_timestamp, technical_record_hash,
     wire::bind_completed_parent,
     InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY, SYSTEM_CALLER,
@@ -247,6 +249,20 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     assert!(replay_complete(&config, provider.clone(), &provider, &later_field).is_err());
 
     let first_header = first_block.into_sealed_block().into_sealed_header();
+    let stored = built.parent.for_local_storage();
+    assert!(CompletedParent::from_local_storage(stored, &first_header, PROFILE).is_ok());
+    let mut wrong_accounting = stored;
+    wrong_accounting.ordinary_gas += 1;
+    assert!(CompletedParent::from_local_storage(wrong_accounting, &first_header, PROFILE).is_err());
+    let mut wrong_hash = stored;
+    wrong_hash.block_hash = B256::ZERO;
+    assert!(CompletedParent::from_local_storage(wrong_hash, &first_header, PROFILE).is_err());
+    assert!(CompletedParent::from_local_storage(
+        stored,
+        &first_header,
+        BlockProfile { base_fee_floor: 8, ..PROFILE },
+    )
+    .is_err());
     assert_eq!(
         first_header.base_fee_per_gas.unwrap(),
         expected_next_base_fee(genesis_header.base_fee_per_gas.unwrap(), 0),

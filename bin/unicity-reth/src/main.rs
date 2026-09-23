@@ -62,6 +62,10 @@ struct UnicityArgs {
     /// Absent retains every companion indefinitely and publishes no horizon.
     #[arg(long = "unicity.companion-retention-depth", value_name = "BLOCKS")]
     companion_retention_depth: Option<u64>,
+
+    /// Maximum historical blocks replayed from a durable parent-accounting token at startup.
+    #[arg(long = "unicity.accounting-repair-limit", default_value_t = 64, value_name = "BLOCKS")]
+    accounting_repair_limit: u64,
 }
 
 impl UnicityArgs {
@@ -109,7 +113,9 @@ fn main() {
             info!(target: "reth::cli", "Launching Unicity node");
             let handle = builder
                 .node(
-                    UnicityNode::new(SealJobRegistry::new(), seal).with_retention(args.retention()),
+                    UnicityNode::new(SealJobRegistry::new(), seal)
+                        .with_retention(args.retention())
+                        .with_repair_limit(args.accounting_repair_limit),
                 )
                 .launch()
                 .await?;

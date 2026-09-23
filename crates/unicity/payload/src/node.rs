@@ -17,10 +17,10 @@ use std::sync::{Arc, OnceLock};
 
 use alloy_primitives::Address;
 use alloy_rpc_types_engine::ExecutionData;
-use reth_chainspec::ChainSpec;
+use reth_chainspec::{ChainSpec, ChainSpecProvider};
 use reth_engine_primitives::{EngineApiValidator, PayloadValidator};
 use reth_ethereum_payload_builder::{EthereumBuilderConfig, EthereumExecutionPayloadValidator};
-use reth_ethereum_primitives::{EthPrimitives, TransactionSigned};
+use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_node_builder::{
@@ -41,7 +41,10 @@ use reth_primitives_traits::SealedBlock;
 use reth_provider::{CanonStateSubscriptions, EthStorage};
 use reth_rpc_eth_api::helpers::config::{EthConfigApiServer, EthConfigHandler};
 use reth_rpc_server_types::RethRpcModule;
-use reth_storage_api::BlockIdReader;
+use reth_storage_api::{
+    BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, HeaderProvider,
+    StateProviderFactory,
+};
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use reth_unicity_execution::{
     block::BlockProfile,
@@ -117,6 +120,7 @@ pub struct UnicityNode {
     parent_accounting: UnicityParentAccountings,
     execution_inputs: UnicityBlockExecutionRegistry,
     retention: UnicityRetentionConfig,
+    repair_limit: u64,
     companion_store: Arc<OnceLock<Arc<CompanionStore>>>,
 }
 
@@ -127,9 +131,10 @@ impl UnicityNode {
             registry,
             builder_config: Arc::new(OnceLock::new()),
             seal,
-            parent_accounting: UnicityParentAccountings::default(),
+            parent_accounting: UnicityParentAccountings::default().require_durability(),
             execution_inputs: UnicityBlockExecutionRegistry::default(),
             retention: UnicityRetentionConfig::default(),
+            repair_limit: crate::recovery::DEFAULT_REPAIR_LIMIT,
             companion_store: Arc::new(OnceLock::new()),
         }
     }
@@ -140,6 +145,12 @@ impl UnicityNode {
     /// opts in with [`UnicityRetentionConfig::retain_last`].
     pub const fn with_retention(mut self, retention: UnicityRetentionConfig) -> Self {
         self.retention = retention;
+        self
+    }
+
+    /// Sets the maximum blocks replayed from a verified durable token during startup repair.
+    pub const fn with_repair_limit(mut self, limit: u64) -> Self {
+        self.repair_limit = limit;
         self
     }
 
@@ -220,23 +231,26 @@ where
                 self.registry.clone(),
                 self.builder_config.clone(),
                 self.parent_accounting.clone(),
+                self.companion_store.clone(),
             )))
             // M1 blocks P2P block admission here, but this also disables transaction gossip.
             // Transactions must reach the leader directly until ristik/ureth#34 restores
             // gossip without admitting P2P blocks.
             .network(NoopNetworkBuilder::eth())
             .consensus(UnicityConsensusBuilder::new(
-                self.seal.profile,
+                self.seal,
                 self.parent_accounting.clone(),
+                self.companion_store.clone(),
+                self.repair_limit,
             ))
     }
 
     fn add_ons(&self) -> Self::AddOns {
-        // The engine API add-on, the RPC read surface and the pruning task share this one store
-        // cell. `build_engine_api` runs first inside `RpcAddOns`, but the hook resolves the same
-        // cell rather than a second environment, so the order is not load-bearing.
+        // Consensus initialization opens this store before validation; the Engine add-on, RPC
+        // read surface, and pruning task reuse the same cell.
         let store = self.companion_store.clone();
         let depth = self.retention.depth();
+        let repair_limit = self.repair_limit;
         RpcAddOns::new(
             EthereumEthApiBuilder::default(),
             UnicityEngineValidatorBuilder,
@@ -291,7 +305,12 @@ where
                 // The stream fires on every canonical change, including reorgs, so the block
                 // cadence is the rate limit and no timer is needed. A failed pass is logged inside
                 // the task and never takes the node down.
-                ctx.node().task_executor().spawn_task(run_companion_pruner(provider, store, depth));
+                ctx.node().task_executor().spawn_task(run_companion_pruner(
+                    provider,
+                    store,
+                    depth,
+                    repair_limit,
+                ));
                 Ok(())
             },
         )
@@ -301,25 +320,76 @@ where
 /// Builds the fee-aware consensus validator from the exact token registry shared with seal RPC.
 #[derive(Clone, Debug)]
 pub struct UnicityConsensusBuilder {
-    profile: BlockProfile,
+    seal: UnicitySealConfig,
     parent_accounting: UnicityParentAccountings,
+    store: Arc<OnceLock<Arc<CompanionStore>>>,
+    repair_limit: u64,
 }
 
 impl UnicityConsensusBuilder {
     /// Creates a builder over the node's configured profile and parent tokens.
-    pub const fn new(profile: BlockProfile, parent_accounting: UnicityParentAccountings) -> Self {
-        Self { profile, parent_accounting }
+    pub const fn new(
+        seal: UnicitySealConfig,
+        parent_accounting: UnicityParentAccountings,
+        store: Arc<OnceLock<Arc<CompanionStore>>>,
+        repair_limit: u64,
+    ) -> Self {
+        Self { seal, parent_accounting, store, repair_limit }
     }
 }
 
 impl<N> ConsensusBuilder<N> for UnicityConsensusBuilder
 where
     N: FullNodeTypes<Types = UnicityNode>,
+    N::Provider: BlockReader<
+            Block = Block,
+            Header = alloy_consensus::Header,
+            Transaction = TransactionSigned,
+        > + BlockNumReader
+        + HeaderProvider<Header = alloy_consensus::Header>
+        + ChainSpecProvider<ChainSpec = ChainSpec>
+        + StateProviderFactory,
 {
     type Consensus = Arc<UnicityConsensus>;
 
     async fn build_consensus(self, ctx: &BuilderContext<N>) -> eyre::Result<Self::Consensus> {
-        Ok(Arc::new(UnicityConsensus::new(ctx.chain_spec(), self.profile, self.parent_accounting)))
+        use crate::{
+            recovery::{hydrate_accounting, repair_accounting},
+            ParentAccountingResolver,
+        };
+
+        let store = companion_store(&self.store, ctx.config().datadir().data_dir())?;
+        self.parent_accounting.attach_store(store.clone());
+        hydrate_accounting(ctx.provider(), &self.parent_accounting, self.seal.profile)?;
+        let head = ctx.provider().best_block_number()?;
+        if head > 0 {
+            let hash = ctx.provider().block_hash(head)?.ok_or_else(|| {
+                eyre::eyre!("parent accounting unavailable: canonical head hash missing")
+            })?;
+            let header = ctx.provider().sealed_header_by_hash(hash)?.ok_or_else(|| {
+                eyre::eyre!("parent accounting unavailable: canonical head header missing")
+            })?;
+            if self
+                .parent_accounting
+                .resolve(&header, &ctx.chain_spec(), self.seal.profile)
+                .is_err()
+            {
+                repair_accounting(
+                    ctx.provider(),
+                    &store,
+                    &self.parent_accounting,
+                    self.seal.profile,
+                    self.seal.fee_collector,
+                    head,
+                    self.repair_limit,
+                )?;
+            }
+        }
+        Ok(Arc::new(UnicityConsensus::new(
+            ctx.chain_spec(),
+            self.seal.profile,
+            self.parent_accounting,
+        )))
     }
 }
 
@@ -363,6 +433,7 @@ pub struct UnicityPayloadBuilderBuilder {
     registry: SealJobRegistry,
     builder_config: Arc<OnceLock<EthereumBuilderConfig>>,
     parent_accounting: UnicityParentAccountings,
+    store: Arc<OnceLock<Arc<CompanionStore>>>,
 }
 
 impl UnicityPayloadBuilderBuilder {
@@ -372,8 +443,9 @@ impl UnicityPayloadBuilderBuilder {
         registry: SealJobRegistry,
         builder_config: Arc<OnceLock<EthereumBuilderConfig>>,
         parent_accounting: UnicityParentAccountings,
+        store: Arc<OnceLock<Arc<CompanionStore>>>,
     ) -> Self {
-        Self { registry, builder_config, parent_accounting }
+        Self { registry, builder_config, parent_accounting, store }
     }
 
     /// Returns the registry shared with the resulting payload builder.
@@ -405,6 +477,8 @@ where
         pool: Pool,
         _evm_config: Evm,
     ) -> eyre::Result<Self::PayloadBuilder> {
+        let store = companion_store(&self.store, ctx.config().datadir().data_dir())?;
+        self.parent_accounting.attach_store(store);
         let conf = ctx.payload_builder_config();
         let chain = ctx.chain_spec().chain();
         let gas_limit = conf.gas_limit_for(chain);

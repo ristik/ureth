@@ -67,7 +67,7 @@ use reth_rpc_engine_api::{
     capabilities::{EngineCapabilities, CAPABILITIES},
     EngineApi, EngineApiError,
 };
-use reth_storage_api::{BlockNumReader, HeaderProvider, StateProviderFactory};
+use reth_storage_api::{BlockNumReader, BlockReader, HeaderProvider, StateProviderFactory};
 use reth_unicity_execution::{
     block::BlockAccountingError,
     block_executor::{replay_complete, BoundExecutionInput, UnicityEvmConfig},
@@ -303,7 +303,7 @@ pub fn prepare_seal_build<P>(
     seal_build_input: &SealBuildInput,
 ) -> Result<UnicityPayloadAttributes, SealBuildError>
 where
-    P: HeaderProvider<Header = Header> + ChainSpecProvider<ChainSpec = ChainSpec>,
+    P: HeaderProvider<Header = Header> + BlockNumReader + ChainSpecProvider<ChainSpec = ChainSpec>,
 {
     let attributes = attributes.cloned().ok_or(SealBuildError::AttributesMissing)?;
     // Match the stock `fork_choice_updated_v3` path: reject malformed attributes before any state
@@ -640,6 +640,7 @@ where
 impl<Provider> UnicityEngineApiImpl<Provider>
 where
     Provider: HeaderProvider<Header = Header>
+        + BlockNumReader
         + ChainSpecProvider<ChainSpec = ChainSpec>
         + StateProviderFactory
         + Send
@@ -801,12 +802,12 @@ where
         // 7. Record the imported block's accounting so a node that followed it can lead on it next.
         let block_hash = block.hash();
         let block_number = block.header().number;
-        self.context.parent_accounting.insert_for_chain(
-            block_hash,
-            replay.parent,
-            chain_spec.chain().id(),
-            genesis_hash,
-        );
+        self.context
+            .parent_accounting
+            .publish(block_hash, block_number, chain_spec.chain().id(), genesis_hash, replay.parent)
+            .map_err(|error| {
+                SealImportError::Provider(format!("accounting persistence failed: {error}"))
+            })?;
 
         // 8. The engine executes the forwarded block and its EVM config resolves this input by the
         //    commitment in the header's extraData. Derive that key from the input itself.
@@ -829,6 +830,7 @@ where
 impl<Provider> UnicityEngineApiServer for UnicityEngineApiImpl<Provider>
 where
     Provider: HeaderProvider<Header = Header>
+        + BlockNumReader
         + ChainSpecProvider<ChainSpec = ChainSpec>
         + StateProviderFactory
         + Send
@@ -980,7 +982,12 @@ pub fn unicity_engine_capabilities() -> EngineCapabilities {
 impl<N> EngineApiBuilder<N> for UnicityEngineApiBuilder
 where
     N: FullNodeComponents<Types = UnicityNode>,
-    N::Provider: HeaderProvider<Header = Header>
+    N::Provider: BlockReader<
+            Block = reth_ethereum_primitives::Block,
+            Header = Header,
+            Transaction = reth_ethereum_primitives::TransactionSigned,
+        > + HeaderProvider<Header = Header>
+        + BlockNumReader
         + ChainSpecProvider<ChainSpec = ChainSpec>
         + StateProviderFactory
         + Clone
@@ -994,10 +1001,8 @@ where
     >;
 
     async fn build_engine_api(self, ctx: &AddOnsContext<'_, N>) -> eyre::Result<Self::EngineApi> {
-        // The node's datadir is only reachable from the add-ons context, so the shared store cell
-        // is resolved here. The engine API add-on is the first of the two hooks to run, but
-        // the cell is the single instance either hook may initialise, never a second
-        // environment.
+        // Consensus initialization already opened and hydrated the same store before any
+        // validation consumer started. The add-on receives that instance for seal delivery.
         let store = companion_store(&self.store, ctx.config.datadir().data_dir())?;
         let store: Arc<dyn CompanionSink> = store;
         let context = SealBuildContext { state: self.state, store };
@@ -1048,12 +1053,9 @@ fn companion_store_path(chain_data_dir: &Path) -> PathBuf {
 
 /// Returns the shared companion store, opening it on first use and reusing it afterwards.
 ///
-/// The engine API add-on and the standard RPC read surface both need the store, so `UnicityNode`
-/// holds one cell and both hooks resolve it through here. In `RpcAddOns`, `build_engine_api` runs
-/// before the `extend_rpc_modules` hook, so the engine API add-on is the one that opens it in
-/// practice; the RPC hook reuses the same cell rather than opening a second environment on the
-/// same path. If two callers ever raced, the loser drops the environment it opened and returns the
-/// shared one.
+/// Consensus initialization opens this store before it returns a validator. The Engine add-on,
+/// RPC read surface, and pruning task reuse that one cell. If two callers ever raced, the loser
+/// drops its newly opened environment and returns the shared one.
 pub fn companion_store(
     cell: &Arc<OnceLock<Arc<CompanionStore>>>,
     chain_data_dir: &Path,

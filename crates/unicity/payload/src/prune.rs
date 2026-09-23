@@ -63,6 +63,7 @@ pub struct CompanionPruner<P> {
     provider: P,
     store: Arc<CompanionStore>,
     depth: Option<u64>,
+    repair_limit: u64,
 }
 
 impl<P> CompanionPruner<P>
@@ -72,7 +73,13 @@ where
     /// Creates a pruner over `store`. `depth` is the number of blocks to retain; `None` retains
     /// every companion indefinitely.
     pub const fn new(provider: P, store: Arc<CompanionStore>, depth: Option<u64>) -> Self {
-        Self { provider, store, depth }
+        Self { provider, store, depth, repair_limit: crate::recovery::DEFAULT_REPAIR_LIMIT }
+    }
+
+    /// Sets the replay window whose durable predecessor tokens retention must protect.
+    pub const fn with_repair_limit(mut self, limit: u64) -> Self {
+        self.repair_limit = limit;
+        self
     }
 
     /// Runs one retention pass at `tip`: evict non-canonical entries at or below finalized, then
@@ -82,7 +89,17 @@ where
     /// `horizon: null` after dropping a reorged entry.
     pub fn prune_once(&self, tip: u64) -> Result<(), CompanionPruneError> {
         self.evict_non_canonical()?;
-        self.prune_to_depth(tip)
+        self.prune_to_depth(tip)?;
+        // The sidecar may be far ahead of the main database when a process dies. Anchor token
+        // retention to the persisted DB frontier so a rollback still has a usable token window.
+        let persisted = self
+            .provider
+            .last_block_number()
+            .map_err(|error| CompanionPruneError::Provider(error.to_string()))?;
+        self.store.prune_accounting_below(persisted.saturating_sub(
+            crate::recovery::ACCOUNTING_WINDOW.saturating_add(self.repair_limit),
+        ))?;
+        Ok(())
     }
 
     /// Drops every entry whose hash is not the canonical block at its number, once that number is
@@ -157,12 +174,16 @@ where
 /// timer: the block cadence is the rate limit. The caller spawns this on the node's own executor
 /// and logs each failed pass, because a node that cannot prune is still a correct node that retains
 /// more than configured.
-pub async fn run_companion_pruner<P>(provider: P, store: Arc<CompanionStore>, depth: Option<u64>)
-where
+pub async fn run_companion_pruner<P>(
+    provider: P,
+    store: Arc<CompanionStore>,
+    depth: Option<u64>,
+    repair_limit: u64,
+) where
     P: BlockIdReader + CanonStateSubscriptions + Send + 'static,
 {
     let mut stream = provider.canonical_state_stream();
-    let pruner = CompanionPruner::new(provider, store, depth);
+    let pruner = CompanionPruner::new(provider, store, depth).with_repair_limit(repair_limit);
     while let Some(notification) = stream.next().await {
         // A revert can commit an empty segment, so there may be no new tip to prune against.
         let Some(tip) = notification.tip_checked() else {
