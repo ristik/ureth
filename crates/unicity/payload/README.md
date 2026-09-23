@@ -96,7 +96,8 @@ D2 build flow in order: decode `rootInput` through the canonical CBOR codec; res
 `headBlockHash`, where an unknown parent is SYNCING; bind the decoded input to that parent through
 the U3a entry points; build the `UnicityEvmConfig` and `ResolvedPayloadJob` with the node's
 published `EthereumBuilderConfig`; insert the job into the registry; and forward to the consensus
-handle. A refusal from decoding, binding, the job checks or a duplicate payload id is INVALID with
+handle. An identical build retry reuses its existing payload id and job. A refusal from decoding,
+binding, the job checks or a payload id collision with different input is INVALID with
 the refusal in `validationError`. Absent `payloadAttributes` is INVALID. A missing
 `builder_config` is an internal error. Missing non-genesis parent accounting returns `SYNCING` so
 the same request can be retried when the token becomes available.
@@ -194,7 +195,7 @@ are retained under `../execution/testdata/`.
 
 These tests exercise in-process payload construction, replay, the bounded job registry, the seal
 build refusals and the seal import verdicts: a non-canonical `rootInput`, an unknown parent, absent
-attributes, a duplicate payload id, a job that resolves to the same configuration the payload
+attributes, an identical build retry, a job that resolves to the same configuration the payload
 service uses, a state-root mismatch, a missing parent, a parent without a token, non-empty blob
 hashes, and that ACCEPTED is never produced. They also cover the execution-input registry
 (idempotent duplicate, conflicting input, oldest-first eviction), node EVM resolution by commitment,

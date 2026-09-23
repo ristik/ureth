@@ -86,9 +86,9 @@ const PROFILE: BlockProfile = BlockProfile {
 
 fn next_base_fee(parent: u64, ordinary_used: u64) -> u64 {
     let target = (PROFILE.max_gas - PROFILE.system_gas) / PROFILE.elasticity;
-    let delta = u128::from(parent) * u128::from(ordinary_used.abs_diff(target)) /
-        u128::from(target) /
-        u128::from(PROFILE.change_denominator);
+    let delta = u128::from(parent) * u128::from(ordinary_used.abs_diff(target))
+        / u128::from(target)
+        / u128::from(PROFILE.change_denominator);
     if ordinary_used > target {
         parent + u64::try_from(delta).unwrap().max(1)
     } else {
@@ -187,14 +187,14 @@ impl HeaderProvider for Client {
 
     fn header(&self, block_hash: B256) -> ProviderResult<Option<Self::Header>> {
         if block_hash == self.chain_spec.genesis_hash() {
-            return Ok(Some(self.chain_spec.genesis_header().clone()))
+            return Ok(Some(self.chain_spec.genesis_header().clone()));
         }
         Ok(self.extra_headers.iter().find(|header| header.hash_slow() == block_hash).cloned())
     }
 
     fn header_by_number(&self, number: u64) -> ProviderResult<Option<Self::Header>> {
         if number == 0 {
-            return Ok(Some(self.chain_spec.genesis_header().clone()))
+            return Ok(Some(self.chain_spec.genesis_header().clone()));
         }
         Ok(self.extra_headers.iter().find(|header| header.number == number).cloned())
     }
@@ -839,7 +839,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
 /// a duplicate payload id, evicts the oldest insertion at capacity, and shares its entries between
 /// clones so the payload service and a future seal method see the same jobs.
 #[test]
-fn seal_job_registry_is_bounded_shared_and_refuses_duplicates() {
+fn seal_job_registry_is_bounded_shared_and_reuses_identical_jobs() {
     let genesis: Genesis =
         serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
@@ -880,8 +880,8 @@ fn seal_job_registry_is_bounded_shared_and_refuses_duplicates() {
     assert!(registry.is_empty());
     registry.insert(job_a).unwrap();
     assert_eq!(registry.len(), 1);
-    assert!(registry.insert(job_a_duplicate).is_err(), "duplicate payload id must be refused");
-    assert_eq!(registry.len(), 1, "a refused duplicate must not displace the held job");
+    registry.insert(job_a_duplicate).unwrap();
+    assert_eq!(registry.len(), 1, "an identical retry must reuse the held job");
     assert!(registry.resolve(&config(&attrs_a)).is_ok());
 
     registry.insert(job_b).unwrap();
@@ -1086,19 +1086,24 @@ fn seal_build_requires_payload_attributes() {
 }
 
 #[test]
-fn seal_build_refuses_a_duplicate_payload_id() {
+fn seal_build_reuses_an_identical_payload_id() {
     let (client, _parent, root, attrs, context, validator) = seal_fixture();
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
     let input = seal_input(&root);
 
-    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input).unwrap();
-    let error = prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input)
-        .unwrap_err();
-    assert_eq!(error, SealBuildError::DuplicatePayloadId);
-    assert_eq!(
-        refusal_response(error).unwrap().payload_status.status.validation_error(),
-        Some("duplicate payload id")
+    eprintln!(
+        "pre-restart seal build: parent={:?} attrs={:?} root_input={:?}",
+        state.head_block_hash, attrs, input
     );
+
+    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input).unwrap();
+    eprintln!(
+        "post-restart seal build: parent={:?} attrs={:?} root_input={:?}",
+        state.head_block_hash, attrs, input
+    );
+    let repeated =
+        prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input).unwrap();
+    assert_eq!(repeated, attrs);
     assert_eq!(context.registry.len(), 1);
 }
 
