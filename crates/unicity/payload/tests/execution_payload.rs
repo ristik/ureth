@@ -86,9 +86,9 @@ const PROFILE: BlockProfile = BlockProfile {
 
 fn next_base_fee(parent: u64, ordinary_used: u64) -> u64 {
     let target = (PROFILE.max_gas - PROFILE.system_gas) / PROFILE.elasticity;
-    let delta = u128::from(parent) * u128::from(ordinary_used.abs_diff(target))
-        / u128::from(target)
-        / u128::from(PROFILE.change_denominator);
+    let delta = u128::from(parent) * u128::from(ordinary_used.abs_diff(target)) /
+        u128::from(target) /
+        u128::from(PROFILE.change_denominator);
     if ordinary_used > target {
         parent + u64::try_from(delta).unwrap().max(1)
     } else {
@@ -835,9 +835,10 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     assert_ne!(alt_a.block().header().extra_data, first.block().header().extra_data);
 }
 
-/// The production registry is the bounded replacement for [`FixedPayloadJobResolver`]: it refuses
-/// a duplicate payload id, evicts the oldest insertion at capacity, and shares its entries between
-/// clones so the payload service and a future seal method see the same jobs.
+/// The production registry is the bounded replacement for [`FixedPayloadJobResolver`]: it reuses
+/// identical payload ids, rejects ids with different build input, evicts the oldest insertion at
+/// capacity, and shares entries between clones so the payload service and seal methods see the same
+/// jobs.
 #[test]
 fn seal_job_registry_is_bounded_shared_and_reuses_identical_jobs() {
     let genesis: Genesis =
@@ -1091,16 +1092,7 @@ fn seal_build_reuses_an_identical_payload_id() {
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
     let input = seal_input(&root);
 
-    eprintln!(
-        "pre-restart seal build: parent={:?} attrs={:?} root_input={:?}",
-        state.head_block_hash, attrs, input
-    );
-
     prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input).unwrap();
-    eprintln!(
-        "post-restart seal build: parent={:?} attrs={:?} root_input={:?}",
-        state.head_block_hash, attrs, input
-    );
     let repeated =
         prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input).unwrap();
     assert_eq!(repeated, attrs);

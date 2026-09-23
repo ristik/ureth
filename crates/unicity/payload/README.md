@@ -128,6 +128,12 @@ canonical codec. That is byte-identical to what the caller supplied, because the
 only canonical encodings and its round-trip invariant is asserted in both directions, so
 re-encoding cannot differ from the caller's bytes. Its `provenance` is `"build"`.
 
+Reth drops the payload build job after `getPayload` resolves it. An identical build retry while the
+job is live reuses it; a retry after delivery creates a fresh job and can select a different
+transaction set if the pool changed. Ureth therefore does not guarantee one block per payload id
+across delivery. The bft-core execution journal is the guard: it prevents publishing a second
+distinct locally built candidate for the same authorization.
+
 The companion's `witnesses` list is empty, and that is correct rather than incomplete.
 
 D2 §2 "The authentication lifecycle" settles it. The witness is not a commitment-bound field: the
