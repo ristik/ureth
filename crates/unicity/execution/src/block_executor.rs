@@ -140,7 +140,66 @@ impl BoundExecutionInput {
 #[derive(Clone, Copy, Debug)]
 pub struct CompletedParent(ParentExecutionOutcome);
 
+/// Local disk representation of completed execution accounting. This is never an RPC input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LocalParentAccounting {
+    /// Exact hash of the completed block.
+    pub block_hash: alloy_primitives::B256,
+    /// Profile used by the local executor.
+    pub profile: BlockProfile,
+    /// Gross header gas used.
+    pub header_gas: u64,
+    /// Privileged system gas measured by execution.
+    pub system_gas: u64,
+    /// Paid ordinary gas measured by execution.
+    pub ordinary_gas: u64,
+    /// Header base fee.
+    pub base_fee: u64,
+}
+
 impl CompletedParent {
+    /// Exports a token for the node's local durable store.
+    pub const fn for_local_storage(self) -> LocalParentAccounting {
+        let outcome = self.0;
+        LocalParentAccounting {
+            block_hash: outcome.parent_hash(),
+            profile: outcome.profile(),
+            header_gas: outcome.header_gas(),
+            system_gas: outcome.system_gas(),
+            ordinary_gas: outcome.ordinary_gas(),
+            base_fee: outcome.base_fee(),
+        }
+    }
+
+    /// Restores a local record only after checking the exact sealed header and gas split.
+    pub fn from_local_storage(
+        record: LocalParentAccounting,
+        header: &SealedHeader<Header>,
+        profile: BlockProfile,
+    ) -> Result<Self, crate::block::BlockAccountingError> {
+        use crate::block::BlockAccountingError;
+        if header.header().hash_slow() != header.hash() ||
+            record.block_hash != header.hash() ||
+            record.profile != profile ||
+            header.gas_limit != profile.max_gas ||
+            header.gas_used != record.header_gas ||
+            header.base_fee_per_gas != Some(record.base_fee)
+        {
+            return Err(BlockAccountingError::ParentGasMismatch);
+        }
+        let outcome = ParentExecutionOutcome::reconcile(
+            profile,
+            record.block_hash,
+            record.header_gas,
+            record.system_gas,
+            record.base_fee,
+        )?;
+        if outcome.ordinary_gas() != record.ordinary_gas {
+            return Err(BlockAccountingError::ParentGasMismatch);
+        }
+        Ok(Self(outcome))
+    }
+
     /// Checks a cached locally completed token against the exact parent header and profile, then
     /// computes the next fee through the same ordinary-gas rule used by build and replay.
     pub fn checked_next_base_fee(

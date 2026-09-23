@@ -263,6 +263,8 @@ impl Drop for ParentAccountingLease {
 #[derive(Clone, Debug)]
 pub struct UnicityParentAccountings {
     inner: Arc<Mutex<ParentAccountingInner>>,
+    durable: Arc<std::sync::OnceLock<Arc<reth_unicity_store::CompanionStore>>>,
+    durability_required: bool,
 }
 
 impl UnicityParentAccountings {
@@ -283,7 +285,92 @@ impl UnicityParentAccountings {
                 tokens: VecDeque::new(),
                 capacity,
             })),
+            durable: Arc::new(std::sync::OnceLock::new()),
+            durability_required: false,
         }
+    }
+
+    /// Requires a durable write before publishing a token; used by the launched node.
+    pub const fn require_durability(mut self) -> Self {
+        self.durability_required = true;
+        self
+    }
+
+    /// Attaches the shared sidecar once the chain data directory is available.
+    pub fn attach_store(&self, store: Arc<reth_unicity_store::CompanionStore>) {
+        let _ = self.durable.set(store);
+    }
+
+    /// Returns the node's local accounting store when it has been opened.
+    pub fn durable_store(&self) -> Option<&Arc<reth_unicity_store::CompanionStore>> {
+        self.durable.get()
+    }
+
+    /// Durably publishes a completed build or checked replay before it can be delivered.
+    pub fn publish(
+        &self,
+        block_hash: B256,
+        block_number: u64,
+        chain_id: u64,
+        genesis_hash: B256,
+        token: CompletedParent,
+    ) -> Result<(), reth_unicity_store::StoreError> {
+        if token.for_local_storage().block_hash != block_hash {
+            return Err(reth_unicity_store::StoreError::Corrupt("token/hash mismatch"));
+        }
+        if let Some(store) = self.durable.get() {
+            store.put_accounting(reth_unicity_store::StoredAccounting {
+                chain_id,
+                genesis_hash,
+                block_number,
+                accounting: token.for_local_storage(),
+            })?;
+        } else if self.durability_required {
+            return Err(reth_unicity_store::StoreError::Corrupt("accounting store unavailable"));
+        }
+        self.insert_for_chain(block_hash, token, chain_id, genesis_hash);
+        Ok(())
+    }
+
+    /// Restores a record by exact hash after checking chain identity, header, profile, and gas.
+    /// Canonical startup selection is the caller's separate responsibility.
+    pub fn restore_exact(
+        &self,
+        header: &reth_primitives_traits::SealedHeader<alloy_consensus::Header>,
+        chain_id: u64,
+        genesis_hash: B256,
+        profile: reth_unicity_execution::block::BlockProfile,
+    ) -> Result<Option<CompletedParent>, reth_unicity_store::StoreError> {
+        if let Some(entry) = self.lock().tokens.iter().find(|entry| entry.hash == header.hash()) {
+            if entry.identity != Some((chain_id, genesis_hash)) ||
+                entry.token.checked_next_base_fee(header, profile).is_err()
+            {
+                return Err(reth_unicity_store::StoreError::Corrupt("cached accounting mismatch"));
+            }
+            return Ok(Some(entry.token));
+        }
+        let Some(store) = self.durable.get() else {
+            if self.durability_required {
+                return Err(reth_unicity_store::StoreError::Corrupt("accounting store unavailable"));
+            }
+            return Ok(None);
+        };
+        let Some(record) = store.get_accounting(header.hash())? else {
+            return Ok(None);
+        };
+        if record.chain_id != chain_id ||
+            record.genesis_hash != genesis_hash ||
+            record.block_number != header.number
+        {
+            return Err(reth_unicity_store::StoreError::Corrupt("accounting chain identity"));
+        }
+        let token = CompletedParent::from_local_storage(record.accounting, header, profile)
+            .map_err(|_| reth_unicity_store::StoreError::Corrupt("accounting/header mismatch"))?;
+        token
+            .checked_next_base_fee(header, profile)
+            .map_err(|_| reth_unicity_store::StoreError::Corrupt("accounting fee mismatch"))?;
+        self.insert_for_chain(header.hash(), token, chain_id, genesis_hash);
+        Ok(Some(token))
     }
 
     /// Publishes the token for the block whose hash is `block_hash`.
@@ -365,6 +452,11 @@ impl ParentAccountingResolver for UnicityParentAccountings {
         chain_spec: &ChainSpec,
         profile: BlockProfile,
     ) -> Result<ParentAccountingLease, ParentAccountingUnavailable> {
+        let exists = self.lock().tokens.iter().any(|entry| entry.hash == parent.hash());
+        if !exists {
+            self.restore_exact(parent, chain_spec.chain().id(), chain_spec.genesis_hash(), profile)
+                .map_err(|_| ParentAccountingUnavailable(parent.hash()))?;
+        }
         let mut inner = self.lock();
         let entry = inner
             .tokens

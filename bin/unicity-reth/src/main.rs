@@ -22,7 +22,8 @@ use clap::{Args, Parser};
 use reth_ethereum_cli::{chainspec::EthereumChainSpecParser, interface::Cli};
 use reth_unicity_execution::block::BlockProfile;
 use reth_unicity_payload::{
-    SealJobRegistry, UnicityNode, UnicityRetentionConfig, UnicitySealConfig,
+    recovery::ACCOUNTING_WINDOW, SealJobRegistry, UnicityNode, UnicityRetentionConfig,
+    UnicitySealConfig,
 };
 use tracing::info;
 
@@ -62,6 +63,10 @@ struct UnicityArgs {
     /// Absent retains every companion indefinitely and publishes no horizon.
     #[arg(long = "unicity.companion-retention-depth", value_name = "BLOCKS")]
     companion_retention_depth: Option<u64>,
+
+    /// Maximum historical blocks replayed from a durable parent-accounting token at startup.
+    #[arg(long = "unicity.accounting-repair-limit", default_value_t = 64, value_name = "BLOCKS")]
+    accounting_repair_limit: u64,
 }
 
 impl UnicityArgs {
@@ -91,6 +96,21 @@ impl UnicityArgs {
             None => UnicityRetentionConfig::retain_indefinitely(),
         }
     }
+
+    fn validate_retention(&self) -> eyre::Result<()> {
+        let Some(depth) = self.companion_retention_depth else {
+            return Ok(());
+        };
+        let required =
+            ACCOUNTING_WINDOW.checked_add(self.accounting_repair_limit).ok_or_else(|| {
+                eyre::eyre!("accounting repair limit is too large for companion retention")
+            })?;
+        eyre::ensure!(
+            depth >= required,
+            "--unicity.companion-retention-depth ({depth}) must be at least accounting window + repair limit ({required})"
+        );
+        Ok(())
+    }
 }
 
 fn main() {
@@ -104,12 +124,15 @@ fn main() {
     if let Err(err) = Cli::<EthereumChainSpecParser, UnicityArgs>::parse().run(
         async move |builder, args: UnicityArgs| {
             let profile = args.profile()?;
+            args.validate_retention()?;
             let seal = UnicitySealConfig { profile, fee_collector: args.fee_collector };
 
             info!(target: "reth::cli", "Launching Unicity node");
             let handle = builder
                 .node(
-                    UnicityNode::new(SealJobRegistry::new(), seal).with_retention(args.retention()),
+                    UnicityNode::new(SealJobRegistry::new(), seal)
+                        .with_retention(args.retention())
+                        .with_repair_limit(args.accounting_repair_limit),
                 )
                 .launch()
                 .await?;
@@ -119,5 +142,27 @@ fn main() {
     ) {
         eprintln!("Error: {err:?}");
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn companion_retention_covers_accounting_repair() {
+        let args = UnicityArgs {
+            fee_collector: Address::ZERO,
+            max_gas: 30_000_000,
+            system_gas: 2_000_000,
+            base_fee_floor: 1_000_000,
+            elasticity: 2,
+            base_fee_change_denominator: 8,
+            companion_retention_depth: Some(ACCOUNTING_WINDOW + 2 - 1),
+            accounting_repair_limit: 2,
+        };
+        assert!(args.validate_retention().is_err());
+        let args = UnicityArgs { companion_retention_depth: Some(ACCOUNTING_WINDOW + 2), ..args };
+        assert!(args.validate_retention().is_ok());
     }
 }

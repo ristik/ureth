@@ -65,6 +65,30 @@ builder through `UnicityNode::builder_config`, and raises the registry capacity 
 next-block attributes from its own copy and refuses a job that does not match; a second derivation
 would drift and fail resolution at runtime.
 
+## Durable parent accounting
+
+Every completed build and checked seal replay writes a versioned accounting record to the
+companion store's separate accounting table before the block can be delivered to the engine or
+caller. The record is keyed by exact block hash and binds chain ID, configured genesis, block
+number, the full five-value profile, and the accounting rule version. Companion v1 bytes do not
+change. A failed accounting write stops build or import before advancement.
+
+Consensus initialization opens the shared store and hydrates canonical tokens around both the
+visible and persisted database tips before exposing the validator. Later exact-hash lookups can
+restore side-branch tokens without substituting the canonical head. Every memory and disk hit is
+checked against the supplied sealed header, chain, and profile. Active lookups pin the token
+through header validation. A missing or corrupt record discovered during a request returns
+recoverable unavailability; one found during startup stops launch with a diagnostic.
+
+If the canonical head record is missing at startup, repair replays forward from the nearest
+verified record within `--unicity.accounting-repair-limit` blocks (default 64). B0 is the
+configured-genesis anchor with zero system gas, so B1 can be repaired when its body and companion
+remain available. A longer gap stops startup with an unavailable diagnostic. Accounting retention
+uses the persisted database frontier and keeps the hydration window plus the repair bound,
+independently of companion pruning.
+When companion pruning is configured, its depth must cover the 16-block accounting window plus
+the repair limit. The node rejects a smaller depth at startup because replay needs companions.
+
 ## The seal methods
 
 `engine_forkchoiceUpdatedWithSealV1(forkchoiceState, payloadAttributesV3, sealBuildInput)` runs the

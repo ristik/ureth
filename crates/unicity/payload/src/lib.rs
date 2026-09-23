@@ -37,6 +37,7 @@ pub mod consensus;
 pub mod engine;
 pub mod node;
 pub mod prune;
+pub mod recovery;
 pub mod registry;
 pub mod rpc;
 
@@ -459,10 +460,7 @@ where
     /// The token is only minted from a block the executor actually finished, so a later build can
     /// inherit the parent's ordinary/system gas split instead of inventing it from the header.
     ///
-    /// Only built blocks are recorded here. A parent this node imported through
-    /// `engine_newPayloadWithSealV1` has no token until the import path records one, so a follower
-    /// cannot yet lead on it. That import path runs the same executor and must publish the token
-    /// there too.
+    /// The import path publishes tokens through the same durable barrier.
     fn remember_parent(
         &self,
         evm_config: &UnicityEvmConfig,
@@ -472,16 +470,20 @@ where
         Client: ChainSpecProvider<ChainSpec = reth_chainspec::ChainSpec>,
     {
         let token = evm_config.completed_parent_for(payload.block()).map_err(|error| {
-            PayloadBuilderError::other(std::io::Error::other(format!("{error:?}")))
+            PayloadBuilderError::other(std::io::Error::other(format!(
+                "accounting unavailable: {error:?}"
+            )))
         })?;
         let chain = self.client.chain_spec();
-        self.parent_accounting.insert_for_chain(
-            payload.block().hash(),
-            token,
-            chain.chain().id(),
-            chain.genesis_hash(),
-        );
-        Ok(())
+        self.parent_accounting
+            .publish(
+                payload.block().hash(),
+                payload.block().header().number,
+                chain.chain().id(),
+                chain.genesis_hash(),
+                token,
+            )
+            .map_err(PayloadBuilderError::other)
     }
 }
 

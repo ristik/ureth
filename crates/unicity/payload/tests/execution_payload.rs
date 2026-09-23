@@ -103,6 +103,9 @@ struct Client {
     state: FixtureProvider,
     extra_headers: Vec<Header>,
     finalized: u64,
+    best_number: u64,
+    persisted_number: u64,
+    fail_finalized: bool,
 }
 
 #[derive(Clone)]
@@ -154,13 +157,16 @@ impl BlockHashReader for Client {
 
 impl BlockNumReader for Client {
     fn chain_info(&self) -> ProviderResult<ChainInfo> {
-        Ok(ChainInfo { best_hash: self.parent_hash, best_number: 0 })
+        Ok(ChainInfo {
+            best_hash: self.block_hash(self.best_number)?.unwrap_or_default(),
+            best_number: self.best_number,
+        })
     }
     fn best_block_number(&self) -> ProviderResult<u64> {
-        Ok(0)
+        Ok(self.best_number)
     }
     fn last_block_number(&self) -> ProviderResult<u64> {
-        Ok(0)
+        Ok(self.persisted_number)
     }
     fn block_number(&self, hash: B256) -> ProviderResult<Option<u64>> {
         if hash == self.parent_hash {
@@ -221,6 +227,9 @@ impl BlockIdReader for Client {
         Ok(Some(BlockNumHash { number: 0, hash: self.parent_hash }))
     }
     fn finalized_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
+        if self.fail_finalized {
+            return Err(reth_storage_errors::provider::ProviderError::BestBlockNotFound);
+        }
         // A real chain always has a finalized block once finality exists. The hash is the canonical
         // one when the mock was given a header at that number; the pruner only reads the number.
         let hash = self.block_hash(self.finalized)?.unwrap_or_default();
@@ -399,6 +408,9 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         state: state.clone(),
         extra_headers: Vec::new(),
         finalized: 0,
+        best_number: 0,
+        persisted_number: 0,
+        fail_finalized: false,
     };
     let root = Arc::new(input(1, 1, GENESIS_HASH));
     let attrs = attributes(&root, parent.timestamp);
@@ -494,6 +506,9 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         state: state.clone(),
         extra_headers: Vec::new(),
         finalized: 0,
+        best_number: 0,
+        persisted_number: 0,
+        fail_finalized: false,
     };
     let second_builder = UnicityExecutionPayloadBuilder::new(
         second_client,
@@ -667,6 +682,35 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     }
     assert!(branch_accounting.get(&second_parent.hash()).is_some());
     assert!(branch_accounting.get(&alternate_parent.hash()).is_some());
+    let (_dir, store) = temp_store();
+    let durable = UnicityParentAccountings::with_capacity(2).require_durability();
+    durable.attach_store(store.clone());
+    for (header, token) in [(&*second_parent, replay.parent), (&alternate_parent, alternate_token)]
+    {
+        durable
+            .publish(
+                header.hash(),
+                header.number,
+                chain_spec.chain().id(),
+                chain_spec.genesis_hash(),
+                token,
+            )
+            .unwrap();
+    }
+    let cold = UnicityParentAccountings::with_capacity(2).require_durability();
+    cold.attach_store(store);
+    for header in [&*second_parent, &alternate_parent] {
+        assert!(
+            reth_unicity_payload::ParentAccountingResolver::resolve(
+                &cold,
+                header,
+                &chain_spec,
+                PROFILE,
+            )
+            .is_ok(),
+            "cold exact-hash branch accounting"
+        );
+    }
     let resolve_calls = Arc::new(AtomicUsize::new(0));
     let counting = UnicityExecutionPayloadBuilder::new(
         client.clone(),
@@ -885,6 +929,9 @@ fn seal_fixture() -> (
         state,
         extra_headers: Vec::new(),
         finalized: 0,
+        best_number: 0,
+        persisted_number: 0,
+        fail_finalized: false,
     };
     let root = input(1, 1, GENESIS_HASH);
     let attrs = attributes(&root, parent.timestamp);
@@ -1819,6 +1866,149 @@ async fn the_parent_token_recorded_by_an_import_is_usable_by_a_later_build() {
     assert!(context.registry.resolve(&child_config).is_ok());
 }
 
+#[tokio::test]
+async fn a_reopened_canonical_token_supports_the_next_build() {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let header = payload.block().header().clone();
+    let hash = payload.block().hash();
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (engine, _seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
+    let handler = seal_import_handler(client.clone(), context.clone(), validator.clone(), engine);
+    assert!(handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap()
+        .is_valid());
+    let token = context.parent_accounting.get(&hash).unwrap();
+
+    let dir = tempdir().unwrap();
+    {
+        let store = Arc::new(open_companion_store(dir.path()).unwrap());
+        let durable = UnicityParentAccountings::default().require_durability();
+        durable.attach_store(store);
+        durable.publish(hash, 1, 1337, GENESIS_HASH, token).unwrap();
+    }
+    let restored = UnicityParentAccountings::default().require_durability();
+    restored.attach_store(Arc::new(open_companion_store(dir.path()).unwrap()));
+    let sealed = SealedHeader::new(header.clone(), hash);
+    assert!(restored.restore_exact(&sealed, 1338, GENESIS_HASH, PROFILE).is_err());
+    assert!(restored.restore_exact(&sealed, 1337, B256::ZERO, PROFILE).is_err());
+    assert!(restored
+        .restore_exact(&sealed, 1337, GENESIS_HASH, BlockProfile { base_fee_floor: 8, ..PROFILE })
+        .is_err());
+    assert!(restored.restore_exact(&sealed, 1337, GENESIS_HASH, PROFILE).unwrap().is_some());
+    context.state.parent_accounting = restored;
+    let leader_client = Client { parent_hash: hash, extra_headers: vec![header.clone()], ..client };
+    let child_root = input(2, 2, hash);
+    let child_attrs = attributes(&child_root, header.timestamp);
+    assert!(prepare_seal_build(
+        &leader_client,
+        &context,
+        &validator,
+        &ForkchoiceState::same_hash(hash),
+        Some(&child_attrs),
+        &seal_input(&child_root),
+    )
+    .is_ok());
+}
+
+#[tokio::test]
+async fn hydration_restores_persisted_head_when_memory_tip_is_ahead() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let header = payload.block().header().clone();
+    let hash = payload.block().hash();
+    let token = context
+        .registry
+        .resolve(&PayloadConfig::new(
+            parent.clone(),
+            attrs.clone(),
+            attrs.payload_id(&parent.hash()),
+        ))
+        .unwrap()
+        .completed_parent_for(payload.block())
+        .unwrap();
+    let (_dir, store) = temp_store();
+    let durable = UnicityParentAccountings::new().require_durability();
+    durable.attach_store(store.clone());
+    durable.publish(hash, 1, 1337, GENESIS_HASH, token).unwrap();
+
+    let mut memory_tip = header.clone();
+    memory_tip.number = 2;
+    memory_tip.parent_hash = hash;
+    let memory_hash = memory_tip.hash_slow();
+    let provider = Client {
+        extra_headers: vec![header, memory_tip],
+        best_number: 2,
+        persisted_number: 1,
+        ..client
+    };
+    let restored = UnicityParentAccountings::new().require_durability();
+    restored.attach_store(store);
+    reth_unicity_payload::recovery::hydrate_accounting(&provider, &restored, PROFILE).unwrap();
+    assert!(restored.get(&hash).is_some(), "the persisted DB head must be hydrated");
+    assert!(restored.get(&memory_hash).is_none(), "the memory tip has no durable token");
+}
+
+#[tokio::test]
+async fn accounting_persistence_failure_refuses_import_before_engine_forward() {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    context.state.parent_accounting = UnicityParentAccountings::default().require_durability();
+    let (engine, seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
+    let handler = seal_import_handler(client, context.clone(), validator, engine);
+    let error = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("accounting persistence failed"));
+    assert!(context.parent_accounting.is_empty());
+    drop(handler);
+    assert!(seen.await.is_err(), "the engine must not see the unpersisted payload");
+}
+
+#[tokio::test]
+async fn conflicting_durable_write_refuses_import_before_engine_forward() {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let token = context
+        .registry
+        .resolve(&PayloadConfig::new(
+            parent.clone(),
+            attrs.clone(),
+            attrs.payload_id(&parent.hash()),
+        ))
+        .unwrap()
+        .completed_parent_for(payload.block())
+        .unwrap();
+    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (_dir, store) = temp_store();
+    store
+        .put_accounting(reth_unicity_store::StoredAccounting {
+            chain_id: 42,
+            genesis_hash: GENESIS_HASH,
+            block_number: 1,
+            accounting: token.for_local_storage(),
+        })
+        .unwrap();
+    let durable = UnicityParentAccountings::new().require_durability();
+    durable.attach_store(store);
+    context.state.parent_accounting = durable;
+
+    let (engine, seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
+    let handler = seal_import_handler(client, context.clone(), validator, engine);
+    let error = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("accounting persistence failed"));
+    assert!(context.parent_accounting.is_empty());
+    drop(handler);
+    assert!(seen.await.is_err(), "the engine must not see a block whose durable write failed");
+}
+
 /// The M1 node advertises the three seal methods and withholds stock newPayload admission.
 #[test]
 fn unicity_capabilities_withhold_stock_new_payload() {
@@ -2093,4 +2283,74 @@ fn a_canonical_entry_above_the_horizon_and_below_finalized_survives_both_paths()
     pruner.prune_once(100).unwrap();
 
     assert!(matches!(store.get(inside).unwrap(), Lookup::Found(_)));
+}
+
+#[test]
+fn concurrent_accounting_publication_and_retention_keep_recent_block() {
+    let (client, store, _dir, companion) = pruner_fixture(0, &[]);
+    let client = Client { persisted_number: 100, ..client };
+    let mut header = client.chain_spec.genesis_header().clone();
+    header.number = 95;
+    header.gas_limit = PROFILE.max_gas;
+    header.gas_used = 0;
+    header.base_fee_per_gas = Some(PROFILE.base_fee_floor);
+    let hash = header.hash_slow();
+    let token = reth_unicity_execution::block_executor::CompletedParent::from_local_storage(
+        reth_unicity_execution::block_executor::LocalParentAccounting {
+            block_hash: hash,
+            profile: PROFILE,
+            header_gas: 0,
+            system_gas: 0,
+            ordinary_gas: 0,
+            base_fee: PROFILE.base_fee_floor,
+        },
+        &SealedHeader::new(header, hash),
+        PROFILE,
+    )
+    .unwrap();
+    let tokens = UnicityParentAccountings::new().require_durability();
+    tokens.attach_store(store.clone());
+    let pruner = CompanionPruner::new(client, store.clone(), Some(18)).with_repair_limit(2);
+
+    std::thread::scope(|scope| {
+        scope.spawn(|| {
+            for _ in 0..10 {
+                tokens.publish(hash, 95, 1337, GENESIS_HASH, token).unwrap();
+                store.put(hash, 95, &companion).unwrap();
+            }
+        });
+        scope.spawn(|| {
+            for _ in 0..10 {
+                pruner.prune_once(100).unwrap();
+            }
+        });
+    });
+    assert!(store.get_accounting(hash).unwrap().is_some());
+    assert!(matches!(store.get(hash).unwrap(), Lookup::Found(_)));
+}
+
+#[test]
+fn companion_pruning_failure_does_not_skip_accounting_pruning() {
+    let (client, store, _dir, _companion) = pruner_fixture(0, &[]);
+    let client = Client { persisted_number: 100, fail_finalized: true, ..client };
+    let hash = B256::repeat_byte(0x45);
+    store
+        .put_accounting(reth_unicity_store::StoredAccounting {
+            chain_id: 1337,
+            genesis_hash: GENESIS_HASH,
+            block_number: 1,
+            accounting: reth_unicity_execution::block_executor::LocalParentAccounting {
+                block_hash: hash,
+                profile: PROFILE,
+                header_gas: 0,
+                system_gas: 0,
+                ordinary_gas: 0,
+                base_fee: PROFILE.base_fee_floor,
+            },
+        })
+        .unwrap();
+
+    let pruner = CompanionPruner::new(client, store.clone(), Some(18)).with_repair_limit(2);
+    assert!(pruner.prune_once(100).is_err());
+    assert!(store.get_accounting(hash).unwrap().is_none());
 }
