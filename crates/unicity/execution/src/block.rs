@@ -153,6 +153,14 @@ impl ParentExecutionOutcome {
     pub(crate) const fn profile(self) -> BlockProfile {
         self.profile
     }
+
+    pub(crate) const fn system_gas(self) -> u64 {
+        self.gas.system
+    }
+
+    pub(crate) const fn header_gas(self) -> u64 {
+        self.gas.header
+    }
 }
 
 /// Computes the next base fee from reconciled parent ordinary gas using checked wide arithmetic.

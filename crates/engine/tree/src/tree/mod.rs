@@ -3298,6 +3298,12 @@ where
         // error.
         let validation_err = error.ensure_validation_error()?;
 
+        if let InsertBlockValidationError::Consensus(err) = &validation_err &&
+            self.consensus.is_validation_unavailable(err)
+        {
+            return Ok(PayloadStatus::from_status(PayloadStatusEnum::Syncing));
+        }
+
         // If the error was due to an invalid payload, the payload is added to the
         // invalid headers cache and `Ok` with [PayloadStatusEnum::Invalid] is
         // returned.

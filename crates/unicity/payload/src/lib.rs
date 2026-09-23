@@ -24,21 +24,23 @@
 //!   the import path that re-executes the payload, records its accounting token, registers its
 //!   bound input and forwards it to the engine.
 //!
-//! THE SEAL METHODS ARE ADVERTISED. A Unicity node's `engine_exchangeCapabilities` is the stock
-//! Ethereum list plus the three seal methods, added together as one set. The siblings are
-//! registered on the authenticated engine module and reachable. The execution-aware path remains
+//! The three seal methods are advertised and registered on the authenticated engine module.
+//! Stock `newPayload` versions are withheld for M1 until they can run seal preflight. The
+//! execution-aware path remains
 //! structurally bound only: its resolver performs structural binding, while certificate/JWT
 //! authentication and exact-parent state provenance remain caller prerequisites. The import path
 //! does not verify witnesses, and the build-path companion carries no witnesses because
 //! `sealBuildInput` supplies none; bft-core holds the authenticated certificate and must populate
 //! them before dissemination. See the crate README.
 
+pub mod consensus;
 pub mod engine;
 pub mod node;
 pub mod prune;
 pub mod registry;
 pub mod rpc;
 
+pub use consensus::UnicityConsensus;
 pub use engine::UnicityEngineTypes;
 pub use node::{
     UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityExecutorBuilder, UnicityNode,
@@ -46,8 +48,8 @@ pub use node::{
 };
 pub use prune::{run_companion_pruner, CompanionPruneError, CompanionPruner};
 pub use registry::{
-    SealJobRegistry, UnicityParentAccountings, DEFAULT_PARENT_ACCOUNTING_CAPACITY,
-    DEFAULT_SEAL_JOB_CAPACITY,
+    ParentAccountingLease, ParentAccountingResolver, ParentAccountingUnavailable, SealJobRegistry,
+    UnicityParentAccountings, DEFAULT_PARENT_ACCOUNTING_CAPACITY, DEFAULT_SEAL_JOB_CAPACITY,
 };
 pub use rpc::{
     build_seal_companion, companion_not_retained_error, import_response, prepare_seal_build,
@@ -461,17 +463,32 @@ where
     /// `engine_newPayloadWithSealV1` has no token until the import path records one, so a follower
     /// cannot yet lead on it. That import path runs the same executor and must publish the token
     /// there too.
-    fn remember_parent(&self, evm_config: &UnicityEvmConfig, payload: &EthBuiltPayload) {
-        if let Ok(token) = evm_config.completed_parent_for(payload.block()) {
-            self.parent_accounting.insert(payload.block().hash(), token);
-        }
+    fn remember_parent(
+        &self,
+        evm_config: &UnicityEvmConfig,
+        payload: &EthBuiltPayload,
+    ) -> Result<(), PayloadBuilderError>
+    where
+        Client: ChainSpecProvider<ChainSpec = reth_chainspec::ChainSpec>,
+    {
+        let token = evm_config.completed_parent_for(payload.block()).map_err(|error| {
+            PayloadBuilderError::other(std::io::Error::other(format!("{error:?}")))
+        })?;
+        let chain = self.client.chain_spec();
+        self.parent_accounting.insert_for_chain(
+            payload.block().hash(),
+            token,
+            chain.chain().id(),
+            chain.genesis_hash(),
+        );
+        Ok(())
     }
 }
 
 impl<Pool, Client, Resolver> PayloadBuilder
     for UnicityExecutionPayloadBuilder<Pool, Client, Resolver>
 where
-    Client: StateProviderFactory + ChainSpecProvider<ChainSpec: EthereumHardforks> + Clone,
+    Client: StateProviderFactory + ChainSpecProvider<ChainSpec = reth_chainspec::ChainSpec> + Clone,
     Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TransactionSigned>>,
     Resolver: ExecutionPayloadJobResolver,
 {
@@ -492,7 +509,7 @@ where
         let (_, args) = split_args(args);
         let outcome = builder.try_build(args)?;
         if let BuildOutcome::Better { payload, .. } | BuildOutcome::Freeze(payload) = &outcome {
-            self.remember_parent(&evm_config, payload);
+            self.remember_parent(&evm_config, payload)?;
         }
         Ok(outcome)
     }
@@ -518,7 +535,7 @@ where
         let builder = self.for_resolved_job(&config, evm_config.clone());
         let (_, config) = split_config(config);
         let payload = builder.build_empty_payload(config)?;
-        self.remember_parent(&evm_config, &payload);
+        self.remember_parent(&evm_config, &payload)?;
         Ok(payload)
     }
 }

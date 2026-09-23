@@ -10,10 +10,14 @@ use std::{
     sync::{Arc, Mutex, MutexGuard},
 };
 
+use alloy_consensus::Header;
 use alloy_primitives::B256;
 use alloy_rpc_types_engine::PayloadId;
 use reth_basic_payload_builder::PayloadConfig;
+use reth_chainspec::ChainSpec;
+use reth_primitives_traits::SealedHeader;
 use reth_unicity_execution::{
+    block::BlockProfile,
     block_executor::{CompletedParent, UnicityEvmConfig},
     RootInputV2,
 };
@@ -177,8 +181,70 @@ pub const DEFAULT_PARENT_ACCOUNTING_CAPACITY: usize = 16;
 
 #[derive(Debug)]
 struct ParentAccountingInner {
-    tokens: VecDeque<(B256, CompletedParent)>,
+    tokens: VecDeque<ParentAccountingEntry>,
     capacity: usize,
+}
+
+#[derive(Debug)]
+struct ParentAccountingEntry {
+    hash: B256,
+    token: CompletedParent,
+    identity: Option<(u64, B256)>,
+    pins: usize,
+}
+
+/// A token lookup that can become available after a local build, import, or restore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
+#[error("parent accounting unavailable for {0}")]
+pub struct ParentAccountingUnavailable(pub B256);
+
+/// Shared checked lookup contract for build, replay, and parent-header consensus.
+pub trait ParentAccountingResolver: Send + Sync {
+    /// Resolves the exact header under the configured chain and profile, pinning the entry until
+    /// the caller drops the lease.
+    fn resolve(
+        &self,
+        parent: &SealedHeader<Header>,
+        chain_spec: &ChainSpec,
+        profile: BlockProfile,
+    ) -> Result<ParentAccountingLease, ParentAccountingUnavailable>;
+}
+
+/// Keeps a parent token available while an Engine import validates its child.
+#[derive(Debug)]
+pub struct ParentAccountingLease {
+    hash: B256,
+    token: CompletedParent,
+    next_fee: u64,
+    inner: Arc<Mutex<ParentAccountingInner>>,
+}
+
+impl ParentAccountingLease {
+    /// The checked token for binding an exact child execution input.
+    pub const fn token(&self) -> CompletedParent {
+        self.token
+    }
+
+    /// The checked next fee from the shared ordinary-gas rule.
+    pub const fn next_fee(&self) -> u64 {
+        self.next_fee
+    }
+}
+
+impl Drop for ParentAccountingLease {
+    fn drop(&mut self) {
+        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(entry) = inner.tokens.iter_mut().find(|entry| entry.hash == self.hash) {
+            entry.pins -= 1;
+        }
+        while inner.tokens.len() > inner.capacity {
+            if let Some(index) = inner.tokens.iter().position(|entry| entry.pins == 0) {
+                inner.tokens.remove(index);
+            } else {
+                break;
+            }
+        }
+    }
 }
 
 /// Bounded store of completed parent-accounting tokens published by the build path.
@@ -193,12 +259,7 @@ struct ParentAccountingInner {
 /// caller invent the parent's base-fee input rather than inherit it from the build that produced
 /// it.
 ///
-/// Only blocks this node built are recorded. A follower that imported the parent block through
-/// `engine_newPayloadWithSealV1` has no token for it, so a node cannot currently build on an
-/// imported parent and the build path refuses it as an internal error. The import path executes
-/// imported blocks through the same executor and must record the token there too; that is what
-/// lets a follower lead in a rotating-leader shard. The token is not and must not be derived from
-/// the parent header.
+/// Completed builds and replay-validated imports both publish tokens for their children.
 #[derive(Clone, Debug)]
 pub struct UnicityParentAccountings {
     inner: Arc<Mutex<ParentAccountingInner>>,
@@ -230,19 +291,53 @@ impl UnicityParentAccountings {
     /// A repeated hash replaces the existing entry rather than adding a second one. If the store is
     /// full, the oldest insertion is evicted first.
     pub fn insert(&self, block_hash: B256, token: CompletedParent) {
+        self.insert_inner(block_hash, token, None);
+    }
+
+    /// Publishes a token bound to the node's chain identity.
+    pub fn insert_for_chain(
+        &self,
+        block_hash: B256,
+        token: CompletedParent,
+        chain_id: u64,
+        genesis_hash: B256,
+    ) {
+        self.insert_inner(block_hash, token, Some((chain_id, genesis_hash)));
+    }
+
+    fn insert_inner(
+        &self,
+        block_hash: B256,
+        token: CompletedParent,
+        identity: Option<(u64, B256)>,
+    ) {
         let mut inner = self.lock();
-        if let Some(index) = inner.tokens.iter().position(|(hash, _)| *hash == block_hash) {
+        if let Some(entry) = inner.tokens.iter_mut().find(|entry| entry.hash == block_hash) {
+            // A validator already holds this exact token. Keep the published fact stable until
+            // its lease is dropped; a later publication can then replace it if needed.
+            if entry.pins > 0 {
+                return;
+            }
+            entry.token = token;
+            entry.identity = identity;
+            return;
+        }
+        if inner.tokens.len() >= inner.capacity &&
+            let Some(index) = inner.tokens.iter().position(|entry| entry.pins == 0)
+        {
             inner.tokens.remove(index);
         }
-        if inner.tokens.len() >= inner.capacity {
-            inner.tokens.pop_front();
-        }
-        inner.tokens.push_back((block_hash, token));
+        inner.tokens.push_back(ParentAccountingEntry {
+            hash: block_hash,
+            token,
+            identity,
+            pins: 0,
+        });
     }
 
     /// Returns the token for `block_hash`, if a build or replay published one.
     pub fn get(&self, block_hash: &B256) -> Option<CompletedParent> {
-        self.lock().tokens.iter().find(|(hash, _)| hash == block_hash).map(|(_, token)| *token)
+        self.lock().tokens.iter().find(|entry| entry.hash == *block_hash).map(|entry| entry.token)
     }
 
     /// Returns the number of tokens currently held.
@@ -260,6 +355,36 @@ impl UnicityParentAccountings {
         // worst case is a missing token, which refuses a build rather than taking the payload
         // service down with the panic.
         self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+impl ParentAccountingResolver for UnicityParentAccountings {
+    fn resolve(
+        &self,
+        parent: &SealedHeader<Header>,
+        chain_spec: &ChainSpec,
+        profile: BlockProfile,
+    ) -> Result<ParentAccountingLease, ParentAccountingUnavailable> {
+        let mut inner = self.lock();
+        let entry = inner
+            .tokens
+            .iter_mut()
+            .find(|entry| entry.hash == parent.hash())
+            .ok_or_else(|| ParentAccountingUnavailable(parent.hash()))?;
+        if entry.identity != Some((chain_spec.chain().id(), chain_spec.genesis_hash())) {
+            return Err(ParentAccountingUnavailable(parent.hash()));
+        }
+        let next_fee = entry
+            .token
+            .checked_next_base_fee(parent, profile)
+            .map_err(|_| ParentAccountingUnavailable(parent.hash()))?;
+        entry.pins += 1;
+        Ok(ParentAccountingLease {
+            hash: parent.hash(),
+            token: entry.token,
+            next_fee,
+            inner: self.inner.clone(),
+        })
     }
 }
 

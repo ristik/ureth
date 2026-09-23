@@ -6,10 +6,12 @@ shared Unicity executor. `UnicityEngineTypes` and `UnicityNode` carry the Unicit
 attributes end to end and use that builder with a bounded `SealJobRegistry`. The
 `engine_forkchoiceUpdatedWithSealV1` sibling is registered on the authenticated engine module.
 
-The three seal methods are reachable and advertised together. A Unicity node's
-`engine_exchangeCapabilities` is the stock Ethereum list plus `engine_forkchoiceUpdatedWithSealV1`,
-`engine_newPayloadWithSealV1` and `engine_getPayloadWithSealV1`, added as one set. All three or
-none, never a subset.
+The three seal methods are reachable and advertised together. The M1 node does not register or
+advertise stock `engine_newPayloadV1` through `engine_newPayloadV5`: those routes have no
+authenticated root input or checked parent-accounting preflight. Network admission uses a no-op
+network, so autonomous P2P and pipeline header sync cannot advance this node. General stock
+Engine import and headers-first sync are deferred capabilities. Seal imports and builds remain the
+authenticated advancement path; missing local accounting answers `SYNCING` and can be retried.
 
 ## Per-job authority
 
@@ -46,12 +48,12 @@ completion path; a payload ID or caller-provided gas scalar cannot mint one.
 
 ## Node wiring
 
-`UnicityNode` implements `NodeTypes` with `UnicityEngineTypes` and the stock Ethereum network,
-pool and consensus components. Its payload component uses `UnicityExecutionPayloadBuilder` with a
+`UnicityNode` implements `NodeTypes` with `UnicityEngineTypes`, a no-op network, and
+`UnicityConsensus`, which retains the Ethereum checks except for ordinary-gas fee feedback. Its payload component uses `UnicityExecutionPayloadBuilder` with a
 `SealJobRegistry` the node holds, and its executor component is `UnicityExecutorBuilder`, which
 supplies `UnicityNodeEvmConfig`. All clones of the registry see the same entries, so the payload
-service and the seal method share one collection. The engine API is the stock `EngineApi` built with the stock capability list plus the three seal
-methods, together, with the seal siblings merged into the same authenticated module. The validator
+service and the seal method share one collection. The engine API advertises the three seal
+methods and withholds stock `newPayload` versions. The validator
 is the stock Ethereum payload structure and version-field validation with no Unicity-specific
 verdict.
 
@@ -72,8 +74,8 @@ the U3a entry points; build the `UnicityEvmConfig` and `ResolvedPayloadJob` with
 published `EthereumBuilderConfig`; insert the job into the registry; and forward to the consensus
 handle. A refusal from decoding, binding, the job checks or a duplicate payload id is INVALID with
 the refusal in `validationError`. Absent `payloadAttributes` is INVALID. A missing
-`builder_config` or a missing non-genesis parent accounting token is an internal error, not caller
-input.
+`builder_config` is an internal error. Missing non-genesis parent accounting returns `SYNCING` so
+the same request can be retried when the token becomes available.
 
 The method does not trial-execute the system operation. "Runs the system operation as step 0"
 describes where the privileged `open` and `finalize` pair sits in the built block, which the bounded
@@ -173,9 +175,8 @@ service uses, a state-root mismatch, a missing parent, a parent without a token,
 hashes, and that ACCEPTED is never produced. They also cover the execution-input registry
 (idempotent duplicate, conflicting input, oldest-first eviction), node EVM resolution by commitment,
 closed execution without a registered input, a forward to a fake engine handle that returns its
-verdict, and that the advertised capability set is exactly the stock list plus the three seal
-strings. The fake engine is not a real engine: it does not execute or persist. The node wiring and
-the RPC registration are compile-checked but not launch-tested here, and launching the full node and
-exchanging Engine RPC remains the M1 gate. They do not demonstrate an Engine RPC exchange,
+verdict, and the advertised capability set. The fake engine does not execute or persist. The
+`fee_consensus_smoke.py` process check builds and imports B1 through B3 through the real Engine
+RPC; it does not demonstrate certificate authentication,
 certificate authentication, real persistence or public activation. `v0` and the bft-core
 execution-client pin are unchanged.

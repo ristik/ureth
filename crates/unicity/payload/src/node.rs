@@ -7,9 +7,8 @@
 //! [`ResolvedPayloadJob`](crate::ResolvedPayloadJob) into the registry and then start an ordinary
 //! build, which resolves that exact job.
 //!
-//! The sibling is reachable and advertised: a Unicity node's `engine_exchangeCapabilities` is the
-//! stock list plus all three seal methods together. The stock `engine_*` surface is otherwise
-//! assembled from upstream components exactly as the plain Ethereum node assembles it.
+//! The seal siblings are reachable and advertised. Stock `newPayload` versions are withheld until
+//! they can perform the same authenticated preflight. The M1 network has no P2P admission.
 //!
 //! The add-ons also mount the `unicity_getSealCompanionV1` and `unicity_sealCompanionHorizonV1`
 //! read methods on the standard transports, over the same companion store the seal paths write.
@@ -26,15 +25,14 @@ use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_node_builder::{
     components::{
-        BasicPayloadServiceBuilder, ComponentsBuilder, ExecutorBuilder, PayloadBuilderBuilder,
+        BasicPayloadServiceBuilder, ComponentsBuilder, ConsensusBuilder, ExecutorBuilder,
+        NoopNetworkBuilder, PayloadBuilderBuilder,
     },
     rpc::{BasicEngineValidatorBuilder, Identity, PayloadValidatorBuilder, RpcAddOns, RpcContext},
     AddOnsContext, BuilderContext, FullNodeComponents, FullNodeTypes, Node, NodeAdapter, NodeTypes,
     PayloadBuilderConfig,
 };
-use reth_node_ethereum::{
-    EthereumConsensusBuilder, EthereumEthApiBuilder, EthereumNetworkBuilder, EthereumPoolBuilder,
-};
+use reth_node_ethereum::{EthereumEthApiBuilder, EthereumPoolBuilder};
 use reth_payload_primitives::{
     validate_execution_requests, validate_version_specific_fields, EngineApiMessageVersion,
     EngineObjectValidationError, NewPayloadError, PayloadOrAttributes,
@@ -55,8 +53,8 @@ use crate::{
     prune::run_companion_pruner,
     registry::UnicityParentAccountings,
     rpc::{companion_store, unicity_rpc_module, SealBuildState, UnicityEngineApiBuilder},
-    SealJobRegistry, UnicityEngineTypes, UnicityExecutionPayloadBuilder, UnicityPayloadAttributes,
-    DEFAULT_SEAL_JOB_CAPACITY,
+    SealJobRegistry, UnicityConsensus, UnicityEngineTypes, UnicityExecutionPayloadBuilder,
+    UnicityPayloadAttributes, DEFAULT_SEAL_JOB_CAPACITY,
 };
 
 /// Pinned profile and fee collector the seal build path uses.
@@ -102,11 +100,9 @@ impl UnicityRetentionConfig {
 
 /// A Unicity execution node.
 ///
-/// This is the plain Ethereum node with two changes: [`NodeTypes::Payload`] is
-/// [`UnicityEngineTypes`], and the payload component builds through
-/// [`UnicityExecutionPayloadBuilder`] with the registry this node holds. Everything else, including
-/// the network, pool, executor, consensus and the standard Engine API, is the stock Ethereum
-/// component plus the seal sibling method.
+/// The node uses [`UnicityEngineTypes`], the execution-aware payload builder, fee-aware consensus,
+/// and a no-op network for M1 seal-only admission. Pool and ordinary RPC components remain shared
+/// with Ethereum.
 ///
 /// A caller that needs to insert seal jobs shares the registry with the node by constructing it
 /// with [`UnicityNode::new`]; all clones observe the same entries. The node also publishes the
@@ -209,9 +205,9 @@ where
         N,
         EthereumPoolBuilder,
         BasicPayloadServiceBuilder<UnicityPayloadBuilderBuilder>,
-        EthereumNetworkBuilder,
+        NoopNetworkBuilder,
         UnicityExecutorBuilder,
-        EthereumConsensusBuilder,
+        UnicityConsensusBuilder,
     >;
     type AddOns = UnicityNodeAddOns<NodeAdapter<N>>;
 
@@ -225,8 +221,11 @@ where
                 self.builder_config.clone(),
                 self.parent_accounting.clone(),
             )))
-            .network(EthereumNetworkBuilder::default())
-            .consensus(EthereumConsensusBuilder::default())
+            .network(NoopNetworkBuilder::eth())
+            .consensus(UnicityConsensusBuilder::new(
+                self.seal.profile,
+                self.parent_accounting.clone(),
+            ))
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -293,6 +292,31 @@ where
                 Ok(())
             },
         )
+    }
+}
+
+/// Builds the fee-aware consensus validator from the exact token registry shared with seal RPC.
+#[derive(Clone, Debug)]
+pub struct UnicityConsensusBuilder {
+    profile: BlockProfile,
+    parent_accounting: UnicityParentAccountings,
+}
+
+impl UnicityConsensusBuilder {
+    /// Creates a builder over the node's configured profile and parent tokens.
+    pub const fn new(profile: BlockProfile, parent_accounting: UnicityParentAccountings) -> Self {
+        Self { profile, parent_accounting }
+    }
+}
+
+impl<N> ConsensusBuilder<N> for UnicityConsensusBuilder
+where
+    N: FullNodeTypes<Types = UnicityNode>,
+{
+    type Consensus = Arc<UnicityConsensus>;
+
+    async fn build_consensus(self, ctx: &BuilderContext<N>) -> eyre::Result<Self::Consensus> {
+        Ok(Arc::new(UnicityConsensus::new(ctx.chain_spec(), self.profile, self.parent_accounting)))
     }
 }
 
