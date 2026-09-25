@@ -36,7 +36,7 @@ use std::{
 };
 
 use alloy_consensus::Header;
-use alloy_primitives::{B256, U256};
+use alloy_primitives::{Address, B256, U256};
 use alloy_rpc_types_engine::{
     CancunPayloadFields, ClientVersionV1, ExecutionData, ExecutionPayload,
     ExecutionPayloadEnvelopeV3, ExecutionPayloadSidecar, ExecutionPayloadV3, ForkchoiceState,
@@ -95,6 +95,12 @@ use crate::{
 /// The `engine` namespace sibling that carries the seal build input.
 #[rpc(server, namespace = "engine")]
 pub trait UnicityEngineApi {
+    /// Returns the node-owned, validated fee profile and collector over the JWT port.
+    /// The caller pins these values on first initialization and checks the pin
+    /// again on recovery and after replacing the Engine connection.
+    #[method(name = "sealConfigV1")]
+    async fn seal_config_v1(&self) -> RpcResult<SealConfigV1>;
+
     /// `engine_forkchoiceUpdatedWithSealV1`.
     ///
     /// `payloadAttributes` is required: a seal build input without attributes describes nothing,
@@ -139,6 +145,43 @@ pub trait UnicityEngineApi {
         parent_beacon_block_root: B256,
         seal_companion: SealCompanion,
     ) -> RpcResult<PayloadStatus>;
+}
+
+/// The exact consensus fee settings the running companion uses. The bft-core
+/// identity binder reads this over the JWT-authenticated Engine connection.
+/// The first reply is trusted as the profile source; the binder can compare
+/// the collector with its local setting, but has no separate local fee profile.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SealConfigV1 {
+    /// RPC contract version.
+    pub version: u64,
+    /// Header gas limit.
+    pub max_gas: u64,
+    /// Reserved system gas.
+    pub system_gas: u64,
+    /// Minimum base fee.
+    pub base_fee_floor: u64,
+    /// EIP-1559 elasticity.
+    pub elasticity: u64,
+    /// Base-fee change denominator.
+    pub change_denominator: u64,
+    /// Configured fee beneficiary.
+    pub fee_collector: Address,
+}
+
+impl From<UnicitySealConfig> for SealConfigV1 {
+    fn from(seal: UnicitySealConfig) -> Self {
+        Self {
+            version: 1,
+            max_gas: seal.profile.max_gas,
+            system_gas: seal.profile.system_gas,
+            base_fee_floor: seal.profile.base_fee_floor,
+            elasticity: seal.profile.elasticity,
+            change_denominator: seal.profile.change_denominator,
+            fee_collector: seal.fee_collector,
+        }
+    }
 }
 
 /// The `engine_getPayloadWithSealV1` response.
@@ -837,6 +880,10 @@ where
         + Sync
         + 'static,
 {
+    async fn seal_config_v1(&self) -> RpcResult<SealConfigV1> {
+        Ok(self.context.seal.into())
+    }
+
     async fn fork_choice_updated_with_seal_v1(
         &self,
         fork_choice_state: ForkchoiceState,
@@ -1240,8 +1287,36 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::companion_store_path;
+    use super::{companion_store_path, SealConfigV1};
+    use crate::node::UnicitySealConfig;
+    use alloy_primitives::Address;
+    use reth_unicity_execution::block::BlockProfile;
     use std::path::Path;
+
+    #[test]
+    fn seal_config_rpc_projects_the_node_owned_profile() {
+        let seal = UnicitySealConfig {
+            profile: BlockProfile {
+                max_gas: 30_000_000,
+                system_gas: 2_000_000,
+                base_fee_floor: 1_000_000,
+                elasticity: 2,
+                change_denominator: 8,
+            },
+            fee_collector: Address::repeat_byte(0x12),
+        };
+        let reported = SealConfigV1::from(seal);
+        assert_eq!(reported.version, 1);
+        assert_eq!(reported.max_gas, seal.profile.max_gas);
+        assert_eq!(reported.system_gas, seal.profile.system_gas);
+        assert_eq!(reported.base_fee_floor, seal.profile.base_fee_floor);
+        assert_eq!(reported.elasticity, seal.profile.elasticity);
+        assert_eq!(reported.change_denominator, seal.profile.change_denominator);
+        assert_eq!(reported.fee_collector, seal.fee_collector);
+        let json = serde_json::to_value(reported).unwrap();
+        assert_eq!(json["feeCollector"], serde_json::json!(seal.fee_collector));
+        assert_eq!(json["changeDenominator"], 8);
+    }
 
     #[test]
     fn companion_store_path_is_a_unicity_subdirectory_of_the_chain_datadir() {
