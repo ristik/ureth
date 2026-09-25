@@ -10,7 +10,7 @@
 //! tree executes an imported block through the same bounded executor. RPC and Engine API exposure
 //! lives in `reth-unicity-payload`.
 
-use alloy_primitives::{b256, Address, Bytes, B256, U256};
+use alloy_primitives::{b256, keccak256, Address, Bytes, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use revm::{
     context::TxEnv,
@@ -196,6 +196,13 @@ pub enum ExecutionError {
     Database(String),
     /// Open errored, reverted, or halted.
     OpenFailed(String),
+    /// The fixed `SealRegistry` has no authenticated epoch acknowledgement ABI.
+    RegistryEpochRefused {
+        /// Epoch stored by the registry in the parent state.
+        assigned: u64,
+        /// Epoch named by the supplied root input.
+        received: u64,
+    },
     /// Finalize errored, reverted, halted, or produced wrong storage.
     FinalizeFailed(String),
     /// Combined gross gas exceeded the configured cap.
@@ -305,6 +312,8 @@ pub(crate) fn prepare_transition(
     input: &RootInputV2,
 ) -> Result<PreparedTransition, ExecutionError> {
     let class = input.origin_class()?;
+    // i-b/H4 proof-transport hook: this bounded kernel has no authenticated
+    // handoff verdict or snapshot yet, so transition bodies remain refused.
     if !input.transitions.is_empty() {
         return Err(ExecutionError::InvalidInput("transitions unsupported in bounded profile"));
     }
@@ -396,6 +405,16 @@ where
         ));
     }
     let prepared = prepare_transition(input)?;
+    let epoch_slot = keccak256("unicity.seal-registry.v1/assignment.rootEpoch");
+    let assigned = db
+        .storage(SEAL_REGISTRY, U256::from_be_bytes(epoch_slot.0))
+        .map_err(|e| ExecutionError::Database(format!("{e:?}")))?;
+    if assigned != U256::from(input.origin.root_epoch) {
+        return Err(ExecutionError::RegistryEpochRefused {
+            assigned: assigned.try_into().unwrap_or(u64::MAX),
+            received: input.origin.root_epoch,
+        });
+    }
     let mut evm = Context::mainnet()
         .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecId::CANCUN))
         .with_db(db)
@@ -1151,5 +1170,45 @@ mod tests {
             ),
             Err(ExecutionError::InvalidInput("transitions unsupported in bounded profile"))
         ));
+    }
+
+    #[test]
+    fn epoch_change_is_a_clean_registry_refusal() {
+        let parent = genesis_db();
+        let mut input = executable_input(1, 13);
+        input.origin.root_epoch = 2;
+        let before = parent.storage_ref(SEAL_REGISTRY, U256::from_be_bytes(PHASE_SLOT.0)).unwrap();
+        assert!(matches!(
+            execute_registry_transition(
+                &input,
+                &parent,
+                ExecutionConfig { system_gas_limit: 500_000 }
+            ),
+            Err(ExecutionError::RegistryEpochRefused { assigned: 1, received: 2 })
+        ));
+        assert_eq!(
+            parent.storage_ref(SEAL_REGISTRY, U256::from_be_bytes(PHASE_SLOT.0)).unwrap(),
+            before
+        );
+    }
+
+    #[test]
+    fn transition_body_is_refused_without_publishing_state() {
+        let parent = genesis_db();
+        let mut input = executable_input(1, 13);
+        input.transitions.push(vec![0x01]);
+        let before = parent.storage_ref(SEAL_REGISTRY, U256::from_be_bytes(PHASE_SLOT.0)).unwrap();
+        assert!(matches!(
+            execute_registry_transition(
+                &input,
+                &parent,
+                ExecutionConfig { system_gas_limit: 500_000 }
+            ),
+            Err(ExecutionError::InvalidInput("transitions unsupported in bounded profile"))
+        ));
+        assert_eq!(
+            parent.storage_ref(SEAL_REGISTRY, U256::from_be_bytes(PHASE_SLOT.0)).unwrap(),
+            before
+        );
     }
 }
