@@ -96,6 +96,8 @@ use crate::{
 #[rpc(server, namespace = "engine")]
 pub trait UnicityEngineApi {
     /// Returns the node-owned, validated fee profile and collector over the JWT port.
+    /// The caller pins these values on first initialization and checks the pin
+    /// again on recovery and after replacing the Engine connection.
     #[method(name = "sealConfigV1")]
     async fn seal_config_v1(&self) -> RpcResult<SealConfigV1>;
 
@@ -147,6 +149,8 @@ pub trait UnicityEngineApi {
 
 /// The exact consensus fee settings the running companion uses. The bft-core
 /// identity binder reads this over the JWT-authenticated Engine connection.
+/// The first reply is trusted as the profile source; the binder can compare
+/// the collector with its local setting, but has no separate local fee profile.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct SealConfigV1 {
