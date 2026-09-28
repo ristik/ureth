@@ -517,6 +517,18 @@ mod tests {
     use super::*;
     use crate::{block::MAX_BASE_FEE, technical_record_hash};
 
+    #[test]
+    fn shared_epoch_transition_vector_decodes() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/evm-transition-v1.json")).unwrap();
+        let encoded = fixture["encoded"].as_str().unwrap().strip_prefix("0x").unwrap();
+        let encoded = alloy_primitives::hex::decode(encoded).unwrap();
+        let transition = decode_epoch_transition(&encoded).unwrap();
+        assert_eq!(transition.old_epoch, fixture["oldEpoch"].as_u64().unwrap());
+        assert_eq!(transition.new_epoch, fixture["newEpoch"].as_u64().unwrap());
+        assert_eq!(transition.evm_round, fixture["ack"]["evmRound"].as_u64().unwrap());
+    }
+
     const PROFILE: BlockProfile = BlockProfile {
         max_gas: 30_000_000,
         system_gas: 2_000_000,
