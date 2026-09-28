@@ -77,6 +77,28 @@ impl<Pool, Client, EvmConfig> EthereumPayloadBuilder<Pool, Client, EvmConfig> {
     }
 }
 
+impl<Pool, Client, EvmConfig> EthereumPayloadBuilder<Pool, Client, EvmConfig>
+where
+    EvmConfig: ConfigureEvm<Primitives = EthPrimitives, NextBlockEnvCtx = NextBlockEnvAttributes>,
+    Client: StateProviderFactory + ChainSpecProvider<ChainSpec: EthereumHardforks> + Clone,
+    Pool: TransactionPool<Transaction: PoolTransaction<Consensus = TransactionSigned>>,
+{
+    /// Builds a system-only payload while leaving pool transactions for a later block.
+    pub fn try_build_without_transactions(
+        &self,
+        args: BuildArguments<EthPayloadAttributes, EthBuiltPayload>,
+    ) -> Result<BuildOutcome<EthBuiltPayload>, PayloadBuilderError> {
+        default_ethereum_payload(
+            self.evm_config.clone(),
+            self.client.clone(),
+            self.pool.clone(),
+            self.builder_config.clone(),
+            args,
+            |_| -> BestTransactionsIter<Pool> { Box::new(std::iter::empty()) },
+        )
+    }
+}
+
 // Default implementation of [PayloadBuilder] for unit type
 impl<Pool, Client, EvmConfig> PayloadBuilder for EthereumPayloadBuilder<Pool, Client, EvmConfig>
 where

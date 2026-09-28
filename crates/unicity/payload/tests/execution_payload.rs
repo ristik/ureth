@@ -74,7 +74,7 @@ use support::provider::FixtureProvider;
 use tempfile::tempdir;
 
 const GENESIS_HASH: B256 =
-    b256!("82430ee9e534f0e454399cdaa06042c5dcc52b0378f48609e9c45c3cc1ae01f0");
+    b256!("5622984260859a170f61839f6f6114d57a653a3743049216f0451124fa77e269");
 const FEE_COLLECTOR: Address = Address::new([0x77; 20]);
 const PROFILE: BlockProfile = BlockProfile {
     max_gas: 30_000_001,
@@ -302,7 +302,7 @@ fn input(round: u64, root_round: u64, parent_hash: B256) -> RootInputV2 {
             },
             tr_hash: technical_record_hash(&technical),
             shard_conf_hash: b256!(
-                "4ba6ed4d7f56b668f781eb698b9ad1101d823050c677c8bc03b88b3b3b92a6ba"
+                "002a719ed27ff7b185660ac29fe1f32269b0e3ab3f126716a52c47ec2b8a92dd"
             ),
         },
         technical,

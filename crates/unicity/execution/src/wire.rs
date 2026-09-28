@@ -235,6 +235,64 @@ fn decode_byte_string_array(decoder: &mut Decoder<'_>) -> Result<Vec<Vec<u8>>, C
     Ok(values)
 }
 
+/// The Ack bytes use bft-core's canonical `UNICITY_HANDOFF_ACK` encoding.
+pub(crate) fn decode_epoch_transition(
+    input: &[u8],
+) -> Result<crate::EpochTransition, CanonicalCborError> {
+    let mut outer = Decoder::new(input);
+    let arity = outer.read_array()?;
+    if arity != 7 {
+        return Err(CanonicalCborError::WrongArity { expected: 7, found: arity });
+    }
+    if outer.read_text()? != "UNICITY_HANDOFF_EVM_TRANSITION" || outer.read_uint()? != 2 {
+        return Err(CanonicalCborError::InvalidRootInput(
+            "invalid epoch transition domain or version",
+        ));
+    }
+    let old_epoch = outer.read_uint()?;
+    let new_epoch = outer.read_uint()?;
+    let body_id = outer.read_word()?;
+    let genesis_id = outer.read_word()?;
+    let ack_bytes = outer.read_bytes()?;
+    outer.finish()?;
+    let mut ack = Decoder::new(ack_bytes);
+    let arity = ack.read_array()?;
+    if arity != 8 {
+        return Err(CanonicalCborError::WrongArity { expected: 8, found: arity });
+    }
+    if ack.read_text()? != "UNICITY_HANDOFF_ACK" || ack.read_uint()? != 2 {
+        return Err(CanonicalCborError::InvalidRootInput(
+            "invalid acknowledgement domain or version",
+        ));
+    }
+    let frozen_id = ack.read_word()?;
+    let commit_id = ack.read_word()?;
+    let frozen_parent = ack.read_word()?;
+    let successor_parent = ack.read_word()?;
+    let successor_tr = ack.read_word()?;
+    let evm_round = ack.read_uint()?;
+    ack.finish()?;
+    if old_epoch.checked_add(1) != Some(new_epoch) ||
+        [body_id, genesis_id, frozen_id, commit_id, frozen_parent, successor_tr]
+            .contains(&B256::ZERO) ||
+        frozen_parent != successor_parent ||
+        evm_round == 0
+    {
+        return Err(CanonicalCborError::InvalidRootInput("invalid epoch transition fields"));
+    }
+    Ok(crate::EpochTransition {
+        old_epoch,
+        new_epoch,
+        body_id,
+        genesis_id,
+        frozen_id,
+        commit_id,
+        frozen_parent,
+        successor_tr,
+        evm_round,
+    })
+}
+
 /// Named refusal for a byte string that is not the unique canonical encoding of a value.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum CanonicalCborError {
@@ -459,6 +517,18 @@ mod tests {
     use super::*;
     use crate::{block::MAX_BASE_FEE, technical_record_hash};
 
+    #[test]
+    fn shared_epoch_transition_vector_decodes() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/evm-transition-v1.json")).unwrap();
+        let encoded = fixture["encoded"].as_str().unwrap().strip_prefix("0x").unwrap();
+        let encoded = alloy_primitives::hex::decode(encoded).unwrap();
+        let transition = decode_epoch_transition(&encoded).unwrap();
+        assert_eq!(transition.old_epoch, fixture["oldEpoch"].as_u64().unwrap());
+        assert_eq!(transition.new_epoch, fixture["newEpoch"].as_u64().unwrap());
+        assert_eq!(transition.evm_round, fixture["ack"]["evmRound"].as_u64().unwrap());
+    }
+
     const PROFILE: BlockProfile = BlockProfile {
         max_gas: 30_000_000,
         system_gas: 2_000_000,
@@ -503,7 +573,7 @@ mod tests {
                 shard_conf_hash: B256::repeat_byte(0x33),
             },
             technical,
-            transitions: vec![vec![0x01], vec![0x02, 0x03]],
+            transitions: vec![],
         }
     }
 

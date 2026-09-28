@@ -290,6 +290,11 @@ where
     DB: Database,
     P: StateProvider,
 {
+    if !config.bound.input.transitions.is_empty() && !transactions.is_empty() {
+        return Err(BlockExecutionError::msg(
+            "epoch acknowledgement block contains user transactions",
+        ));
+    }
     let mut builder = config
         .builder_for_next_block(state, parent, attributes)
         .map_err(BlockExecutionError::other)?;
@@ -369,6 +374,11 @@ fn validate_fixed_block(
     config: &UnicityEvmConfig,
     block: &RecoveredBlock<Block>,
 ) -> Result<(), BlockExecutionError> {
+    if !config.bound.input.transitions.is_empty() && !block.body().transactions.is_empty() {
+        return Err(BlockExecutionError::msg(
+            "epoch acknowledgement block contains user transactions",
+        ));
+    }
     if block.header().hash_slow() != block.hash() {
         return Err(BlockExecutionError::msg("sealed block hash mismatch"));
     }
@@ -502,6 +512,9 @@ impl UnicityEvmConfig {
         &self,
         block: &SealedBlock<Block>,
     ) -> Result<(), BindingError> {
+        if !self.bound.input.transitions.is_empty() && !block.body().transactions.is_empty() {
+            return Err(BindingError("epoch acknowledgement block contains user transactions"));
+        }
         self.context_for_block(block).map(|_| ())
     }
 
@@ -669,6 +682,11 @@ where
         let (env, recovered) = tx.into_parts();
         if !matches!(self.prefix, PrefixState::Ready(_)) {
             return Err(BlockExecutionError::msg("ordinary transaction before system prefix"));
+        }
+        if !self.bound()?.input.transitions.is_empty() {
+            return Err(BlockExecutionError::msg(
+                "epoch acknowledgement block contains user transactions",
+            ));
         }
         if *recovered.signer() == SYSTEM_CALLER {
             return Err(BlockValidationError::InvalidTx {
