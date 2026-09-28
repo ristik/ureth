@@ -29,9 +29,9 @@ use std::sync::{Arc, Mutex};
 use support::provider::FixtureProvider;
 
 const GENESIS_HASH: B256 =
-    b256!("82430ee9e534f0e454399cdaa06042c5dcc52b0378f48609e9c45c3cc1ae01f0");
+    b256!("5622984260859a170f61839f6f6114d57a653a3743049216f0451124fa77e269");
 const GENESIS_ROOT: B256 =
-    b256!("cc17df719a9c043b34c3b5c0297775feb4c9ff8cfecf3b77ffe29bee9b0fe40a");
+    b256!("cd7b3a14c0f90bf0a7acf6dd9e824b27b3bab825aeccfa2699539e4810ed65b4");
 const FEE_COLLECTOR: Address = Address::new([0x77; 20]);
 const PROFILE: BlockProfile = BlockProfile {
     max_gas: 30_000_001,
@@ -109,7 +109,7 @@ fn input(round: u64, root_round: u64, parent_hash: B256) -> RootInputV2 {
             },
             tr_hash: technical_record_hash(&technical),
             shard_conf_hash: b256!(
-                "4ba6ed4d7f56b668f781eb698b9ad1101d823050c677c8bc03b88b3b3b92a6ba"
+                "002a719ed27ff7b185660ac29fe1f32269b0e3ab3f126716a52c47ec2b8a92dd"
             ),
         },
         technical,
@@ -131,6 +131,148 @@ fn attributes(input: &RootInputV2, parent_timestamp: u64) -> NextBlockEnvAttribu
         extra_data: input.input_commitment().unwrap().to_vec().into(),
         slot_number: None,
     }
+}
+
+fn acknowledgement_bytes(parent: B256) -> Vec<u8> {
+    fn bytes(out: &mut Vec<u8>, value: &[u8]) {
+        out.extend_from_slice(&[0x58, value.len() as u8]);
+        out.extend_from_slice(value);
+    }
+    fn text(out: &mut Vec<u8>, value: &str) {
+        if value.len() < 24 {
+            out.push(0x60 + value.len() as u8);
+        } else {
+            out.extend_from_slice(&[0x78, value.len() as u8]);
+        }
+        out.extend_from_slice(value.as_bytes());
+    }
+    let mut ack = vec![0x88];
+    text(&mut ack, "UNICITY_HANDOFF_ACK");
+    ack.push(2);
+    for word in
+        [B256::repeat_byte(0x41), B256::repeat_byte(0x42), parent, parent, B256::repeat_byte(0x43)]
+    {
+        bytes(&mut ack, word.as_slice());
+    }
+    ack.push(1);
+    let mut transition = vec![0x87];
+    text(&mut transition, "UNICITY_HANDOFF_EVM_TRANSITION");
+    transition.extend_from_slice(&[2, 1, 2]);
+    bytes(&mut transition, B256::repeat_byte(0x44).as_slice());
+    bytes(&mut transition, B256::repeat_byte(0x45).as_slice());
+    bytes(&mut transition, &ack);
+    transition
+}
+
+#[test]
+fn acknowledgement_replays_before_a_paid_successor_transaction() {
+    let genesis: Genesis =
+        serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
+    let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
+    let parent = SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH);
+    let mut provider = FixtureProvider::signed_genesis();
+    provider.set_block_hash(0, GENESIS_HASH);
+    let mut ack_input = input(1, 1, GENESIS_HASH);
+    ack_input.origin.root_epoch = 2;
+    ack_input.transitions = vec![acknowledgement_bytes(GENESIS_HASH)];
+    let ack_input = Arc::new(ack_input);
+    let bound = Arc::new(
+        BoundExecutionInput::from_validated_genesis(
+            ack_input.clone(),
+            PROFILE,
+            &parent,
+            GENESIS_HASH,
+            FEE_COLLECTOR,
+        )
+        .unwrap(),
+    );
+    let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec.clone()), bound);
+    let mut refused_state =
+        State::builder().with_database(provider.clone()).with_bundle_update().build();
+    let transfer = signed_call(
+        chain_spec.chain.id(),
+        0,
+        u128::from(parent.base_fee_per_gas.unwrap()) + 100,
+        Address::repeat_byte(0x42),
+        U256::from(1),
+        21_000,
+    )
+    .try_into_recovered()
+    .unwrap();
+    assert!(build_complete(
+        &config,
+        &parent,
+        attributes(&ack_input, parent.timestamp),
+        &mut refused_state,
+        provider.clone(),
+        vec![transfer.clone()]
+    )
+    .is_err());
+    let mut ack_state =
+        State::builder().with_database(provider.clone()).with_bundle_update().build();
+    let ack = build_complete(
+        &config,
+        &parent,
+        attributes(&ack_input, parent.timestamp),
+        &mut ack_state,
+        provider.clone(),
+        vec![],
+    )
+    .unwrap();
+    assert!(ack.outcome.block.body().transactions.is_empty());
+    let replay = replay_complete(&config, provider.clone(), &provider, &ack.outcome.block).unwrap();
+    assert_eq!(replay.output.result, ack.outcome.execution_result);
+    let with_user = with_transactions(
+        &ack.outcome.block,
+        vec![signed_call(
+            chain_spec.chain.id(),
+            0,
+            u128::from(parent.base_fee_per_gas.unwrap()) + 100,
+            Address::repeat_byte(0x42),
+            U256::from(1),
+            21_000,
+        )],
+        vec![transfer.signer()],
+    );
+    assert!(replay_complete(&config, provider.clone(), &provider, &with_user)
+        .unwrap_err()
+        .to_string()
+        .contains("acknowledgement block contains user transactions"));
+    let ack_header = ack.outcome.block.into_sealed_block().into_sealed_header();
+    let mut post_ack = provider.clone();
+    post_ack.apply_bundle(&ack_state.bundle_state);
+    post_ack.set_block_hash(1, ack_header.hash());
+    assert_eq!(post_ack.root(), ack_header.state_root);
+    let mut next_input = input(2, 2, ack_header.hash());
+    next_input.origin.root_epoch = 2;
+    let next_input = Arc::new(next_input);
+    let next_bound = Arc::new(
+        BoundExecutionInput::from_completed_parent(
+            next_input.clone(),
+            PROFILE,
+            &ack_header,
+            ack.parent,
+            FEE_COLLECTOR,
+        )
+        .unwrap(),
+    );
+    let next_config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec), next_bound);
+    let mut next_state =
+        State::builder().with_database(post_ack.clone()).with_bundle_update().build();
+    let paid = build_complete(
+        &next_config,
+        &ack_header,
+        attributes(&next_input, ack_header.timestamp),
+        &mut next_state,
+        post_ack.clone(),
+        vec![transfer],
+    )
+    .unwrap();
+    assert_eq!(paid.outcome.execution_result.receipts.len(), 1);
+    assert!(paid.outcome.execution_result.receipts[0].success);
+    let replay =
+        replay_complete(&next_config, post_ack.clone(), &post_ack, &paid.outcome.block).unwrap();
+    assert_eq!(replay.output.result, paid.outcome.execution_result);
 }
 
 #[test]

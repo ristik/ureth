@@ -32,7 +32,9 @@ sol! {
         uint64 n, uint64 rootRound, uint64 rootEpoch, uint64 timestamp,
         bytes32 treeRoot, bytes32 originIdentity, bytes32 trHash, bytes32 shardConfHash,
         uint64 certifiedRound, uint64 certEpoch, uint64 authEpoch, bytes32 stateHash,
-        bool hasBlockHash, bytes32 blockHash, bytes32 inputCommitment, uint64 transitionCount
+        bool hasBlockHash, bytes32 blockHash, bytes32 inputCommitment, uint64 transitionCount,
+        bytes32 bodyID, bytes32 genesisID, bytes32 frozenID, bytes32 commitID,
+        bytes32 frozenParent, bytes32 successorTR
     );
     function finalize(uint64 n, bytes32 sealRegistryCommitment);
 }
@@ -45,7 +47,7 @@ pub const SEAL_REGISTRY: Address =
     Address::new([0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
 /// Keccak-256 of the pinned `SealRegistry` v1 runtime artifact.
 pub const SEAL_REGISTRY_CODE_HASH: B256 =
-    b256!("643b1b983696b0de1f67053daf65c33b55d304de79074b55ee6f8829715a267b");
+    b256!("18b4c874e37d8563c1f672b6da073f009cd6a03bc9bfde886cc4743db6c14d3c");
 const OUTCOMES_ROUND_SLOT: B256 =
     b256!("a6dfb02f4e0457f6dc0ca8f4fd82b31c4a0df5261e0214610377f2af855a5ee5");
 const OUTCOMES_COMMITMENT_SLOT: B256 =
@@ -142,8 +144,21 @@ pub struct RootInputV2 {
     pub origin: RootOriginV2,
     /// Structured technical record.
     pub technical: TechnicalRecordV2,
-    /// Authenticated transition bodies; unsupported by this bounded kernel.
+    /// Authenticated transition bodies; at most one exact epoch acknowledgement.
     pub transitions: Vec<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct EpochTransition {
+    pub old_epoch: u64,
+    pub new_epoch: u64,
+    pub body_id: B256,
+    pub genesis_id: B256,
+    pub frozen_id: B256,
+    pub commit_id: B256,
+    pub frozen_parent: B256,
+    pub successor_tr: B256,
+    pub evm_round: u64,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -239,8 +254,18 @@ impl RootInputV2 {
         if self.network_id != self.origin.network_id {
             return Err(ExecutionError::InvalidInput("network identity mismatch"));
         }
-        if self.transitions.iter().any(Vec::is_empty) {
-            return Err(ExecutionError::InvalidInput("empty transition body"));
+        if self.transitions.len() > 1 {
+            return Err(ExecutionError::InvalidInput("only one epoch transition is supported"));
+        }
+        if let Some(raw) = self.transitions.first() {
+            let transition = wire::decode_epoch_transition(raw)
+                .map_err(|_| ExecutionError::InvalidInput("invalid epoch transition encoding"))?;
+            if transition.evm_round != self.authorized_round ||
+                transition.new_epoch != self.origin.root_epoch ||
+                transition.frozen_parent != self.parent_hash
+            {
+                return Err(ExecutionError::InvalidInput("epoch transition context mismatch"));
+            }
         }
         if technical_record_hash(&self.technical) != self.origin.tr_hash {
             return Err(ExecutionError::InvalidInput("technical record hash mismatch"));
@@ -312,11 +337,12 @@ pub(crate) fn prepare_transition(
     input: &RootInputV2,
 ) -> Result<PreparedTransition, ExecutionError> {
     let class = input.origin_class()?;
-    // i-b/H4 proof-transport hook: this bounded kernel has no authenticated
-    // handoff verdict or snapshot yet, so transition bodies remain refused.
-    if !input.transitions.is_empty() {
-        return Err(ExecutionError::InvalidInput("transitions unsupported in bounded profile"));
-    }
+    let transition = input
+        .transitions
+        .first()
+        .map(|raw| wire::decode_epoch_transition(raw))
+        .transpose()
+        .map_err(|_| ExecutionError::InvalidInput("invalid epoch transition encoding"))?;
     let input_commitment = input.input_commitment()?;
     let origin_identity = input.origin_identity()?;
     let technical_record_hash = technical_record_hash(&input.technical);
@@ -346,7 +372,13 @@ pub(crate) fn prepare_transition(
         hasBlockHash: has_block_hash,
         blockHash: block_hash,
         inputCommitment: input_commitment,
-        transitionCount: 0,
+        transitionCount: u64::from(transition.is_some()),
+        bodyID: transition.map_or(B256::ZERO, |t| t.body_id),
+        genesisID: transition.map_or(B256::ZERO, |t| t.genesis_id),
+        frozenID: transition.map_or(B256::ZERO, |t| t.frozen_id),
+        commitID: transition.map_or(B256::ZERO, |t| t.commit_id),
+        frozenParent: transition.map_or(B256::ZERO, |t| t.frozen_parent),
+        successorTR: transition.map_or(B256::ZERO, |t| t.successor_tr),
     }
     .abi_encode()
     .into();
@@ -409,7 +441,14 @@ where
     let assigned = db
         .storage(SEAL_REGISTRY, U256::from_be_bytes(epoch_slot.0))
         .map_err(|e| ExecutionError::Database(format!("{e:?}")))?;
-    if assigned != U256::from(input.origin.root_epoch) {
+    let epoch_ok = if let Some(raw) = input.transitions.first() {
+        let t = wire::decode_epoch_transition(raw)
+            .map_err(|_| ExecutionError::InvalidInput("invalid epoch transition encoding"))?;
+        assigned == U256::from(t.old_epoch) && input.origin.root_epoch == t.new_epoch
+    } else {
+        assigned == U256::from(input.origin.root_epoch)
+    };
+    if !epoch_ok {
         return Err(ExecutionError::RegistryEpochRefused {
             assigned: assigned.try_into().unwrap_or(u64::MAX),
             received: input.origin.root_epoch,
@@ -747,7 +786,7 @@ mod tests {
     fn genesis_db() -> CacheDB<EmptyDB> {
         // Finalized standard JSON content from bft-core 77d47511, with a final newline added. Its
         // pinned-reth companion records
-        // genesis 0x9d672f78…f1b9 and state root 0x8936f379…fdf0.
+        // genesis 0xdf28d41e…48992d.
         let genesis: Genesis =
             serde_json::from_str(include_str!("../testdata/funded-genesis-vector.json")).unwrap();
         let mut db = CacheDB::new(EmptyDB::default());
@@ -785,6 +824,18 @@ mod tests {
         db
     }
 
+    #[test]
+    fn embedded_registry_artifact_matches_genesis_runtime() {
+        let artifact: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/seal-registry-v1.json")).unwrap();
+        let genesis: serde_json::Value =
+            serde_json::from_str(include_str!("../testdata/funded-genesis-vector.json")).unwrap();
+        let code = artifact["runtimeBytecode"].as_str().unwrap();
+        let registry = genesis["alloc"][format!("{SEAL_REGISTRY:#x}")]["code"].as_str().unwrap();
+        assert_eq!(registry, code);
+        assert_eq!(keccak256(decode_hex(code)), SEAL_REGISTRY_CODE_HASH);
+    }
+
     fn executable_input(round: u64, root_round: u64) -> RootInputV2 {
         let technical = TechnicalRecordV2 {
             round,
@@ -801,7 +852,7 @@ mod tests {
             authorized_round: round,
             certified_epoch: 0,
             authorized_epoch: 0,
-            parent_hash: b256!("9d672f7822f0747687bcf1c4273cecac83f987871d215d5554d71fb1d1f6f1b9"),
+            parent_hash: b256!("df28d41ed53c949eacd7f1db41c9a412e3d8e98da6b100931df337cf9f48992d"),
             origin: RootOriginV2 {
                 network_id: 3,
                 root_round,
@@ -819,7 +870,7 @@ mod tests {
                 },
                 tr_hash: technical_record_hash(&technical),
                 shard_conf_hash: b256!(
-                    "4ba6ed4d7f56b668f781eb698b9ad1101d823050c677c8bc03b88b3b3b92a6ba"
+                    "002a719ed27ff7b185660ac29fe1f32269b0e3ab3f126716a52c47ec2b8a92dd"
                 ),
             },
             technical,
@@ -930,13 +981,12 @@ mod tests {
             "open must observe the nonzero-to-zero outcome reset refund"
         );
         assert_eq!(second.total_gas_spent, second.open_gas_spent + second.finalize_gas_spent);
-        // Recorded from revm 42 executing the pinned artifact/funded genesis. A
-        // mutation to refund-adjusted tx_gas_used produces 131_512 and fails these assertions.
+        // Recorded from revm 42 executing the pinned artifact/funded genesis.
         assert_eq!(
             (second.open_gas_spent, second.finalize_gas_spent, second.total_gas_spent),
-            (106_757, 29_555, 136_312)
+            (107_261, 29_579, 136_840)
         );
-        let exact = 136_312;
+        let exact = 136_840;
         assert!(execute_registry_transition(
             &second_input,
             &after_first,
@@ -1168,7 +1218,7 @@ mod tests {
                 &genesis_db(),
                 ExecutionConfig { system_gas_limit: 500_000 }
             ),
-            Err(ExecutionError::InvalidInput("transitions unsupported in bounded profile"))
+            Err(ExecutionError::InvalidInput("invalid epoch transition encoding"))
         ));
     }
 
@@ -1192,6 +1242,86 @@ mod tests {
         );
     }
 
+    fn transition_bytes(old_epoch: u64, new_epoch: u64, round: u64, parent: B256) -> Vec<u8> {
+        let mut ack = Vec::new();
+        array(&mut ack, 8);
+        text(&mut ack, "UNICITY_HANDOFF_ACK");
+        uint(&mut ack, 2);
+        for word in [
+            B256::repeat_byte(0x41),
+            B256::repeat_byte(0x42),
+            parent,
+            parent,
+            B256::repeat_byte(0x43),
+        ] {
+            bytes(&mut ack, word.as_slice());
+        }
+        uint(&mut ack, round);
+        let mut transition = Vec::new();
+        array(&mut transition, 7);
+        text(&mut transition, "UNICITY_HANDOFF_EVM_TRANSITION");
+        uint(&mut transition, 2);
+        uint(&mut transition, old_epoch);
+        uint(&mut transition, new_epoch);
+        bytes(&mut transition, B256::repeat_byte(0x44).as_slice());
+        bytes(&mut transition, B256::repeat_byte(0x45).as_slice());
+        bytes(&mut transition, &ack);
+        transition
+    }
+
+    #[test]
+    fn acknowledgement_uses_frozen_parent_and_exact_epoch() {
+        let parent = genesis_db();
+        let mut input = executable_input(1, 1);
+        input.origin.root_epoch = 2;
+        input.transitions = vec![transition_bytes(1, 2, 1, input.parent_hash)];
+        let first = execute_registry_transition(
+            &input,
+            &parent,
+            ExecutionConfig { system_gas_limit: 500_000 },
+        )
+        .unwrap();
+        let repeated = execute_registry_transition(
+            &input,
+            &parent,
+            ExecutionConfig { system_gas_limit: 500_000 },
+        )
+        .unwrap();
+        assert_eq!(first.0, repeated.0);
+        let assigned = keccak256("unicity.seal-registry.v1/assignment.rootEpoch");
+        assert_eq!(
+            first.1.storage_ref(SEAL_REGISTRY, U256::from_be_bytes(assigned.0)).unwrap(),
+            U256::from(2)
+        );
+        let mut next = executable_input(2, 2);
+        next.origin.root_epoch = 2;
+        execute_registry_transition(&next, &first.1, ExecutionConfig { system_gas_limit: 500_000 })
+            .unwrap();
+
+        let mut wrong = input.clone();
+        wrong.parent_hash = B256::repeat_byte(0xff);
+        assert!(matches!(
+            wrong.origin_class(),
+            Err(ExecutionError::InvalidInput("epoch transition context mismatch"))
+        ));
+        wrong = input.clone();
+        wrong.transitions = vec![transition_bytes(1, 3, 1, wrong.parent_hash)];
+        assert!(matches!(
+            wrong.origin_class(),
+            Err(ExecutionError::InvalidInput("invalid epoch transition encoding"))
+        ));
+        wrong = input;
+        wrong.transitions.clear();
+        assert!(matches!(
+            execute_registry_transition(
+                &wrong,
+                &parent,
+                ExecutionConfig { system_gas_limit: 500_000 }
+            ),
+            Err(ExecutionError::RegistryEpochRefused { .. })
+        ));
+    }
+
     #[test]
     fn transition_body_is_refused_without_publishing_state() {
         let parent = genesis_db();
@@ -1204,7 +1334,7 @@ mod tests {
                 &parent,
                 ExecutionConfig { system_gas_limit: 500_000 }
             ),
-            Err(ExecutionError::InvalidInput("transitions unsupported in bounded profile"))
+            Err(ExecutionError::InvalidInput("invalid epoch transition encoding"))
         ));
         assert_eq!(
             parent.storage_ref(SEAL_REGISTRY, U256::from_be_bytes(PHASE_SLOT.0)).unwrap(),

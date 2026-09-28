@@ -510,6 +510,7 @@ where
         args: BuildArguments<Self::Attributes, Self::BuiltPayload>,
     ) -> Result<BuildOutcome<Self::BuiltPayload>, PayloadBuilderError> {
         let evm_config = self.resolve_job(&args.config)?;
+        let acknowledgement = !evm_config.root_input().transitions.is_empty();
         if let Some(best) = &args.best_payload {
             evm_config
                 .validate_payload_candidate(best.block())
@@ -517,7 +518,11 @@ where
         }
         let builder = self.for_resolved_job(&args.config, evm_config.clone());
         let (_, args) = split_args(args);
-        let outcome = builder.try_build(args)?;
+        let outcome = if acknowledgement {
+            builder.try_build_without_transactions(args)?
+        } else {
+            builder.try_build(args)?
+        };
         if let BuildOutcome::Better { payload, .. } | BuildOutcome::Freeze(payload) = &outcome {
             self.remember_parent(&evm_config, payload)?;
         }

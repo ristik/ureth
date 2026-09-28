@@ -47,7 +47,7 @@ fn main() {
             },
             tr_hash: technical_record_hash(&technical),
             shard_conf_hash: b256!(
-                "4ba6ed4d7f56b668f781eb698b9ad1101d823050c677c8bc03b88b3b3b92a6ba"
+                "002a719ed27ff7b185660ac29fe1f32269b0e3ab3f126716a52c47ec2b8a92dd"
             ),
         },
         technical,

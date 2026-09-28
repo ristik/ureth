@@ -28,13 +28,13 @@ The test fixture contents are copied from bft-core at design merge `77d47511` (t
 files add a final newline): `evmroot/testdata/v2-vectors.json`
 and `registrygenesis/testdata/funded-genesis-vector.json`. The latter is the full finalized standard
 genesis JSON whose pinned reth companion records genesis hash
-`0x9d672f7822f0747687bcf1c4273cecac83f987871d215d5554d71fb1d1f6f1b9` and state root
-`0x8936f379e65d90577242c6333f644cd0716325117e5bb064a2a32c08ba8afdf0`.
+`0xdf28d41ed53c949eacd7f1db41c9a412e3d8e98da6b100931df337cf9f48992d` and state root
+`0xd63fd616fa91fea173cfef70a8f15336488c6cb31d7b26b6ff72c924515359a4`.
 `system-outcome-vectors.json` was generated independently through bft-core
 `evmroot.SealRegistryCommitment` at `c9beef6c`.
 
 `signed-beacon-genesis.json` is a test-only standard-JSON variant generated with geth 1.14.11. It
 adds the stock beacon-roots code and funds the public secp256k1 scalar-1 test signer; it is never a
 deployment default. Its independent oracle pins genesis hash
-`0x82430ee9e534f0e454399cdaa06042c5dcc52b0378f48609e9c45c3cc1ae01f0` and state root
-`0xcc17df719a9c043b34c3b5c0297775feb4c9ff8cfecf3b77ffe29bee9b0fe40a`.
+`0x5622984260859a170f61839f6f6114d57a653a3743049216f0451124fa77e269` and state root
+`0xcd7b3a14c0f90bf0a7acf6dd9e824b27b3bab825aeccfa2699539e4810ed65b4`.
