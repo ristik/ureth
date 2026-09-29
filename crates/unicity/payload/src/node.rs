@@ -135,7 +135,7 @@ impl UnicityNode {
             parent_accounting: UnicityParentAccountings::default().require_durability(),
             execution_inputs: UnicityBlockExecutionRegistry::default(),
             retention: UnicityRetentionConfig::default(),
-            proof_source: false,
+            proof_source: true,
             repair_limit: crate::recovery::DEFAULT_REPAIR_LIMIT,
             companion_store: Arc::new(OnceLock::new()),
         }
@@ -150,7 +150,9 @@ impl UnicityNode {
         self
     }
 
-    /// Refuses pruning that could delete data before offline proof capture.
+    /// Sets whether pruning that could delete data before offline proof capture is refused.
+    ///
+    /// This protection is enabled by default.
     pub const fn with_proof_source(mut self, enabled: bool) -> Self {
         self.proof_source = enabled;
         self
@@ -638,8 +640,10 @@ pub type UnicityNodeAddOns<N> =
 
 #[cfg(test)]
 mod tests {
-    use super::registry_capacity;
-    use crate::DEFAULT_SEAL_JOB_CAPACITY;
+    use super::{registry_capacity, UnicityNode, UnicitySealConfig};
+    use crate::{SealJobRegistry, DEFAULT_SEAL_JOB_CAPACITY};
+    use alloy_primitives::Address;
+    use reth_unicity_execution::block::BlockProfile;
 
     #[test]
     fn registry_capacity_tracks_max_payload_tasks_with_a_floor() {
@@ -648,5 +652,23 @@ mod tests {
         assert_eq!(registry_capacity(4), DEFAULT_SEAL_JOB_CAPACITY);
         assert_eq!(registry_capacity(5), 20);
         assert_eq!(registry_capacity(usize::MAX), usize::MAX);
+    }
+
+    #[test]
+    fn proof_source_retention_is_enabled_by_default() {
+        let node = UnicityNode::new(
+            SealJobRegistry::new(),
+            UnicitySealConfig {
+                profile: BlockProfile {
+                    max_gas: 30_000_000,
+                    system_gas: 2_000_000,
+                    base_fee_floor: 1_000_000,
+                    elasticity: 2,
+                    change_denominator: 8,
+                },
+                fee_collector: Address::ZERO,
+            },
+        );
+        assert!(node.proof_source);
     }
 }
