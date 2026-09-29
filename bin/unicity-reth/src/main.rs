@@ -26,7 +26,7 @@ use reth_unicity_payload::{
     recovery::ACCOUNTING_WINDOW, SealJobRegistry, UnicityNode, UnicityRetentionConfig,
     UnicitySealConfig,
 };
-use tracing::info;
+use tracing::{info, warn};
 
 /// Operator configuration for the Unicity node.
 ///
@@ -65,9 +65,10 @@ struct UnicityArgs {
     #[arg(long = "unicity.companion-retention-depth", value_name = "BLOCKS")]
     companion_retention_depth: Option<u64>,
 
-    /// Retain all receipt, transaction and companion data for offline proof capture.
-    #[arg(long = "unicity.proof-source")]
-    proof_source: bool,
+    /// Disable protection against pruning receipt, transaction and companion data needed for
+    /// offline proof capture.
+    #[arg(long = "unicity.no-proof-source")]
+    no_proof_source: bool,
 
     /// Maximum historical blocks replayed from a durable parent-accounting token at startup.
     #[arg(long = "unicity.accounting-repair-limit", default_value_t = 64, value_name = "BLOCKS")]
@@ -102,6 +103,11 @@ impl UnicityArgs {
         }
     }
 
+    /// Whether this validator protects data needed for offline proof capture.
+    const fn proof_source_enabled(&self) -> bool {
+        !self.no_proof_source
+    }
+
     fn validate_retention(&self) -> eyre::Result<()> {
         let Some(depth) = self.companion_retention_depth else {
             return Ok(());
@@ -123,7 +129,7 @@ impl UnicityArgs {
         cli_prune: Option<reth_config::PruneConfig>,
         toml_prune: reth_config::PruneConfig,
     ) -> eyre::Result<()> {
-        if !self.proof_source {
+        if !self.proof_source_enabled() {
             return Ok(());
         }
         let effective = match cli_prune {
@@ -152,13 +158,22 @@ fn main() {
         async move |builder, args: UnicityArgs| {
             let profile = args.profile()?;
             args.validate_retention()?;
-            // Validate before launch starts payload-building and other node services.
-            // Keep the same CLI-over-TOML precedence as LaunchContext::prune_config.
-            let node_config = builder.config();
-            let config_path =
-                node_config.config.clone().unwrap_or_else(|| node_config.datadir().config());
-            let disk_config = RethConfig::from_path(config_path)?;
-            args.validate_proof_source(node_config.prune_config(), disk_config.prune)?;
+            if args.proof_source_enabled() {
+                // Validate before launch starts payload-building and other node services.
+                // Keep the same CLI-over-TOML precedence as LaunchContext::prune_config.
+                let node_config = builder.config();
+                let config_path = node_config
+                    .config
+                    .clone()
+                    .unwrap_or_else(|| node_config.datadir().config());
+                let disk_config = RethConfig::from_path(config_path)?;
+                args.validate_proof_source(node_config.prune_config(), disk_config.prune)?;
+            } else {
+                warn!(
+                    target: "reth::unicity",
+                    "proof-source retention protection is disabled; pruning may permanently remove data required for offline proof capture"
+                );
+            }
             let seal = UnicitySealConfig { profile, fee_collector: args.fee_collector };
 
             info!(target: "reth::cli", "Launching Unicity node");
@@ -166,7 +181,7 @@ fn main() {
                 .node(
                     UnicityNode::new(SealJobRegistry::new(), seal)
                         .with_retention(args.retention())
-                        .with_proof_source(args.proof_source)
+                        .with_proof_source(args.proof_source_enabled())
                         .with_repair_limit(args.accounting_repair_limit),
                 )
                 .launch()
@@ -197,7 +212,7 @@ mod tests {
             base_fee_change_denominator: 8,
             companion_retention_depth: Some(ACCOUNTING_WINDOW + 2 - 1),
             accounting_repair_limit: 2,
-            proof_source: false,
+            no_proof_source: false,
         };
         assert!(args.validate_retention().is_err());
         let args = UnicityArgs { companion_retention_depth: Some(ACCOUNTING_WINDOW + 2), ..args };
@@ -213,7 +228,7 @@ mod tests {
             elasticity: 2,
             base_fee_change_denominator: 8,
             companion_retention_depth,
-            proof_source: enabled,
+            no_proof_source: !enabled,
             accounting_repair_limit: 64,
         }
     }
@@ -287,9 +302,53 @@ mod tests {
         toml.segments.receipts = None;
         assert!(proof_args(true, None).validate_proof_source(Some(cli), toml).is_err());
 
-        // The feature is opt-in; existing pruning configurations remain accepted without it.
+        // Explicitly opting out keeps existing pruning configurations accepted.
         let mut destructive = RethConfig::default().prune;
         destructive.segments.receipts = Some(PruneMode::Full);
         assert!(proof_args(false, None).validate_proof_source(None, destructive).is_ok());
+    }
+
+    #[test]
+    fn proof_source_is_on_by_default_and_explicitly_opt_out() {
+        use clap::FromArgMatches;
+
+        let command = <UnicityArgs as clap::Args>::augment_args(clap::Command::new("unicity"));
+        let matches = command
+            .clone()
+            .try_get_matches_from([
+                "unicity",
+                "--unicity.fee-collector=0x0000000000000000000000000000000000000000",
+            ])
+            .unwrap();
+        let defaults = UnicityArgs::from_arg_matches(&matches).unwrap();
+        assert!(defaults.proof_source_enabled());
+
+        let matches = command
+            .try_get_matches_from([
+                "unicity",
+                "--unicity.fee-collector=0x0000000000000000000000000000000000000000",
+                "--unicity.no-proof-source",
+            ])
+            .unwrap();
+        let opt_out = UnicityArgs::from_arg_matches(&matches).unwrap();
+        assert!(!opt_out.proof_source_enabled());
+    }
+
+    #[test]
+    fn default_proof_source_mode_refuses_destructive_pruning() {
+        use clap::FromArgMatches;
+
+        let command = <UnicityArgs as clap::Args>::augment_args(clap::Command::new("unicity"));
+        let matches = command
+            .try_get_matches_from([
+                "unicity",
+                "--unicity.fee-collector=0x0000000000000000000000000000000000000000",
+            ])
+            .unwrap();
+        let args = UnicityArgs::from_arg_matches(&matches).unwrap();
+        assert!(args.proof_source_enabled());
+        let mut destructive = RethConfig::default().prune;
+        destructive.segments.receipts = Some(PruneMode::Full);
+        assert!(args.validate_proof_source(None, destructive).is_err());
     }
 }
