@@ -120,6 +120,7 @@ pub struct UnicityNode {
     parent_accounting: UnicityParentAccountings,
     execution_inputs: UnicityBlockExecutionRegistry,
     retention: UnicityRetentionConfig,
+    proof_source: bool,
     repair_limit: u64,
     companion_store: Arc<OnceLock<Arc<CompanionStore>>>,
 }
@@ -134,6 +135,7 @@ impl UnicityNode {
             parent_accounting: UnicityParentAccountings::default().require_durability(),
             execution_inputs: UnicityBlockExecutionRegistry::default(),
             retention: UnicityRetentionConfig::default(),
+            proof_source: false,
             repair_limit: crate::recovery::DEFAULT_REPAIR_LIMIT,
             companion_store: Arc::new(OnceLock::new()),
         }
@@ -145,6 +147,12 @@ impl UnicityNode {
     /// opts in with [`UnicityRetentionConfig::retain_last`].
     pub const fn with_retention(mut self, retention: UnicityRetentionConfig) -> Self {
         self.retention = retention;
+        self
+    }
+
+    /// Refuses pruning that could delete data before offline proof capture.
+    pub const fn with_proof_source(mut self, enabled: bool) -> Self {
+        self.proof_source = enabled;
         self
     }
 
@@ -237,12 +245,15 @@ where
             // Transactions must reach the leader directly until ristik/ureth#34 restores
             // gossip without admitting P2P blocks.
             .network(NoopNetworkBuilder::eth())
-            .consensus(UnicityConsensusBuilder::new(
-                self.seal,
-                self.parent_accounting.clone(),
-                self.companion_store.clone(),
-                self.repair_limit,
-            ))
+            .consensus(
+                UnicityConsensusBuilder::new(
+                    self.seal,
+                    self.parent_accounting.clone(),
+                    self.companion_store.clone(),
+                    self.repair_limit,
+                )
+                .with_proof_source(self.proof_source.then_some(self.retention)),
+            )
     }
 
     fn add_ons(&self) -> Self::AddOns {
@@ -320,6 +331,7 @@ where
 /// Builds the fee-aware consensus validator from the exact token registry shared with seal RPC.
 #[derive(Clone, Debug)]
 pub struct UnicityConsensusBuilder {
+    proof_source: Option<UnicityRetentionConfig>,
     seal: UnicitySealConfig,
     parent_accounting: UnicityParentAccountings,
     store: Arc<OnceLock<Arc<CompanionStore>>>,
@@ -327,6 +339,12 @@ pub struct UnicityConsensusBuilder {
 }
 
 impl UnicityConsensusBuilder {
+    /// Enables proof retention checks against the resolved node configuration.
+    pub const fn with_proof_source(mut self, retention: Option<UnicityRetentionConfig>) -> Self {
+        self.proof_source = retention;
+        self
+    }
+
     /// Creates a builder over the node's configured profile and parent tokens.
     pub const fn new(
         seal: UnicitySealConfig,
@@ -334,7 +352,7 @@ impl UnicityConsensusBuilder {
         store: Arc<OnceLock<Arc<CompanionStore>>>,
         repair_limit: u64,
     ) -> Self {
-        Self { seal, parent_accounting, store, repair_limit }
+        Self { seal, parent_accounting, store, repair_limit, proof_source: None }
     }
 }
 
@@ -358,6 +376,12 @@ where
             ParentAccountingResolver,
         };
 
+        if let Some(retention) = self.proof_source {
+            // Match LaunchContext::prune_config: CLI segments override TOML segments.
+            let mut prune = ctx.config().prune_config().unwrap_or_default();
+            prune.merge(ctx.reth_config().prune.clone());
+            crate::prune::validate_proof_retention(&prune.segments, retention.depth())?;
+        }
         let store = companion_store(&self.store, ctx.config().datadir().data_dir())?;
         self.parent_accounting.attach_store(store.clone());
         hydrate_accounting(ctx.provider(), &self.parent_accounting, self.seal.profile)?;

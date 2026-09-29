@@ -19,6 +19,7 @@ static MALLOC_CONF: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
 use alloy_primitives::Address;
 use clap::{Args, Parser};
+use reth_config::Config as RethConfig;
 use reth_ethereum_cli::{chainspec::EthereumChainSpecParser, interface::Cli};
 use reth_unicity_execution::block::BlockProfile;
 use reth_unicity_payload::{
@@ -63,6 +64,10 @@ struct UnicityArgs {
     /// Absent retains every companion indefinitely and publishes no horizon.
     #[arg(long = "unicity.companion-retention-depth", value_name = "BLOCKS")]
     companion_retention_depth: Option<u64>,
+
+    /// Retain all receipt, transaction and companion data for offline proof capture.
+    #[arg(long = "unicity.proof-source")]
+    proof_source: bool,
 
     /// Maximum historical blocks replayed from a durable parent-accounting token at startup.
     #[arg(long = "unicity.accounting-repair-limit", default_value_t = 64, value_name = "BLOCKS")]
@@ -111,6 +116,28 @@ impl UnicityArgs {
         );
         Ok(())
     }
+
+    /// Reject proof-source settings that could prune required data before services start.
+    fn validate_proof_source(
+        &self,
+        cli_prune: Option<reth_config::PruneConfig>,
+        toml_prune: reth_config::PruneConfig,
+    ) -> eyre::Result<()> {
+        if !self.proof_source {
+            return Ok(());
+        }
+        let effective = match cli_prune {
+            Some(mut cli) => {
+                cli.merge(toml_prune);
+                cli
+            }
+            None => toml_prune,
+        };
+        reth_unicity_payload::prune::validate_proof_retention(
+            &effective.segments,
+            self.companion_retention_depth,
+        )
+    }
 }
 
 fn main() {
@@ -125,6 +152,13 @@ fn main() {
         async move |builder, args: UnicityArgs| {
             let profile = args.profile()?;
             args.validate_retention()?;
+            // Validate before launch starts payload-building and other node services.
+            // Keep the same CLI-over-TOML precedence as LaunchContext::prune_config.
+            let node_config = builder.config();
+            let config_path =
+                node_config.config.clone().unwrap_or_else(|| node_config.datadir().config());
+            let disk_config = RethConfig::from_path(config_path)?;
+            args.validate_proof_source(node_config.prune_config(), disk_config.prune)?;
             let seal = UnicitySealConfig { profile, fee_collector: args.fee_collector };
 
             info!(target: "reth::cli", "Launching Unicity node");
@@ -132,6 +166,7 @@ fn main() {
                 .node(
                     UnicityNode::new(SealJobRegistry::new(), seal)
                         .with_retention(args.retention())
+                        .with_proof_source(args.proof_source)
                         .with_repair_limit(args.accounting_repair_limit),
                 )
                 .launch()
@@ -148,6 +183,8 @@ fn main() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::Address;
+    use reth_prune_types::{PruneMode, ReceiptsLogPruneConfig};
 
     #[test]
     fn companion_retention_covers_accounting_repair() {
@@ -160,9 +197,99 @@ mod tests {
             base_fee_change_denominator: 8,
             companion_retention_depth: Some(ACCOUNTING_WINDOW + 2 - 1),
             accounting_repair_limit: 2,
+            proof_source: false,
         };
         assert!(args.validate_retention().is_err());
         let args = UnicityArgs { companion_retention_depth: Some(ACCOUNTING_WINDOW + 2), ..args };
         assert!(args.validate_retention().is_ok());
+    }
+
+    fn proof_args(enabled: bool, companion_retention_depth: Option<u64>) -> UnicityArgs {
+        UnicityArgs {
+            fee_collector: Address::ZERO,
+            max_gas: 30_000_000,
+            system_gas: 2_000_000,
+            base_fee_floor: 1_000_000,
+            elasticity: 2,
+            base_fee_change_denominator: 8,
+            companion_retention_depth,
+            proof_source: enabled,
+            accounting_repair_limit: 64,
+        }
+    }
+
+    #[test]
+    fn proof_source_refuses_every_pruning_combination_and_accepts_defaults() {
+        let receipt_modes =
+            [None, Some(PruneMode::Full), Some(PruneMode::Before(1)), Some(PruneMode::Distance(1))];
+        let body_modes = receipt_modes;
+        for receipt in receipt_modes {
+            for filter_receipts in [false, true] {
+                for bodies in body_modes {
+                    for companion_depth in [None, Some(1)] {
+                        let mut toml = RethConfig::default();
+                        toml.prune.segments.receipts = receipt;
+                        toml.prune.segments.bodies_history = bodies;
+                        if filter_receipts {
+                            toml.prune.segments.receipts_log_filter = ReceiptsLogPruneConfig(
+                                [(Address::ZERO, PruneMode::Before(1))].into(),
+                            );
+                        }
+                        let should_reject = receipt.is_some() ||
+                            filter_receipts ||
+                            bodies.is_some() ||
+                            companion_depth.is_some();
+                        assert_eq!(
+                            proof_args(true, companion_depth)
+                                .validate_proof_source(None, toml.prune)
+                                .is_err(),
+                            should_reject,
+                            "receipt={receipt:?}, filtered={filter_receipts}, bodies={bodies:?}, companion={companion_depth:?}"
+                        );
+                    }
+                }
+            }
+        }
+
+        // Account/storage history and rebuildable indexes do not remove proof-source material.
+        let mut allowed = RethConfig::default();
+        allowed.prune.segments.account_history = Some(PruneMode::Distance(1));
+        allowed.prune.segments.storage_history = Some(PruneMode::Distance(1));
+        allowed.prune.segments.sender_recovery = Some(PruneMode::Full);
+        allowed.prune.segments.transaction_lookup = Some(PruneMode::Full);
+        assert!(proof_args(true, None).validate_proof_source(None, allowed.prune).is_ok());
+        assert!(proof_args(true, None)
+            .validate_proof_source(None, RethConfig::default().prune)
+            .is_ok());
+    }
+
+    #[test]
+    fn effective_pruning_includes_toml_and_cli_segments() {
+        let mut toml = RethConfig::default().prune;
+        toml.segments.receipts = Some(PruneMode::Full);
+        let cli = reth_config::PruneConfig {
+            segments: reth_prune_types::PruneModes {
+                account_history: Some(PruneMode::Distance(1)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // A CLI override of one segment must not mask a destructive TOML segment.
+        assert!(proof_args(true, None).validate_proof_source(Some(cli), toml.clone()).is_err());
+
+        let cli = reth_config::PruneConfig {
+            segments: reth_prune_types::PruneModes {
+                bodies_history: Some(PruneMode::Distance(1)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        toml.segments.receipts = None;
+        assert!(proof_args(true, None).validate_proof_source(Some(cli), toml).is_err());
+
+        // The feature is opt-in; existing pruning configurations remain accepted without it.
+        let mut destructive = RethConfig::default().prune;
+        destructive.segments.receipts = Some(PruneMode::Full);
+        assert!(proof_args(false, None).validate_proof_source(None, destructive).is_ok());
     }
 }

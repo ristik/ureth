@@ -15,6 +15,8 @@ workspace = true
 [dependencies]
 # reth
 reth-ethereum-cli.workspace = true
+reth-config = { workspace = true, features = ["serde"] }
+reth-prune-types.workspace = true
 reth-unicity-payload.workspace = true
 reth-unicity-execution.workspace = true
 reth-cli-util.workspace = true
