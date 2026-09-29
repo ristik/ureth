@@ -20,6 +20,19 @@ use reth_provider::CanonStateSubscriptions;
 use reth_storage_api::BlockIdReader;
 use reth_unicity_store::{CompanionStore, StoreError};
 
+/// Proof sources must retain complete blocks until archival coverage can license deletion.
+/// Reject retention modes that can discard offline proof-source material.
+pub fn validate_proof_retention(
+    segments: &reth_prune_types::PruneModes,
+    companion_depth: Option<u64>,
+) -> eyre::Result<()> {
+    eyre::ensure!(
+        !segments.has_receipts_pruning() && segments.bodies_history.is_none() && companion_depth.is_none(),
+        "--unicity.proof-source requires indefinite receipts, bodies and companions; disable receipt pruning, receipt log filters, body pruning and companion retention depth"
+    );
+    Ok(())
+}
+
 /// Error from one retention pass.
 #[derive(Debug)]
 #[non_exhaustive]
@@ -203,5 +216,49 @@ pub async fn run_companion_pruner<P>(
                 "companion retention pass failed; the node retains more than configured"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod proof_tests {
+    use super::validate_proof_retention;
+    use alloy_primitives::Address;
+    use reth_node_core::args::DefaultPruningValues;
+    use reth_prune_types::{PruneMode, PruneModes, ReceiptsLogPruneConfig};
+
+    #[test]
+    fn rejects_every_source_of_incomplete_proof_material() {
+        let defaults = DefaultPruningValues::default();
+        let filtered = PruneModes {
+            receipts_log_filter: ReceiptsLogPruneConfig(
+                [(Address::ZERO, PruneMode::Before(1))].into(),
+            ),
+            ..Default::default()
+        };
+        for segments in [
+            defaults.full_prune_modes,
+            defaults.minimal_prune_modes,
+            filtered,
+            PruneModes { receipts: Some(PruneMode::Full), ..Default::default() },
+            PruneModes { receipts: Some(PruneMode::Before(1)), ..Default::default() },
+            PruneModes { receipts: Some(PruneMode::Distance(100_000)), ..Default::default() },
+            PruneModes { bodies_history: Some(PruneMode::Before(1)), ..Default::default() },
+        ] {
+            assert!(validate_proof_retention(&segments, None).is_err());
+        }
+        assert!(validate_proof_retention(&PruneModes::default(), Some(100_000)).is_err());
+    }
+
+    #[test]
+    fn allows_state_history_and_rebuildable_indexes() {
+        let segments = PruneModes {
+            account_history: Some(PruneMode::Distance(100_000)),
+            storage_history: Some(PruneMode::Distance(100_000)),
+            sender_recovery: Some(PruneMode::Full),
+            transaction_lookup: Some(PruneMode::Full),
+            ..Default::default()
+        };
+        assert!(validate_proof_retention(&segments, None).is_ok());
+        assert!(validate_proof_retention(&PruneModes::default(), None).is_ok());
     }
 }
