@@ -3,8 +3,9 @@
 //!
 //! The D2 methods are JSON-RPC, so [`SealBuildInput`] and [`SealCompanion`] are JSON envelopes:
 //! `rootInput` and the array elements are 0x-hex strings carried as [`alloy_primitives::Bytes`],
-//! and `provenance` is a JSON string. The envelope is not commitment-bound. `rootInput` itself is
-//! canonical CBOR, and `input_commitment` is `SHA-256` over its canonical bytes, so
+//! and `provenance` is a JSON string. The build envelope's transition array is checked
+//! byte-for-byte against the committed root-input `D[]`. `rootInput` itself is canonical CBOR, and
+//! `input_commitment` is `SHA-256` over its canonical bytes, so
 //! [`RootInputV2::from_canonical_cbor`] must accept exactly one encoding per value. If two byte
 //! strings could decode to the same [`RootInputV2`], a caller could present one encoding and be
 //! bound to another. It therefore accepts only RFC 8949 deterministic encodings: definite lengths
@@ -34,26 +35,42 @@ use alloy_primitives::{Address, Bytes, B256};
 use reth_primitives_traits::SealedHeader;
 use serde::{Deserialize, Serialize};
 
+/// Maximum encoded size of one compact EVM transition body in `D[]`.
+pub const MAX_EPOCH_TRANSITION_BYTES: usize = 16 * 1024;
+/// Maximum number of committed handoffs summarized by a folded acknowledgement.
+pub const MAX_SUPERSESSION_SPAN: u64 = 64;
+
 /// Build-path parameter `sealBuildInput = { rootInput, transitions }`.
 ///
 /// This is the JSON envelope carried by `engine_forkchoiceUpdatedWithSealV1`. `root_input` is a
 /// CBOR blob, not a structured JSON object, so there is exactly one root-input codec. Call
-/// [`SealBuildInput::decode_root_input`] to get a validated [`RootInputV2`]. `transitions` is the
-/// outer committed-body array the design carries alongside the structured root input; its
-/// relationship to the authenticated sequence remains the authentication boundary's concern.
+/// [`SealBuildInput::decode_root_input`] to get a validated [`RootInputV2`]. `transitions` repeats
+/// the committed-body array inside root input; decoding refuses any mismatch. The caller still
+/// authenticates the transition bodies before execution.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct SealBuildInput {
     /// Canonical CBOR bytes for one root input.
     pub root_input: Bytes,
-    /// Outer committed-body array carried next to the root input.
+    /// Byte-for-byte copy of root input's committed transition array.
     pub transitions: Vec<Bytes>,
 }
 
 impl SealBuildInput {
-    /// Decodes `root_input` through the single canonical [`RootInputV2`] codec.
+    /// Decodes `root_input` and binds the parallel transition envelope to its committed `D[]`.
     pub fn decode_root_input(&self) -> Result<RootInputV2, CanonicalCborError> {
-        RootInputV2::from_canonical_cbor(&self.root_input)
+        let root = RootInputV2::from_canonical_cbor(&self.root_input)?;
+        if root.transitions.len() != self.transitions.len() ||
+            root.transitions
+                .iter()
+                .zip(&self.transitions)
+                .any(|(root_body, envelope_body)| root_body.as_slice() != envelope_body.as_ref())
+        {
+            return Err(CanonicalCborError::InvalidRootInput(
+                "build transition envelope does not match root input",
+            ));
+        }
+        Ok(root)
     }
 }
 
@@ -239,18 +256,27 @@ fn decode_byte_string_array(decoder: &mut Decoder<'_>) -> Result<Vec<Vec<u8>>, C
 pub(crate) fn decode_epoch_transition(
     input: &[u8],
 ) -> Result<crate::EpochTransition, CanonicalCborError> {
+    if input.len() > MAX_EPOCH_TRANSITION_BYTES {
+        return Err(CanonicalCborError::InvalidRootInput("epoch transition exceeds size limit"));
+    }
     let mut outer = Decoder::new(input);
     let arity = outer.read_array()?;
-    if arity != 7 {
-        return Err(CanonicalCborError::WrongArity { expected: 7, found: arity });
+    if arity != 13 {
+        return Err(CanonicalCborError::WrongArity { expected: 13, found: arity });
     }
-    if outer.read_text()? != "UNICITY_HANDOFF_EVM_TRANSITION" || outer.read_uint()? != 2 {
+    if outer.read_text()? != "UNICITY_HANDOFF_EVM_TRANSITION" || outer.read_uint()? != 3 {
         return Err(CanonicalCborError::InvalidRootInput(
             "invalid epoch transition domain or version",
         ));
     }
-    let old_epoch = outer.read_uint()?;
-    let new_epoch = outer.read_uint()?;
+    let old_root_epoch = outer.read_uint()?;
+    let new_root_epoch = outer.read_uint()?;
+    let old_shard_epoch = outer.read_uint()?;
+    let new_shard_epoch = outer.read_uint()?;
+    let old_active_conf_hash = outer.read_word()?;
+    let new_active_conf_hash = outer.read_word()?;
+    let supersession_span = outer.read_uint()?;
+    let supersession_commitment = outer.read_word()?;
     let body_id = outer.read_word()?;
     let genesis_id = outer.read_word()?;
     let ack_bytes = outer.read_bytes()?;
@@ -272,7 +298,34 @@ pub(crate) fn decode_epoch_transition(
     let successor_tr = ack.read_word()?;
     let evm_round = ack.read_uint()?;
     ack.finish()?;
-    if old_epoch.checked_add(1) != Some(new_epoch) ||
+    let root_delta = new_root_epoch.checked_sub(old_root_epoch);
+    let shard_delta = new_shard_epoch.checked_sub(old_shard_epoch);
+    let assignment_changed =
+        new_shard_epoch != old_shard_epoch || new_active_conf_hash != old_active_conf_hash;
+    let span_ok = match root_delta {
+        Some(1) if !assignment_changed => {
+            shard_delta == Some(0) &&
+                supersession_span == 0 &&
+                supersession_commitment == B256::ZERO
+        }
+        Some(1) => {
+            shard_delta == Some(1) &&
+                new_active_conf_hash != old_active_conf_hash &&
+                supersession_span == 0 &&
+                supersession_commitment == B256::ZERO
+        }
+        Some(delta) if delta > 1 => {
+            delta <= MAX_SUPERSESSION_SPAN &&
+                shard_delta == Some(delta) &&
+                new_active_conf_hash != old_active_conf_hash &&
+                supersession_span == delta &&
+                supersession_commitment != B256::ZERO
+        }
+        _ => false,
+    };
+    if !span_ok ||
+        old_active_conf_hash == B256::ZERO ||
+        new_active_conf_hash == B256::ZERO ||
         [body_id, genesis_id, frozen_id, commit_id, frozen_parent, successor_tr]
             .contains(&B256::ZERO) ||
         frozen_parent != successor_parent ||
@@ -281,8 +334,14 @@ pub(crate) fn decode_epoch_transition(
         return Err(CanonicalCborError::InvalidRootInput("invalid epoch transition fields"));
     }
     Ok(crate::EpochTransition {
-        old_epoch,
-        new_epoch,
+        old_root_epoch,
+        new_root_epoch,
+        old_shard_epoch,
+        new_shard_epoch,
+        old_active_conf_hash,
+        new_active_conf_hash,
+        supersession_span,
+        supersession_commitment,
         body_id,
         genesis_id,
         frozen_id,
@@ -520,12 +579,15 @@ mod tests {
     #[test]
     fn shared_epoch_transition_vector_decodes() {
         let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../testdata/evm-transition-v1.json")).unwrap();
+            serde_json::from_str(include_str!("../testdata/evm-transition-v3.json")).unwrap();
         let encoded = fixture["encoded"].as_str().unwrap().strip_prefix("0x").unwrap();
         let encoded = alloy_primitives::hex::decode(encoded).unwrap();
         let transition = decode_epoch_transition(&encoded).unwrap();
-        assert_eq!(transition.old_epoch, fixture["oldEpoch"].as_u64().unwrap());
-        assert_eq!(transition.new_epoch, fixture["newEpoch"].as_u64().unwrap());
+        assert_eq!(transition.old_root_epoch, fixture["oldRootEpoch"].as_u64().unwrap());
+        assert_eq!(transition.new_root_epoch, fixture["newRootEpoch"].as_u64().unwrap());
+        assert_eq!(transition.old_shard_epoch, fixture["oldShardEpoch"].as_u64().unwrap());
+        assert_eq!(transition.new_shard_epoch, fixture["newShardEpoch"].as_u64().unwrap());
+        assert_eq!(transition.supersession_span, fixture["supersessionSpan"].as_u64().unwrap());
         assert_eq!(transition.evm_round, fixture["ack"]["evmRound"].as_u64().unwrap());
     }
 
@@ -737,12 +799,26 @@ mod tests {
     fn seal_build_input_round_trips_as_json() {
         let value = SealBuildInput {
             root_input: sample().canonical_cbor().unwrap().into(),
-            transitions: vec![Bytes::from(vec![0xaa]), Bytes::new()],
+            transitions: vec![],
         };
         let json = serde_json::to_string(&value).unwrap();
         assert!(json.contains("\"rootInput\":\"0x"), "rootInput is a 0x-hex byte string: {json}");
         assert_eq!(serde_json::from_str::<SealBuildInput>(&json).unwrap(), value);
         assert_eq!(value.decode_root_input().unwrap(), sample());
+    }
+
+    #[test]
+    fn build_transition_envelope_must_match_committed_root_input() {
+        let value = SealBuildInput {
+            root_input: sample().canonical_cbor().unwrap().into(),
+            transitions: vec![Bytes::from(vec![0xaa])],
+        };
+        assert_eq!(
+            value.decode_root_input(),
+            Err(CanonicalCborError::InvalidRootInput(
+                "build transition envelope does not match root input",
+            ))
+        );
     }
 
     #[test]

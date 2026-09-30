@@ -1,0 +1,583 @@
+{
+  "profile": "sealRegistry/v2",
+  "specification": "H3 assignment-aware SealRegistry; immutable genesis configuration plus authenticated active assignment",
+  "compiler": {
+    "solc": "0.8.37",
+    "evm_version": "cancun",
+    "optimizer": true,
+    "optimizer_runs": 200,
+    "via_ir": true,
+    "bytecode_hash": "none",
+    "cbor_metadata": false
+  },
+  "abi": [
+    {
+      "type": "function",
+      "name": "assignmentProjectionHash",
+      "inputs": [
+        {
+          "name": "assignment",
+          "type": "tuple",
+          "internalType": "struct SealRegistry.AssignmentProjection",
+          "components": [
+            {
+              "name": "oldRootEpoch",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "oldShardEpoch",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "oldActiveConfHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "newRootEpoch",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "newShardEpoch",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "newActiveConfHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "supersessionSpan",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "supersessionCommitment",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "projectionHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            }
+          ]
+        }
+      ],
+      "outputs": [
+        {
+          "name": "",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "stateMutability": "pure"
+    },
+    {
+      "type": "function",
+      "name": "finalize",
+      "inputs": [
+        {
+          "name": "n",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "sealRegistryCommitment",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "function",
+      "name": "open",
+      "inputs": [
+        {
+          "name": "n",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "rootRound",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "rootEpoch",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "timestamp",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "treeRoot",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "originIdentity",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "trHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "shardConfHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "certifiedRound",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "certEpoch",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "authEpoch",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "stateHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "hasBlockHash",
+          "type": "bool",
+          "internalType": "bool"
+        },
+        {
+          "name": "blockHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "inputCommitment",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "transitionCount",
+          "type": "uint64",
+          "internalType": "uint64"
+        },
+        {
+          "name": "bodyID",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "genesisID",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "frozenID",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "commitID",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "frozenParent",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "successorTR",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "activeConfHash",
+          "type": "bytes32",
+          "internalType": "bytes32"
+        },
+        {
+          "name": "assignment",
+          "type": "tuple",
+          "internalType": "struct SealRegistry.AssignmentProjection",
+          "components": [
+            {
+              "name": "oldRootEpoch",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "oldShardEpoch",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "oldActiveConfHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "newRootEpoch",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "newShardEpoch",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "newActiveConfHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "supersessionSpan",
+              "type": "uint64",
+              "internalType": "uint64"
+            },
+            {
+              "name": "supersessionCommitment",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            },
+            {
+              "name": "projectionHash",
+              "type": "bytes32",
+              "internalType": "bytes32"
+            }
+          ]
+        }
+      ],
+      "outputs": [],
+      "stateMutability": "nonpayable"
+    },
+    {
+      "type": "event",
+      "name": "EpochAcknowledged",
+      "inputs": [
+        {
+          "name": "rootEpoch",
+          "type": "uint64",
+          "indexed": true,
+          "internalType": "uint64"
+        },
+        {
+          "name": "shardEpoch",
+          "type": "uint64",
+          "indexed": true,
+          "internalType": "uint64"
+        },
+        {
+          "name": "activeConfHash",
+          "type": "bytes32",
+          "indexed": true,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "supersessionSpan",
+          "type": "uint64",
+          "indexed": false,
+          "internalType": "uint64"
+        },
+        {
+          "name": "supersessionCommitment",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "bodyID",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "genesisID",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "frozenID",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "commitID",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "frozenParent",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        },
+        {
+          "name": "successorTR",
+          "type": "bytes32",
+          "indexed": false,
+          "internalType": "bytes32"
+        }
+      ],
+      "anonymous": false
+    },
+    {
+      "type": "error",
+      "name": "AssignmentContextMismatch",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ConfigurationMismatch",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "DuplicateAcknowledgement",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "InvalidSupersessionSpan",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "InvalidTransition",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NonCanonicalNullBlockHash",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NotInitialized",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NotOpen",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "NotSystemCaller",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "PreviousNotFinalized",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "RootEpochMismatch",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "RoundNotAhead",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "ShardEpochMismatch",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "StaleRootRound",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "TransitionsUnsupported",
+      "inputs": []
+    },
+    {
+      "type": "error",
+      "name": "WrongOutcomeRound",
+      "inputs": []
+    }
+  ],
+  "runtimeBytecode": "0x60806040526004361015610011575f80fd5b5f3560e01c806345cf824514610230578063aaebf3351461010f5763bacfb3231461003a575f80fd5b3461010b57604036600319011261010b57610053610e39565b60ff60981b1933016100fc5760015f5160206110ad5f395f51905f5254036100ed576001600160401b037fa6dfb02f4e0457f6dc0ca8f4fd82b31c4a0df5261e0214610377f2af855a5ee5549116036100de576024357f435c00c3e0bb551759ef849ef59de7b0a62c300b5c1aa3011d4363b09ddef85a5560025f5160206110ad5f395f51905f5255005b6328c810d960e01b5f5260045ffd5b631bb5f5b360e31b5f5260045ffd5b631e26931d60e11b5f5260045ffd5b5f80fd5b3461010b5761012036600319011261010b576004356001600160401b0381169081810361010b5750602435906001600160401b0382169182810361010b57506064356001600160401b0381169081810361010b57506084356001600160401b0381169081810361010b575060c435916001600160401b0383169283810361010b57506040519460208601947f394497aa6b0d514c897cb6ba50c69ba2730cad8462e4ef800b2ded6572ba7ee7865260408701526060860152604435608086015260a085015260c084015260a43560e084015261010083015260e43561012083015261012082526101408201918083106001600160401b0384111761021c5760408390525190208152602090f35b634e487b7160e01b5f52604160045260245ffd5b3461010b5761040036600319011261010b5761024a610e39565b602435906001600160401b038216820361010b576044356001600160401b038116810361010b57606435926001600160401b038416840361010b5761010435936001600160401b038516850361010b57610124356001600160401b038116810361010b57610144356001600160401b038116810361010b57610184351515610184350361010b576101e435916001600160401b038316830361010b57610120366102e319011261010b5760ff60981b1933016100fc5760027f79b704796b8c2ee2cf835e5113e27bbaf138c9831ce0b1cc259966898323094a5414801590610e10575b610e015760025f5160206110ad5f395f51905f525403610df2577f14386166497930a3efb28f5976da18bcbf7bec69c7b2c449c3ce32552f037844546001600160401b0388161115610de3577fabe1d0722ec7cab6bc8be8343a4900e571bdb46fad619947267449a2b9aa74975460e43503610841577f7671d07e8accfd833bdccd596ad3a1c4a402a090b727f511a073a2498c590ae554907fe77628dabc86b477c0db337bda981ad320031675934be9c596d69ebbc20f1a24547fbcc6e80fb08120fa6610a12120697a935440b6f731eb387496a45ae31fc4f09354946001600160401b038116155f1461088257506001600160401b03881603610873576001600160401b031681148015929061085f575b5050610850576102c43503610841577fc3adc23527bab9702dd784bd0b145d2ab1a7dce35235a0db3dbfd3da7a53143d546001600160401b03831610610832576102043515801590610826575b801561081a575b801561080e575b8015610802575b80156107f6575b8015610721575b610712575b610184351580610706575b6106f7576001600160401b039283167f1dfe98fa5011e0dbfdfc5efa804744e3497514271b58499de63781a9941c9a515582167f459cf503c328e501962bcf0cd8ca53327ab531deeb9155c48d827d2478932c6c556084357f8af142b0300add3b2aec220298bb445eb0c9884bb45fcd5059be6fcd18e7090d5560a4357fbee6419aa5a12f10d4794669dbd882527b590089e967b14012543a23e0b78e725560c4357fe58f62addabf9360d9fcddf3db70a93d2b2ba476996540ecefbbed5ee3cc9c80559281167f47a3f86feb14af4a7e5a1a1fb3362c95b32dfbf03a7a3ca31717f8e829382b3c55610164357fe39f0827feecb5f38ffbd452e7c3556ecd0ba586a94434c3f5a10f846cbbfcea5591829061018435156106ef5760ff60015b167f1b118c38b50e4765caa320a933997b81ec1218283e0c260e18a4609340314deb556101a4357f80ce058bdccaa08590781edd25c9005041ebaba94b6a8941896d46eb6039493155167fc3adc23527bab9702dd784bd0b145d2ab1a7dce35235a0db3dbfd3da7a53143d55167f14386166497930a3efb28f5976da18bcbf7bec69c7b2c449c3ce32552f0378448190556101c4357fa0cbe06c0b5a76b8d67341bd1bd8f162e5d5c6aea162604a10cec0dce4e0d060557fa6dfb02f4e0457f6dc0ca8f4fd82b31c4a0df5261e0214610377f2af855a5ee5555f7f435c00c3e0bb551759ef849ef59de7b0a62c300b5c1aa3011d4363b09ddef85a5560015f5160206110ad5f395f51905f5255005b60ff5f6105e0565b6316b07d6160e01b5f5260045ffd5b506101a43515156104c0565b63a6532e5d60e01b5f5260045ffd5b506001600160401b03610732610e66565b1615806107de575b806107d3575b806107bb575b806107a3575b80610798575b80610780575b80610775575b8061076a575b156104b0565b506103e43515610764565b506103c4351561075e565b506001600160401b03610791610eab565b1615610758565b506103843515610752565b506001600160401b036107b4610e94565b161561074c565b506001600160401b036107cc610e4f565b1615610746565b506103243515610740565b506001600160401b036107ef610e7d565b161561073a565b506102a43515156104a9565b506102843515156104a2565b5061026435151561049b565b50610244351515610494565b5061022435151561048d565b6330570afb60e11b5f5260045ffd5b634afe52a560e11b5f5260045ffd5b6304cc6a7f60e21b5f5260045ffd5b6001600160401b0316141590508780610440565b632f81773960e21b5f5260045ffd5b92949193926001600160401b0316600103610dd45761020435158015610dc9575b8015610dbe575b8015610db3575b8015610da8575b8015610d9d575b61071257806001600160401b036108d4610e4f565b161115610d8e576001600160401b036108eb610e66565b161493841594610d71575b508315610d63575b508215610d3e575b8215610d18575b508115610d07575b8115610ce9575b50610bd6576102c435158015610be5575b610bd657610939610ee2565b7f9071048d24ef915056944fc390854c5afc82c7b780af60912f32c98b8a009850546001600160401b0381146107125760018101809111610bc2577f9071048d24ef915056944fc390854c5afc82c7b780af60912f32c98b8a00985055610204357ff64ae08ca348865e7c42acf81d3a418af899eeafa1c21504ea348c15d212c4b855610224357fdedd17782b4935024a9ff293bbd39d406d127447bf3b1d6ed496032fa0cd58e555610244357fa17f343c4f400f901a88319ee38011c1770dfd251fb8f2afb0e66b3ac0e3d1a555610264357fecd1c378aba52fc330dbbc613de4db55413282426cdedf09fd6ed57a76bc90b555610284357ff4f5ae5954831b1d1559d70dc2cabdc751ef64cc34ab0750efbd97479665f06a556102a4357faf0d5400378db3d13018c5af67f324d41d95126cd3f97f3e3b4ac05ba9afdaeb556001600160401b03610a8a610e94565b167f7671d07e8accfd833bdccd596ad3a1c4a402a090b727f511a073a2498c590ae5556001600160401b03610abd610e4f565b167fe77628dabc86b477c0db337bda981ad320031675934be9c596d69ebbc20f1a245561038435807fbcc6e80fb08120fa6610a12120697a935440b6f731eb387496a45ae31fc4f093556103c435807f1333275c0dde98dea1f7569da4a9013691786d62030b101d14f0f6d68f27fd6655610b36610e4f565b907f73c5b2df0c47d33ef801745d9cfcd62890fe50e237d4ff19797c4aeff0324ec76101006001600160401b0380610b6c610e94565b610b74610eab565b95826040519716875260208701526102043560408701526102243560608701526102443560808701526102643560a08701526102843560c08701526102a43560e087015216941692a46104b5565b634e487b7160e01b5f52601160045260245ffd5b6336b8450360e01b5f5260045ffd5b506102e4356001600160401b0381169081810361010b5750610304356001600160401b0381169081810361010b5750610344356001600160401b0381169081810361010b5750610364356001600160401b0381169081810361010b57506103a435916001600160401b0383169283810361010b57506040519360208501957f394497aa6b0d514c897cb6ba50c69ba2730cad8462e4ef800b2ded6572ba7ee787526040860152606085015261032435608085015260a084015260c08301526103843560e08301526101008201526103c435610120820152610120815261014081018181106001600160401b0382111761021c576040525190206103e435141561092d565b90506001600160401b0380610cfc610e7d565b16911614158661091c565b610384356102c43514159150610915565b6001600160401b03919250166001600160401b03610d34610e94565b161415908761090d565b91506001600160401b0385166001600160401b03610d5a610e4f565b16141591610906565b6103243514159250886108fe565b9093506001600160401b03610d84610e7d565b16141592896108f6565b6377c67afb60e01b5f5260045ffd5b506102a435156108bf565b5061028435156108b8565b5061026435156108b1565b5061024435156108aa565b5061022435156108a3565b636fae6b0d60e11b5f5260045ffd5b6326a5242960e21b5f5260045ffd5b63ea34590160e01b5f5260045ffd5b6321c4e35760e21b5f5260045ffd5b507f1dc271a4e4328f3a46506e6e6e1db1488418d59ca41e005534ed0eda129e6150541561032d565b600435906001600160401b038216820361010b57565b610344356001600160401b038116810361010b5790565b6102e4356001600160401b038116810361010b5790565b610304356001600160401b038116810361010b5790565b610364356001600160401b038116810361010b5790565b6103a4356001600160401b038116810361010b5790565b906001600160401b03809116911603906001600160401b038211610bc257565b610344356001600160401b038116810361010b576102e4356001600160401b038116810361010b57610f1391610ec2565b61036435906001600160401b038216808314158061010b5761030435916001600160401b03831691828414158061010b578383106110a35750505f945f90610f5b8582610ec2565b965b61010b575061010b5781149283611093575b6001600160401b0316926001841461100d575050506001811191821592610ff9575b508115610fe9575b8115610fc8575b508015610fbd575b610fae57565b6340d409eb60e11b5f5260045ffd5b506103c43515610fa8565b90506103a4356001600160401b0381169081810361010b575014155f610fa0565b6103843561032435149150610f99565b6001600160401b031681141591505f610f91565b9193909250906103a4356001600160401b0381169081810361010b575015801590611087575b610fae57611082576001600160401b031660011480159290611072575b821561105f575b5050610bd657565b6001600160401b03925050145f80611057565b6103843561032435149250611050565b505050565b506103c4351515611033565b6103843561032435149350610f6f565b90955f96610f5d56fe2d5c30492e4b770265db26c3b2d89794cb0435f97f91a351ae818c18236222a7",
+  "codeHash": "0x7787f3166565c8e5ebd73801bf71cbacf0cf69f6bcfb8dea8bedbef8198caf38",
+  "slotKeys": [
+    {
+      "name": "layoutVersion",
+      "key": "0x79b704796b8c2ee2cf835e5113e27bbaf138c9831ce0b1cc259966898323094a"
+    },
+    {
+      "name": "genesisCommitment",
+      "key": "0x1dc271a4e4328f3a46506e6e6e1db1488418d59ca41e005534ed0eda129e6150"
+    },
+    {
+      "name": "config.shardConfHash",
+      "key": "0xabe1d0722ec7cab6bc8be8343a4900e571bdb46fad619947267449a2b9aa7497"
+    },
+    {
+      "name": "assignment.epoch",
+      "key": "0x7671d07e8accfd833bdccd596ad3a1c4a402a090b727f511a073a2498c590ae5"
+    },
+    {
+      "name": "assignment.rootEpoch",
+      "key": "0xe77628dabc86b477c0db337bda981ad320031675934be9c596d69ebbc20f1a24"
+    },
+    {
+      "name": "assignment.activeConfHash",
+      "key": "0xbcc6e80fb08120fa6610a12120697a935440b6f731eb387496a45ae31fc4f093"
+    },
+    {
+      "name": "assignment.spanCommitment",
+      "key": "0x1333275c0dde98dea1f7569da4a9013691786d62030b101d14f0f6d68f27fd66"
+    },
+    {
+      "name": "clock.rootRound",
+      "key": "0xc3adc23527bab9702dd784bd0b145d2ab1a7dce35235a0db3dbfd3da7a53143d"
+    },
+    {
+      "name": "origin.rootEpoch",
+      "key": "0x1dfe98fa5011e0dbfdfc5efa804744e3497514271b58499de63781a9941c9a51"
+    },
+    {
+      "name": "origin.timestamp",
+      "key": "0x459cf503c328e501962bcf0cd8ca53327ab531deeb9155c48d827d2478932c6c"
+    },
+    {
+      "name": "origin.treeRoot",
+      "key": "0x8af142b0300add3b2aec220298bb445eb0c9884bb45fcd5059be6fcd18e7090d"
+    },
+    {
+      "name": "origin.identity",
+      "key": "0xbee6419aa5a12f10d4794669dbd882527b590089e967b14012543a23e0b78e72"
+    },
+    {
+      "name": "origin.trHash",
+      "key": "0xe58f62addabf9360d9fcddf3db70a93d2b2ba476996540ecefbbed5ee3cc9c80"
+    },
+    {
+      "name": "round.authorized",
+      "key": "0x14386166497930a3efb28f5976da18bcbf7bec69c7b2c449c3ce32552f037844"
+    },
+    {
+      "name": "input.commitment",
+      "key": "0xa0cbe06c0b5a76b8d67341bd1bd8f162e5d5c6aea162604a10cec0dce4e0d060"
+    },
+    {
+      "name": "certified.round",
+      "key": "0x47a3f86feb14af4a7e5a1a1fb3362c95b32dfbf03a7a3ca31717f8e829382b3c"
+    },
+    {
+      "name": "certified.stateHash",
+      "key": "0xe39f0827feecb5f38ffbd452e7c3556ecd0ba586a94434c3f5a10f846cbbfcea"
+    },
+    {
+      "name": "certified.hasBlockHash",
+      "key": "0x1b118c38b50e4765caa320a933997b81ec1218283e0c260e18a4609340314deb"
+    },
+    {
+      "name": "certified.blockHash",
+      "key": "0x80ce058bdccaa08590781edd25c9005041ebaba94b6a8941896d46eb60394931"
+    },
+    {
+      "name": "phase",
+      "key": "0x2d5c30492e4b770265db26c3b2d89794cb0435f97f91a351ae818c18236222a7"
+    },
+    {
+      "name": "outcomes.round",
+      "key": "0xa6dfb02f4e0457f6dc0ca8f4fd82b31c4a0df5261e0214610377f2af855a5ee5"
+    },
+    {
+      "name": "outcomes.commitment",
+      "key": "0x435c00c3e0bb551759ef849ef59de7b0a62c300b5c1aa3011d4363b09ddef85a"
+    },
+    {
+      "name": "transition.cursor",
+      "key": "0x9071048d24ef915056944fc390854c5afc82c7b780af60912f32c98b8a009850"
+    },
+    {
+      "name": "inbox.consumed",
+      "key": "0x902fa8def05f8c67caa8c59344f53ee4ebbc428d5073e5fbf37e23543232cae5"
+    },
+    {
+      "name": "transition.bodyID",
+      "key": "0xf64ae08ca348865e7c42acf81d3a418af899eeafa1c21504ea348c15d212c4b8"
+    },
+    {
+      "name": "transition.genesisID",
+      "key": "0xdedd17782b4935024a9ff293bbd39d406d127447bf3b1d6ed496032fa0cd58e5"
+    },
+    {
+      "name": "transition.frozenID",
+      "key": "0xa17f343c4f400f901a88319ee38011c1770dfd251fb8f2afb0e66b3ac0e3d1a5"
+    },
+    {
+      "name": "transition.commitID",
+      "key": "0xecd1c378aba52fc330dbbc613de4db55413282426cdedf09fd6ed57a76bc90b5"
+    },
+    {
+      "name": "transition.frozenParent",
+      "key": "0xf4f5ae5954831b1d1559d70dc2cabdc751ef64cc34ab0750efbd97479665f06a"
+    },
+    {
+      "name": "transition.successorTR",
+      "key": "0xaf0d5400378db3d13018c5af67f324d41d95126cd3f97f3e3b4ac05ba9afdaeb"
+    }
+  ],
+  "systemCaller": "0xff00000000000000000000000000000000000001",
+  "genesisStorage": [
+    {
+      "name": "layoutVersion",
+      "value": "2"
+    },
+    {
+      "name": "genesisCommitment",
+      "value": "SHA-256(CBOR(G)), with G built over this codeHash (#153 \u00a75.3 step 2)"
+    },
+    {
+      "name": "config.shardConfHash",
+      "value": "fullShardConfHash (#153 \u00a75.3 step 3)"
+    },
+    {
+      "name": "assignment.epoch",
+      "value": "G.shardEpoch"
+    },
+    {
+      "name": "assignment.rootEpoch",
+      "value": "G.rootEpoch"
+    },
+    {
+      "name": "assignment.activeConfHash",
+      "value": "fullShardConfHash (same as immutable genesis configuration hash)"
+    },
+    {
+      "name": "phase",
+      "value": "2"
+    }
+  ],
+  "genesisNote": "Every other field is absent (zero) at genesis. config.shardConfHash is immutable; assignment.activeConfHash starts equal and changes only after a system-only authenticated acknowledgement. This artifact does not contain a deployable genesis record: genesisCommitment and fullShardConfHash depend on deployment configuration and are produced by the Go construction of #153 \u00a75.3 using codeHash above."
+}
