@@ -23,8 +23,9 @@ The same returned payload/companion pairs are then passed to follower import and
 | Wrong root context / parent binding | INVALID before job insertion | INVALID before Engine forwarding | Wrong parent binding fails before token publication |
 | Wrong order / missing parent token | Refused before job insertion | SYNCING before Engine forwarding | Reordered parent binding is refused |
 | Reorg above certified boundary | — | — | Alternate canonical hash cannot reuse the old companion; the first-certified boundary token remains |
+| Reorg at certified boundary | — | — | Restore replay refuses the alternate canonical block at the boundary height; the original boundary token remains and no token is published for the alternate hash |
 | Interrupted before main DB acceptance | — | Engine INVALID after durable accounting-sidecar write | Canonical-only hydration ignores the orphan sidecar while the DB remains at genesis |
-| Interrupted after main DB acceptance, before companion write | — | Engine VALID is preserved; the injected companion write failure is visible | Canonical accounting token hydrates; no token is invented from a missing companion |
+| Interrupted after main DB acceptance, before companion write | — | Engine VALID is preserved; an error log names the failed companion write and the companion lookup remains `Unknown` | The canonical accounting token hydrates, but replay refuses the missing companion and invents no token |
 
 Independent negative coverage is in the same acceptance change: `UnicityConsensus` reports the
 typed `BaseFeeDiff`, `GasLimitInvalidDecrease` and `TimestampIsInPast` variants for one-field

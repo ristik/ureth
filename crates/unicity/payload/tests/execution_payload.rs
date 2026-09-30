@@ -69,14 +69,16 @@ use reth_unicity_payload::{
 use reth_unicity_store::{open as open_companion_store, CompanionStore, Lookup, StoreError};
 use std::{
     collections::BTreeMap,
+    io::{self, Write},
     ops::{RangeBounds, RangeInclusive},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
     },
 };
 use support::provider::FixtureProvider;
 use tempfile::tempdir;
+use tracing_subscriber::fmt::MakeWriter;
 
 const GENESIS_HASH: B256 =
     b256!("5622984260859a170f61839f6f6114d57a653a3743049216f0451124fa77e269");
@@ -844,12 +846,12 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
 fn consensus_rejects_a_block_level_base_fee_mutation_with_a_typed_error() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
-    let consensus = UnicityConsensus::new(
-        client.chain_spec.clone(),
-        PROFILE,
-        UnicityParentAccountings::default(),
-    );
-    let mut header = payload.block().header().clone();
+    let consensus =
+        UnicityConsensus::new(client.chain_spec, PROFILE, UnicityParentAccountings::default());
+    let header = payload.block().header().clone();
+    let unmutated = SealedHeader::new(header.clone(), header.hash_slow());
+    consensus.validate_header_against_parent(&unmutated, &parent).unwrap();
+    let mut header = header;
     header.base_fee_per_gas = Some(header.base_fee_per_gas.unwrap() + 1);
     let child = SealedHeader::new(header.clone(), header.hash_slow());
 
@@ -865,12 +867,12 @@ fn consensus_rejects_a_block_level_base_fee_mutation_with_a_typed_error() {
 fn consensus_rejects_a_block_level_gas_limit_mutation_with_a_typed_error() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
-    let consensus = UnicityConsensus::new(
-        client.chain_spec.clone(),
-        PROFILE,
-        UnicityParentAccountings::default(),
-    );
-    let mut header = payload.block().header().clone();
+    let consensus =
+        UnicityConsensus::new(client.chain_spec, PROFILE, UnicityParentAccountings::default());
+    let header = payload.block().header().clone();
+    let unmutated = SealedHeader::new(header.clone(), header.hash_slow());
+    consensus.validate_header_against_parent(&unmutated, &parent).unwrap();
+    let mut header = header;
     header.gas_limit = parent.gas_limit / 2;
     let child = SealedHeader::new(header.clone(), header.hash_slow());
 
@@ -886,12 +888,12 @@ fn consensus_rejects_a_block_level_gas_limit_mutation_with_a_typed_error() {
 fn consensus_rejects_a_block_level_timestamp_mutation_with_a_typed_error() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
-    let consensus = UnicityConsensus::new(
-        client.chain_spec.clone(),
-        PROFILE,
-        UnicityParentAccountings::default(),
-    );
-    let mut header = payload.block().header().clone();
+    let consensus =
+        UnicityConsensus::new(client.chain_spec, PROFILE, UnicityParentAccountings::default());
+    let header = payload.block().header().clone();
+    let unmutated = SealedHeader::new(header.clone(), header.hash_slow());
+    consensus.validate_header_against_parent(&unmutated, &parent).unwrap();
+    let mut header = header;
     header.timestamp = parent.timestamp;
     let child = SealedHeader::new(header.clone(), header.hash_slow());
 
@@ -1060,6 +1062,38 @@ impl CompanionSink for FailingCompanionSink {
         _companion: &SealCompanion,
     ) -> Result<(), StoreError> {
         Err(StoreError::Io(std::io::Error::other("forced store failure")))
+    }
+}
+
+#[derive(Clone, Default)]
+struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
+
+struct CapturedLogBuffer(Arc<Mutex<Vec<u8>>>);
+
+impl Write for CapturedLogBuffer {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        let mut buffer =
+            self.0.lock().map_err(|_| io::Error::other("captured log buffer poisoned"))?;
+        buffer.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+impl CapturedLogWriter {
+    fn contents(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl<'a> MakeWriter<'a> for CapturedLogWriter {
+    type Writer = CapturedLogBuffer;
+
+    fn make_writer(&'a self) -> Self::Writer {
+        CapturedLogBuffer(self.0.clone())
     }
 }
 
@@ -1940,10 +1974,8 @@ impl StateProviderFactory for ReplayProvider {
         number: BlockNumberOrTag,
     ) -> ProviderResult<StateProviderBox> {
         let number = match number {
-            BlockNumberOrTag::Latest => self.client.best_number,
-            BlockNumberOrTag::Finalized => self.client.finalized,
-            BlockNumberOrTag::Safe => self.client.finalized,
-            BlockNumberOrTag::Pending => self.client.best_number,
+            BlockNumberOrTag::Latest | BlockNumberOrTag::Pending => self.client.best_number,
+            BlockNumberOrTag::Finalized | BlockNumberOrTag::Safe => self.client.finalized,
             BlockNumberOrTag::Earliest => 0,
             BlockNumberOrTag::Number(number) => number,
         };
@@ -2017,6 +2049,20 @@ impl CapturedRouteHistory {
         let alternate_hash = alternate.header.hash_slow();
         provider.blocks.insert(alternate_hash, alternate.clone());
         provider.client.extra_headers[1] = alternate.header;
+        provider.client.finalized = 1;
+        (provider, alternate_hash)
+    }
+
+    fn reorg_at_first_certified_block(&self) -> (ReplayProvider, B256) {
+        let mut provider = self.recovery_provider(1);
+        let certified_hash = self.blocks[0].payload.block().hash();
+        let mut alternate = provider.blocks.remove(&certified_hash).unwrap();
+        alternate.header.extra_data = vec![0x98].into();
+        let alternate_hash = alternate.header.hash_slow();
+        provider.blocks.insert(alternate_hash, alternate.clone());
+        provider.states.insert(alternate_hash, self.blocks[0].post_state.clone());
+        provider.client.extra_headers[0] = alternate.header;
+        // The alternate canonical hash is at the height the test treats as certified.
         provider.client.finalized = 1;
         (provider, alternate_hash)
     }
@@ -2237,6 +2283,26 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     assert!(reorg_tokens.get(&first.payload.block().hash()).is_some());
     assert!(reorg_tokens.get(&alternate_hash).is_none());
 
+    // A canonical reorg at the certified block itself is outside the accepted history. Restore
+    // must refuse the alternate height-1 block instead of replacing the boundary token.
+    let (boundary_reorg_provider, boundary_alternate_hash) =
+        history.reorg_at_first_certified_block();
+    assert!(boundary_reorg_provider.client.finalized >= 1);
+    assert_ne!(boundary_alternate_hash, first.payload.block().hash());
+    let boundary_reorg_error = reth_unicity_payload::recovery::repair_accounting(
+        &boundary_reorg_provider,
+        &history.store,
+        &boundary_tokens,
+        PROFILE,
+        FEE_COLLECTOR,
+        1,
+        1,
+    )
+    .unwrap_err();
+    assert!(boundary_reorg_error.to_string().contains("companion missing for block 1"));
+    assert!(boundary_tokens.get(&first.payload.block().hash()).is_some());
+    assert!(boundary_tokens.get(&boundary_alternate_hash).is_none());
+
     // Crash boundary A: accounting reached disk, but Engine did not accept the block. On restart
     // the main DB still ends at genesis, so canonical-only hydration ignores the orphan token.
     let (_precommit_dir, precommit_store) = temp_store();
@@ -2284,6 +2350,13 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     let (_, _, _, _, mut postcommit_context, postcommit_validator) = seal_fixture();
     postcommit_context.state.parent_accounting = postcommit_tokens;
     postcommit_context.store = Arc::new(FailingCompanionSink);
+    let write_log = CapturedLogWriter::default();
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(write_log.clone())
+        .finish();
+    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
     let (engine, seen) = fake_engine(PayloadStatus::new(
         PayloadStatusEnum::Valid,
         Some(first.payload.block().hash()),
@@ -2304,7 +2377,13 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     seen.await.unwrap();
     assert!(postcommit_store.get_accounting(first.payload.block().hash()).unwrap().is_some());
     assert!(matches!(postcommit_store.get(first.payload.block().hash()).unwrap(), Lookup::Unknown));
+    let write_log_text = write_log.contents();
+    assert!(
+        write_log_text.contains("failed to retain the seal companion; the verdict is unchanged")
+    );
+    assert!(write_log_text.contains("forced store failure"));
     let restarted_postcommit = UnicityParentAccountings::new().require_durability();
+    let postcommit_store_for_replay = postcommit_store.clone();
     restarted_postcommit.attach_store(postcommit_store);
     let canonical_first = history.recovery_provider(1);
     reth_unicity_payload::recovery::hydrate_accounting(
@@ -2314,6 +2393,17 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     )
     .unwrap();
     assert!(restarted_postcommit.get(&first.payload.block().hash()).is_some());
+    let missing_companion_replay = reth_unicity_payload::recovery::repair_accounting(
+        &canonical_first,
+        &postcommit_store_for_replay,
+        &UnicityParentAccountings::default(),
+        PROFILE,
+        FEE_COLLECTOR,
+        1,
+        1,
+    )
+    .unwrap_err();
+    assert!(missing_companion_replay.to_string().contains("companion missing for block 1"));
 }
 
 /// Builds the genesis-bound execution input for `root`.
