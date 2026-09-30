@@ -2,10 +2,10 @@
 
 mod support;
 
-use alloy_consensus::{Header, SignableTransaction, TxLegacy};
-use alloy_eips::{BlockNumHash, BlockNumberOrTag};
+use alloy_consensus::{transaction::TransactionMeta, Header, SignableTransaction, TxLegacy};
+use alloy_eips::{BlockHashOrNumber, BlockNumHash, BlockNumberOrTag};
 use alloy_genesis::Genesis;
-use alloy_primitives::{b256, Address, TxKind, B256, U256};
+use alloy_primitives::{b256, Address, BlockNumber, TxHash, TxKind, TxNumber, B256, U256};
 use alloy_rpc_types_engine::{
     ExecutionData, ExecutionPayloadV3, ForkchoiceState, PayloadAttributes as EthPayloadAttributes,
     PayloadId, PayloadStatus, PayloadStatusEnum,
@@ -16,9 +16,10 @@ use reth_basic_payload_builder::{
 use reth_chainspec::{ChainInfo, ChainSpec, ChainSpecProvider};
 use reth_consensus::{Consensus, ConsensusError, HeaderValidator};
 use reth_consensus_common::validation::validate_against_parent_eip1559_base_fee;
+use reth_db_api::models::StoredBlockBodyIndices;
 use reth_engine_primitives::{BeaconEngineMessage, ConsensusEngineHandle};
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
-use reth_ethereum_primitives::{Transaction, TransactionSigned};
+use reth_ethereum_primitives::{Block, Receipt, Transaction, TransactionSigned};
 use reth_evm::{execute::Executor, ConfigureEvm};
 use reth_evm_ethereum::EthEvmConfig;
 use reth_payload_builder::{
@@ -28,10 +29,12 @@ use reth_payload_primitives::PayloadAttributes;
 use reth_primitives_traits::{
     crypto::secp256k1::sign_message, RecoveredBlock, SealedHeader, SignedTransaction,
 };
+use reth_revm::database::StateProviderDatabase;
 use reth_rpc_engine_api::{capabilities::EngineCapabilities, EngineApiError};
 use reth_storage_api::{
-    BlockHashReader, BlockIdReader, BlockNumReader, HeaderProvider, StateProviderBox,
-    StateProviderFactory,
+    BlockBodyIndicesProvider, BlockHashReader, BlockIdReader, BlockNumReader, BlockReader,
+    BlockSource, HeaderProvider, ReceiptProvider, StateProviderBox, StateProviderFactory,
+    TransactionVariant, TransactionsProvider,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_transaction_pool::{
@@ -41,7 +44,8 @@ use reth_transaction_pool::{
 use reth_unicity_execution::{
     block::BlockProfile,
     block_executor::{
-        replay_complete, BoundExecutionInput, UnicityEvmConfig, MISSING_EXECUTION_INPUT_ERROR,
+        replay_complete, BoundExecutionInput, CompletedParent, UnicityEvmConfig,
+        MISSING_EXECUTION_INPUT_ERROR,
     },
     derive_beacon_root, derive_prev_randao, derive_timestamp,
     node_evm::{
@@ -55,16 +59,17 @@ use reth_unicity_execution::{
 use reth_unicity_payload::{
     build_seal_companion, prepare_seal_build, refusal_response, unicity_engine_capabilities,
     CompanionPruner, CompanionSink, ExecutionPayloadJobResolver, FixedPayloadJobResolver,
-    PayloadJobResolutionError, ResolvedPayloadJob, SealBuildContext, SealBuildError,
-    SealBuildState, SealCompanionLookup, SealJobRegistry, UnicityConsensus, UnicityEngineApiImpl,
-    UnicityEngineTypes, UnicityEngineValidator, UnicityExecutionPayloadBuilder, UnicityNode,
-    UnicityParentAccountings, UnicityPayloadAttributes, UnicityRetentionConfig,
-    UnicityRpcModuleImpl, UnicityRpcServer, UnicitySealConfig, COMPANION_NOT_RETAINED_CODE,
-    DEFAULT_SEAL_JOB_CAPACITY, SEAL_CAPABILITIES,
+    GetPayloadWithSealV1Response, PayloadJobResolutionError, ResolvedPayloadJob, SealBuildContext,
+    SealBuildError, SealBuildState, SealCompanionLookup, SealJobRegistry, UnicityConsensus,
+    UnicityEngineApiImpl, UnicityEngineTypes, UnicityEngineValidator,
+    UnicityExecutionPayloadBuilder, UnicityNode, UnicityParentAccountings,
+    UnicityPayloadAttributes, UnicityRetentionConfig, UnicityRpcModuleImpl, UnicityRpcServer,
+    UnicitySealConfig, COMPANION_NOT_RETAINED_CODE, DEFAULT_SEAL_JOB_CAPACITY, SEAL_CAPABILITIES,
 };
 use reth_unicity_store::{open as open_companion_store, CompanionStore, Lookup, StoreError};
 use std::{
-    ops::RangeBounds,
+    collections::BTreeMap,
+    ops::{RangeBounds, RangeInclusive},
     sync::{
         atomic::{AtomicUsize, Ordering},
         Arc, OnceLock,
@@ -835,6 +840,69 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     assert_ne!(alt_a.block().header().extra_data, first.block().header().extra_data);
 }
 
+#[test]
+fn consensus_rejects_a_block_level_base_fee_mutation_with_a_typed_error() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let consensus = UnicityConsensus::new(
+        client.chain_spec.clone(),
+        PROFILE,
+        UnicityParentAccountings::default(),
+    );
+    let mut header = payload.block().header().clone();
+    header.base_fee_per_gas = Some(header.base_fee_per_gas.unwrap() + 1);
+    let child = SealedHeader::new(header.clone(), header.hash_slow());
+
+    let error = consensus.validate_header_against_parent(&child, &parent).unwrap_err();
+
+    assert!(
+        matches!(error, ConsensusError::BaseFeeDiff(_)),
+        "unexpected consensus error: {error:?}"
+    );
+}
+
+#[test]
+fn consensus_rejects_a_block_level_gas_limit_mutation_with_a_typed_error() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let consensus = UnicityConsensus::new(
+        client.chain_spec.clone(),
+        PROFILE,
+        UnicityParentAccountings::default(),
+    );
+    let mut header = payload.block().header().clone();
+    header.gas_limit = parent.gas_limit / 2;
+    let child = SealedHeader::new(header.clone(), header.hash_slow());
+
+    let error = consensus.validate_header_against_parent(&child, &parent).unwrap_err();
+
+    assert!(
+        matches!(error, ConsensusError::GasLimitInvalidDecrease { .. }),
+        "unexpected consensus error: {error:?}"
+    );
+}
+
+#[test]
+fn consensus_rejects_a_block_level_timestamp_mutation_with_a_typed_error() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let consensus = UnicityConsensus::new(
+        client.chain_spec.clone(),
+        PROFILE,
+        UnicityParentAccountings::default(),
+    );
+    let mut header = payload.block().header().clone();
+    header.timestamp = parent.timestamp;
+    let child = SealedHeader::new(header.clone(), header.hash_slow());
+
+    let error = consensus.validate_header_against_parent(&child, &parent).unwrap_err();
+
+    assert!(
+        matches!(error, ConsensusError::TimestampIsInPast { .. }),
+        "unexpected consensus error: {error:?}"
+    );
+}
+
 /// The production registry is the bounded replacement for [`FixedPayloadJobResolver`]: it reuses
 /// identical payload ids, rejects ids with different build input, evicts the oldest insertion at
 /// capacity, and shares entries between clones so the payload service and seal methods see the same
@@ -1006,7 +1074,10 @@ fn temp_store() -> (tempfile::TempDir, Arc<CompanionStore>) {
 }
 
 fn seal_input(root: &RootInputV2) -> SealBuildInput {
-    SealBuildInput { root_input: root.canonical_cbor().unwrap().into(), transitions: vec![] }
+    SealBuildInput {
+        root_input: root.canonical_cbor().unwrap().into(),
+        transitions: root.transitions.iter().cloned().map(Into::into).collect(),
+    }
 }
 
 #[test]
@@ -1338,6 +1409,911 @@ async fn fake_engine(
         }
     });
     (ConsensusEngineHandle::new(tx), seen_rx)
+}
+
+struct CapturedRouteBlock {
+    client: Client,
+    parent: Arc<SealedHeader>,
+    post_state: FixtureProvider,
+    root: RootInputV2,
+    payload: EthBuiltPayload,
+    execution_payload: ExecutionPayloadV3,
+    companion: SealCompanion,
+    beacon_root: B256,
+    completed: CompletedParent,
+}
+
+struct CapturedRouteHistory {
+    chain_spec: Arc<ChainSpec>,
+    genesis_state: FixtureProvider,
+    blocks: Vec<CapturedRouteBlock>,
+    store: Arc<CompanionStore>,
+    _dir: tempfile::TempDir,
+}
+
+/// Captures one deterministic paid, idle and root-origin-epoch-boundary chain through the real
+/// builder and getPayload-with-seal response path. The bounded profile keeps the shard epoch at
+/// zero and refuses non-empty shard-transition bodies; the third block therefore exercises the
+/// supported root-origin epoch boundary without claiming shard handoff support.
+async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
+    let (genesis_client, mut parent, _, _, mut context, validator) = seal_fixture();
+    let chain_spec = genesis_client.chain_spec.clone();
+    let genesis_state = genesis_client.state.clone();
+    let (dir, store) = temp_store();
+    context.store = store.clone();
+
+    let mut state = genesis_state.clone();
+    let mut prior_headers = Vec::new();
+    let mut blocks = Vec::new();
+    for (round, root_epoch, paid) in [(1, 1, true), (2, 1, false), (3, 2, false)] {
+        let parent_for_block = parent.clone();
+        let mut root = input(round, round, parent.hash());
+        root.origin.root_epoch = root_epoch;
+        root.origin.reference_time = parent.timestamp + 1;
+        if round == 1 {
+            root.origin.input_record = InputRecordV2 {
+                round: 1,
+                epoch: 0,
+                previous_hash: None,
+                state_hash: Some(B256::repeat_byte(0x31)),
+                timestamp: 1,
+                block_hash: Some(B256::repeat_byte(0x32)),
+            };
+        }
+        if root_epoch == 2 {
+            root.transitions = vec![epoch_ack_transition(1, 2, round, parent.hash())];
+        }
+        let attrs = attributes(&root, parent.timestamp);
+        let client = Client {
+            chain_spec: chain_spec.clone(),
+            parent_hash: parent.hash(),
+            state: state.clone(),
+            extra_headers: prior_headers.clone(),
+            finalized: parent.number,
+            best_number: parent.number,
+            persisted_number: parent.number,
+            fail_finalized: false,
+        };
+        let forkchoice = ForkchoiceState::same_hash(parent.hash());
+        prepare_seal_build(
+            &client,
+            &context,
+            &validator,
+            &forkchoice,
+            Some(&attrs),
+            &seal_input(&root),
+        )
+        .unwrap();
+
+        let pool = test_pool();
+        if paid {
+            let gas_price = u128::from(parent.base_fee_per_gas.unwrap()) + 100;
+            add(
+                &pool,
+                signed_call(0, gas_price, Address::repeat_byte(0x42), U256::from(1), 21_000),
+            )
+            .await;
+        }
+        let config =
+            PayloadConfig::new(parent.clone(), attrs.clone(), attrs.payload_id(&parent.hash()));
+        let builder = UnicityExecutionPayloadBuilder::new(
+            client.clone(),
+            pool,
+            context.registry.clone(),
+            context.builder_config.get().unwrap().clone(),
+        )
+        .with_parent_accounting(context.parent_accounting.clone());
+        let payload = if paid {
+            let args = BuildArguments::new(
+                Default::default(),
+                None,
+                None,
+                config.clone(),
+                Default::default(),
+                None,
+            );
+            match builder.try_build(args).unwrap() {
+                BuildOutcome::Better { payload, .. } | BuildOutcome::Freeze(payload) => payload,
+                other => panic!("unexpected paid fixture build result: {other:?}"),
+            }
+        } else {
+            builder.build_empty_payload(config.clone()).unwrap()
+        };
+
+        let evm = context.registry.resolve(&config).unwrap();
+        let parent_state = state.clone();
+        let recovered = RecoveredBlock::try_new(
+            payload.block().clone().into_block(),
+            vec![],
+            payload.block().hash(),
+        )
+        .unwrap();
+        let replay = replay_complete(
+            &evm,
+            StateProviderDatabase::new(&parent_state),
+            &parent_state,
+            &recovered,
+        )
+        .unwrap();
+        state.apply_bundle(&replay.output.state);
+        state.set_block_hash(payload.block().header().number, payload.block().hash());
+        assert_eq!(state.root(), payload.block().header().state_root);
+
+        let response = get_payload_with_seal_response(
+            client.clone(),
+            context.clone(),
+            validator.clone(),
+            attrs.payload_id(&parent.hash()),
+            payload.clone(),
+        )
+        .await;
+        let companion = build_seal_companion(&root).unwrap();
+        assert_eq!(response.seal_companion, companion);
+        assert_eq!(declared_block_hash(&response.execution_payload), payload.block().hash());
+        match store.get(payload.block().hash()).unwrap() {
+            Lookup::Found(found) => assert_eq!(found, companion),
+            other => panic!("build route did not retain its returned companion: {other:?}"),
+        }
+
+        let beacon_root = payload.block().header().parent_beacon_block_root.unwrap();
+        let completed = replay.parent;
+        prior_headers.push(payload.block().header().clone());
+        parent = Arc::new(payload.block().clone().into_sealed_header());
+        blocks.push(CapturedRouteBlock {
+            client,
+            parent: parent_for_block,
+            post_state: state.clone(),
+            root,
+            payload,
+            execution_payload: response.execution_payload,
+            companion,
+            beacon_root,
+            completed,
+        });
+    }
+
+    CapturedRouteHistory { chain_spec, genesis_state, blocks, store, _dir: dir }
+}
+
+/// Creates the canonical local epoch-ack body consumed by the pinned registry EVM. Its IDs are
+/// deterministic test values; the upstream BFT verifier remains the certificate-authentication
+/// boundary and is not exercised by this Ureth route test.
+fn epoch_ack_transition(old_epoch: u64, new_epoch: u64, round: u64, parent: B256) -> Vec<u8> {
+    fn cbor_head(out: &mut Vec<u8>, major: u8, value: u64) {
+        let prefix = major << 5;
+        if value < 24 {
+            out.push(prefix | value as u8);
+        } else if value <= u8::MAX as u64 {
+            out.extend([prefix | 24, value as u8]);
+        } else if value <= u16::MAX as u64 {
+            out.push(prefix | 25);
+            out.extend((value as u16).to_be_bytes());
+        } else if value <= u32::MAX as u64 {
+            out.push(prefix | 26);
+            out.extend((value as u32).to_be_bytes());
+        } else {
+            out.push(prefix | 27);
+            out.extend(value.to_be_bytes());
+        }
+    }
+
+    fn uint(out: &mut Vec<u8>, value: u64) {
+        cbor_head(out, 0, value);
+    }
+
+    fn array(out: &mut Vec<u8>, len: u64) {
+        cbor_head(out, 4, len);
+    }
+
+    fn bytes(out: &mut Vec<u8>, value: &[u8]) {
+        cbor_head(out, 2, value.len() as u64);
+        out.extend(value);
+    }
+
+    fn text(out: &mut Vec<u8>, value: &str) {
+        cbor_head(out, 3, value.len() as u64);
+        out.extend(value.as_bytes());
+    }
+
+    let mut ack = Vec::new();
+    array(&mut ack, 8);
+    text(&mut ack, "UNICITY_HANDOFF_ACK");
+    uint(&mut ack, 2);
+    for word in
+        [B256::repeat_byte(0x41), B256::repeat_byte(0x42), parent, parent, B256::repeat_byte(0x43)]
+    {
+        bytes(&mut ack, word.as_slice());
+    }
+    uint(&mut ack, round);
+
+    let mut transition = Vec::new();
+    array(&mut transition, 7);
+    text(&mut transition, "UNICITY_HANDOFF_EVM_TRANSITION");
+    uint(&mut transition, 2);
+    uint(&mut transition, old_epoch);
+    uint(&mut transition, new_epoch);
+    bytes(&mut transition, B256::repeat_byte(0x44).as_slice());
+    bytes(&mut transition, B256::repeat_byte(0x45).as_slice());
+    bytes(&mut transition, &ack);
+    transition
+}
+
+async fn get_payload_with_seal_response(
+    client: Client,
+    context: SealBuildContext,
+    validator: UnicityEngineValidator,
+    payload_id: PayloadId,
+    payload: EthBuiltPayload,
+) -> GetPayloadWithSealV1Response {
+    let (store_tx, store_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(serve_resolved_payload(store_rx, payload));
+    let (beacon_tx, _beacon_rx) = tokio::sync::mpsc::unbounded_channel();
+    let handler = UnicityEngineApiImpl::new(
+        client,
+        ConsensusEngineHandle::new(beacon_tx),
+        context,
+        validator,
+        PayloadStore::new(PayloadBuilderHandle::new(store_tx)),
+    );
+    handler.get_payload_with_seal(payload_id).await.unwrap()
+}
+
+/// Block/state reader used only by the restore route test. The captured source blocks are the
+/// canonical DB contents; each state lookup returns the exact pre-block snapshot replay needs.
+#[derive(Debug)]
+struct ReplayProvider {
+    client: Client,
+    blocks: BTreeMap<B256, Block>,
+    states: BTreeMap<B256, FixtureProvider>,
+}
+
+impl ChainSpecProvider for ReplayProvider {
+    type ChainSpec = ChainSpec;
+
+    fn chain_spec(&self) -> Arc<Self::ChainSpec> {
+        self.client.chain_spec()
+    }
+}
+
+impl BlockHashReader for ReplayProvider {
+    fn block_hash(&self, number: u64) -> ProviderResult<Option<B256>> {
+        self.client.block_hash(number)
+    }
+
+    fn canonical_hashes_range(&self, start: u64, end: u64) -> ProviderResult<Vec<B256>> {
+        self.client.canonical_hashes_range(start, end)
+    }
+}
+
+impl BlockNumReader for ReplayProvider {
+    fn chain_info(&self) -> ProviderResult<ChainInfo> {
+        self.client.chain_info()
+    }
+
+    fn best_block_number(&self) -> ProviderResult<BlockNumber> {
+        self.client.best_block_number()
+    }
+
+    fn last_block_number(&self) -> ProviderResult<BlockNumber> {
+        self.client.last_block_number()
+    }
+
+    fn block_number(&self, hash: B256) -> ProviderResult<Option<BlockNumber>> {
+        self.client.block_number(hash)
+    }
+}
+
+impl BlockIdReader for ReplayProvider {
+    fn pending_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
+        self.client.pending_block_num_hash()
+    }
+
+    fn safe_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
+        self.client.safe_block_num_hash()
+    }
+
+    fn finalized_block_num_hash(&self) -> ProviderResult<Option<BlockNumHash>> {
+        self.client.finalized_block_num_hash()
+    }
+}
+
+impl HeaderProvider for ReplayProvider {
+    type Header = Header;
+
+    fn header(&self, block_hash: B256) -> ProviderResult<Option<Self::Header>> {
+        self.client.header(block_hash)
+    }
+
+    fn header_by_number(&self, number: u64) -> ProviderResult<Option<Self::Header>> {
+        self.client.header_by_number(number)
+    }
+
+    fn headers_range(&self, range: impl RangeBounds<u64>) -> ProviderResult<Vec<Self::Header>> {
+        self.client.headers_range(range)
+    }
+
+    fn sealed_header(&self, number: u64) -> ProviderResult<Option<SealedHeader<Self::Header>>> {
+        self.client.sealed_header(number)
+    }
+
+    fn sealed_headers_while(
+        &self,
+        range: impl RangeBounds<u64>,
+        predicate: impl FnMut(&SealedHeader<Self::Header>) -> bool,
+    ) -> ProviderResult<Vec<SealedHeader<Self::Header>>> {
+        self.client.sealed_headers_while(range, predicate)
+    }
+}
+
+impl BlockBodyIndicesProvider for ReplayProvider {
+    fn block_body_indices(&self, _number: u64) -> ProviderResult<Option<StoredBlockBodyIndices>> {
+        Ok(None)
+    }
+
+    fn block_body_indices_range(
+        &self,
+        _range: RangeInclusive<BlockNumber>,
+    ) -> ProviderResult<Vec<StoredBlockBodyIndices>> {
+        Ok(Vec::new())
+    }
+}
+
+impl TransactionsProvider for ReplayProvider {
+    type Transaction = TransactionSigned;
+
+    fn transaction_id(&self, _hash: TxHash) -> ProviderResult<Option<TxNumber>> {
+        Ok(None)
+    }
+
+    fn transaction_by_id(&self, _id: TxNumber) -> ProviderResult<Option<Self::Transaction>> {
+        Ok(None)
+    }
+
+    fn transaction_by_id_unhashed(
+        &self,
+        _id: TxNumber,
+    ) -> ProviderResult<Option<Self::Transaction>> {
+        Ok(None)
+    }
+
+    fn transaction_by_hash(&self, _hash: TxHash) -> ProviderResult<Option<Self::Transaction>> {
+        Ok(None)
+    }
+
+    fn transaction_by_hash_with_meta(
+        &self,
+        _hash: TxHash,
+    ) -> ProviderResult<Option<(Self::Transaction, TransactionMeta)>> {
+        Ok(None)
+    }
+
+    fn transactions_by_block(
+        &self,
+        _block: BlockHashOrNumber,
+    ) -> ProviderResult<Option<Vec<Self::Transaction>>> {
+        Ok(None)
+    }
+
+    fn transactions_by_block_range(
+        &self,
+        _range: impl RangeBounds<BlockNumber>,
+    ) -> ProviderResult<Vec<Vec<Self::Transaction>>> {
+        Ok(Vec::new())
+    }
+
+    fn transactions_by_tx_range(
+        &self,
+        _range: impl RangeBounds<TxNumber>,
+    ) -> ProviderResult<Vec<Self::Transaction>> {
+        Ok(Vec::new())
+    }
+
+    fn senders_by_tx_range(
+        &self,
+        _range: impl RangeBounds<TxNumber>,
+    ) -> ProviderResult<Vec<Address>> {
+        Ok(Vec::new())
+    }
+
+    fn transaction_sender(&self, _id: TxNumber) -> ProviderResult<Option<Address>> {
+        Ok(None)
+    }
+}
+
+impl ReceiptProvider for ReplayProvider {
+    type Receipt = Receipt;
+
+    fn receipt(&self, _id: TxNumber) -> ProviderResult<Option<Self::Receipt>> {
+        Ok(None)
+    }
+
+    fn receipt_by_hash(&self, _hash: TxHash) -> ProviderResult<Option<Self::Receipt>> {
+        Ok(None)
+    }
+
+    fn receipts_by_block(
+        &self,
+        _block: BlockHashOrNumber,
+    ) -> ProviderResult<Option<Vec<Self::Receipt>>> {
+        Ok(None)
+    }
+
+    fn receipts_by_tx_range(
+        &self,
+        _range: impl RangeBounds<TxNumber>,
+    ) -> ProviderResult<Vec<Self::Receipt>> {
+        Ok(Vec::new())
+    }
+
+    fn receipts_by_block_range(
+        &self,
+        _range: RangeInclusive<BlockNumber>,
+    ) -> ProviderResult<Vec<Vec<Self::Receipt>>> {
+        Ok(Vec::new())
+    }
+}
+
+impl BlockReader for ReplayProvider {
+    type Block = Block;
+
+    fn find_block_by_hash(
+        &self,
+        hash: B256,
+        _source: BlockSource,
+    ) -> ProviderResult<Option<Self::Block>> {
+        Ok(self.blocks.get(&hash).cloned())
+    }
+
+    fn block(&self, id: BlockHashOrNumber) -> ProviderResult<Option<Self::Block>> {
+        Ok(match id {
+            BlockHashOrNumber::Hash(hash) => self.blocks.get(&hash).cloned(),
+            BlockHashOrNumber::Number(number) => {
+                self.blocks.values().find(|block| block.header.number == number).cloned()
+            }
+        })
+    }
+
+    fn pending_block(&self) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+        Ok(None)
+    }
+
+    fn pending_block_and_receipts(
+        &self,
+    ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
+        Ok(None)
+    }
+
+    fn recovered_block(
+        &self,
+        _id: BlockHashOrNumber,
+        _transaction_kind: TransactionVariant,
+    ) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+        Ok(None)
+    }
+
+    fn sealed_block_with_senders(
+        &self,
+        _id: BlockHashOrNumber,
+        _transaction_kind: TransactionVariant,
+    ) -> ProviderResult<Option<RecoveredBlock<Self::Block>>> {
+        Ok(None)
+    }
+
+    fn block_range(&self, range: RangeInclusive<BlockNumber>) -> ProviderResult<Vec<Self::Block>> {
+        let mut blocks: Vec<_> = self
+            .blocks
+            .values()
+            .filter(|block| range.contains(&block.header.number))
+            .cloned()
+            .collect();
+        blocks.sort_by_key(|block| block.header.number);
+        Ok(blocks)
+    }
+
+    fn block_with_senders_range(
+        &self,
+        _range: RangeInclusive<BlockNumber>,
+    ) -> ProviderResult<Vec<RecoveredBlock<Self::Block>>> {
+        Ok(Vec::new())
+    }
+
+    fn recovered_block_range(
+        &self,
+        _range: RangeInclusive<BlockNumber>,
+    ) -> ProviderResult<Vec<RecoveredBlock<Self::Block>>> {
+        Ok(Vec::new())
+    }
+
+    fn block_by_transaction_id(&self, _id: TxNumber) -> ProviderResult<Option<BlockNumber>> {
+        Ok(None)
+    }
+}
+
+impl StateProviderFactory for ReplayProvider {
+    fn latest(&self) -> ProviderResult<StateProviderBox> {
+        let hash = self.client.block_hash(self.client.best_number)?.unwrap_or(GENESIS_HASH);
+        self.state_by_block_hash(hash)
+    }
+
+    fn state_by_block_number_or_tag(
+        &self,
+        number: BlockNumberOrTag,
+    ) -> ProviderResult<StateProviderBox> {
+        let number = match number {
+            BlockNumberOrTag::Latest => self.client.best_number,
+            BlockNumberOrTag::Finalized => self.client.finalized,
+            BlockNumberOrTag::Safe => self.client.finalized,
+            BlockNumberOrTag::Pending => self.client.best_number,
+            BlockNumberOrTag::Earliest => 0,
+            BlockNumberOrTag::Number(number) => number,
+        };
+        let hash = self.client.block_hash(number)?.unwrap_or(GENESIS_HASH);
+        self.state_by_block_hash(hash)
+    }
+
+    fn history_by_block_number(&self, number: u64) -> ProviderResult<StateProviderBox> {
+        let hash = self.client.block_hash(number)?.unwrap_or(GENESIS_HASH);
+        self.state_by_block_hash(hash)
+    }
+
+    fn history_by_block_hash(&self, hash: B256) -> ProviderResult<StateProviderBox> {
+        self.state_by_block_hash(hash)
+    }
+
+    fn state_by_block_hash(&self, hash: B256) -> ProviderResult<StateProviderBox> {
+        Ok(Box::new(self.states.get(&hash).expect("captured parent state").clone()))
+    }
+
+    fn pending(&self) -> ProviderResult<StateProviderBox> {
+        self.latest()
+    }
+
+    fn pending_state_by_hash(&self, _hash: B256) -> ProviderResult<Option<StateProviderBox>> {
+        Ok(None)
+    }
+
+    fn maybe_pending(&self) -> ProviderResult<Option<StateProviderBox>> {
+        Ok(None)
+    }
+}
+
+impl CapturedRouteHistory {
+    fn recovery_provider(&self, count: usize) -> ReplayProvider {
+        let selected = &self.blocks[..count];
+        let mut blocks = BTreeMap::new();
+        let mut states = BTreeMap::new();
+        let mut headers = Vec::new();
+        states.insert(GENESIS_HASH, self.genesis_state.clone());
+        for captured in selected {
+            let hash = captured.payload.block().hash();
+            blocks.insert(hash, captured.payload.block().clone().into_block());
+            states.insert(hash, captured.post_state.clone());
+            headers.push(captured.payload.block().header().clone());
+        }
+        let best_number = selected.last().map_or(0, |block| block.payload.block().header().number);
+        ReplayProvider {
+            client: Client {
+                chain_spec: self.chain_spec.clone(),
+                parent_hash: GENESIS_HASH,
+                state: selected
+                    .last()
+                    .map_or_else(|| self.genesis_state.clone(), |block| block.post_state.clone()),
+                extra_headers: headers,
+                finalized: best_number,
+                best_number,
+                persisted_number: best_number,
+                fail_finalized: false,
+            },
+            blocks,
+            states,
+        }
+    }
+
+    fn reorg_above_first_certified_block(&self) -> (ReplayProvider, B256) {
+        let mut provider = self.recovery_provider(2);
+        let old_hash = self.blocks[1].payload.block().hash();
+        let mut alternate = provider.blocks.remove(&old_hash).unwrap();
+        alternate.header.extra_data = vec![0x99].into();
+        let alternate_hash = alternate.header.hash_slow();
+        provider.blocks.insert(alternate_hash, alternate.clone());
+        provider.client.extra_headers[1] = alternate.header;
+        provider.client.finalized = 1;
+        (provider, alternate_hash)
+    }
+}
+
+#[tokio::test]
+async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutations() {
+    let history = capture_paid_idle_transition_fixture().await;
+    assert_eq!(history.blocks.len(), 3);
+    assert_eq!(history.blocks[0].payload.block().body().transactions.len(), 1);
+    assert!(history.blocks[1..].iter().all(|block| block
+        .payload
+        .block()
+        .body()
+        .transactions
+        .is_empty()));
+    assert_eq!(
+        history.blocks[0].root.origin.input_record.block_hash,
+        Some(B256::repeat_byte(0x32)),
+        "the reorg fixture must anchor above a first-certified block"
+    );
+    assert_eq!(history.blocks[0].root.origin.root_epoch, 1);
+    assert_eq!(history.blocks[2].root.origin.root_epoch, 2);
+
+    // Follower import consumes the same captured payload/companion pairs in canonical order.
+    let (_, _, _, _, mut follower_context, validator) = seal_fixture();
+    let (_follower_dir, follower_store) = temp_store();
+    follower_context.store = follower_store.clone();
+    for captured in &history.blocks {
+        let (engine, seen) = fake_engine(PayloadStatus::new(
+            PayloadStatusEnum::Valid,
+            Some(declared_block_hash(&captured.execution_payload)),
+        ))
+        .await;
+        let handler = seal_import_handler(
+            captured.client.clone(),
+            follower_context.clone(),
+            validator.clone(),
+            engine,
+        );
+        let status = handler
+            .new_payload_with_seal(
+                captured.execution_payload.clone(),
+                vec![],
+                captured.beacon_root,
+                &captured.companion,
+            )
+            .await
+            .unwrap();
+        assert!(
+            status.is_valid(),
+            "follower route rejected round {}: {status:?}",
+            captured.root.authorized_round
+        );
+        assert_eq!(
+            seen.await.unwrap().block_hash(),
+            declared_block_hash(&captured.execution_payload)
+        );
+        assert!(follower_context
+            .parent_accounting
+            .get(&declared_block_hash(&captured.execution_payload))
+            .is_some());
+        match follower_store.get(declared_block_hash(&captured.execution_payload)).unwrap() {
+            Lookup::Found(found) => assert_eq!(found, captured.companion),
+            other => panic!(
+                "follower route did not retain round {}: {other:?}",
+                captured.root.authorized_round
+            ),
+        }
+    }
+
+    // Wrong root context is rejected before build-job insertion and before follower forwarding.
+    let first = &history.blocks[0];
+    let mut wrong_root = first.root.clone();
+    wrong_root.network_id = 99;
+    wrong_root.origin.network_id = 99;
+    let wrong_input = SealBuildInput {
+        root_input: wrong_root.canonical_cbor().unwrap().into(),
+        transitions: vec![],
+    };
+    let attrs = attributes(&first.root, first.parent.timestamp);
+    let (_, _, _, _, build_context, build_validator) = seal_fixture();
+    let build_error = prepare_seal_build(
+        &first.client,
+        &build_context,
+        &build_validator,
+        &ForkchoiceState::same_hash(first.parent.hash()),
+        Some(&attrs),
+        &wrong_input,
+    )
+    .unwrap_err();
+    assert!(refusal_response(build_error).unwrap().payload_status.is_invalid());
+    assert!(build_context.registry.is_empty());
+
+    let second = &history.blocks[1];
+    let (_, _, _, _, missing_parent_build, missing_parent_validator) = seal_fixture();
+    let missing_parent_error = prepare_seal_build(
+        &second.client,
+        &missing_parent_build,
+        &missing_parent_validator,
+        &ForkchoiceState::same_hash(second.parent.hash()),
+        Some(&attributes(&second.root, second.parent.timestamp)),
+        &seal_input(&second.root),
+    )
+    .unwrap_err();
+    assert!(matches!(missing_parent_error, SealBuildError::ParentAccountingUnavailable));
+    assert!(missing_parent_build.registry.is_empty());
+
+    let wrong_context_companion = SealCompanion {
+        root_input: wrong_root.canonical_cbor().unwrap().into(),
+        ..first.companion.clone()
+    };
+    let (_, _, _, _, wrong_context, wrong_context_validator) = seal_fixture();
+    let (engine, seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
+    let handler =
+        seal_import_handler(first.client.clone(), wrong_context, wrong_context_validator, engine);
+    let status = handler
+        .new_payload_with_seal(
+            first.execution_payload.clone(),
+            vec![],
+            first.beacon_root,
+            &wrong_context_companion,
+        )
+        .await
+        .unwrap();
+    assert!(status.is_invalid());
+    drop(handler);
+    assert!(seen.await.is_err(), "wrong-context input must be refused before Engine forwarding");
+
+    // An out-of-order follower has the parent header and body but lacks the parent's checked token.
+    let (_, _, _, _, no_parent_token, no_parent_token_validator) = seal_fixture();
+    let (engine, seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
+    let handler = seal_import_handler(
+        second.client.clone(),
+        no_parent_token,
+        no_parent_token_validator,
+        engine,
+    );
+    let status = handler
+        .new_payload_with_seal(
+            second.execution_payload.clone(),
+            vec![],
+            second.beacon_root,
+            &second.companion,
+        )
+        .await
+        .unwrap();
+    assert!(status.is_syncing(), "wrong-order import must remain unavailable, not VALID");
+    drop(handler);
+    assert!(seen.await.is_err(), "wrong-order import must not reach Engine forwarding");
+
+    // Restore replays this exact captured chain from the configured genesis anchor.
+    let provider = history.recovery_provider(history.blocks.len());
+    let restored = UnicityParentAccountings::default();
+    reth_unicity_payload::recovery::repair_accounting(
+        &provider,
+        &history.store,
+        &restored,
+        PROFILE,
+        FEE_COLLECTOR,
+        3,
+        3,
+    )
+    .unwrap();
+    for captured in &history.blocks {
+        let hash = captured.payload.block().hash();
+        assert!(restored.get(&hash).is_some(), "restore replay omitted block {hash}");
+    }
+
+    // A root input that points to the wrong parent/order cannot be used by restore replay.
+    let (_wrong_order_dir, wrong_order_store) = temp_store();
+    wrong_order_store.put(first.payload.block().hash(), 1, &first.companion).unwrap();
+    let mut wrong_order_root = second.root.clone();
+    wrong_order_root.parent_hash = GENESIS_HASH;
+    let wrong_order_companion = build_seal_companion(&wrong_order_root).unwrap();
+    wrong_order_store.put(second.payload.block().hash(), 2, &wrong_order_companion).unwrap();
+    let boundary_tokens = UnicityParentAccountings::default();
+    boundary_tokens.insert_for_chain(
+        first.payload.block().hash(),
+        first.completed,
+        history.chain_spec.chain().id(),
+        history.chain_spec.genesis_hash(),
+    );
+    let wrong_order_provider = history.recovery_provider(2);
+    let wrong_order_error = reth_unicity_payload::recovery::repair_accounting(
+        &wrong_order_provider,
+        &wrong_order_store,
+        &boundary_tokens,
+        PROFILE,
+        FEE_COLLECTOR,
+        2,
+        2,
+    )
+    .unwrap_err();
+    assert!(wrong_order_error.to_string().contains("parent accounting binding failed at 2"));
+
+    // A reorg above the certified boundary cannot reuse the old height-2 companion or drop the
+    // boundary token. The canonical hash is changed while height 1 remains certified.
+    let (reorg_provider, alternate_hash) = history.reorg_above_first_certified_block();
+    let reorg_tokens = UnicityParentAccountings::default();
+    reorg_tokens.insert_for_chain(
+        first.payload.block().hash(),
+        first.completed,
+        history.chain_spec.chain().id(),
+        history.chain_spec.genesis_hash(),
+    );
+    let reorg_error = reth_unicity_payload::recovery::repair_accounting(
+        &reorg_provider,
+        &history.store,
+        &reorg_tokens,
+        PROFILE,
+        FEE_COLLECTOR,
+        2,
+        2,
+    )
+    .unwrap_err();
+    assert!(reorg_error.to_string().contains("companion missing for block 2"));
+    assert!(reorg_tokens.get(&first.payload.block().hash()).is_some());
+    assert!(reorg_tokens.get(&alternate_hash).is_none());
+
+    // Crash boundary A: accounting reached disk, but Engine did not accept the block. On restart
+    // the main DB still ends at genesis, so canonical-only hydration ignores the orphan token.
+    let (_precommit_dir, precommit_store) = temp_store();
+    let precommit_tokens = UnicityParentAccountings::new().require_durability();
+    precommit_tokens.attach_store(precommit_store.clone());
+    let (_, _, _, _, mut precommit_context, precommit_validator) = seal_fixture();
+    precommit_context.state.parent_accounting = precommit_tokens.clone();
+    precommit_context.store = precommit_store.clone();
+    let (engine, seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Invalid {
+        validation_error: "injected interrupted import".into(),
+    }))
+    .await;
+    let handler =
+        seal_import_handler(first.client.clone(), precommit_context, precommit_validator, engine);
+    let status = handler
+        .new_payload_with_seal(
+            first.execution_payload.clone(),
+            vec![],
+            first.beacon_root,
+            &first.companion,
+        )
+        .await
+        .unwrap();
+    assert!(status.is_invalid());
+    seen.await.unwrap();
+    assert!(precommit_store.get_accounting(first.payload.block().hash()).unwrap().is_some());
+    assert!(matches!(precommit_store.get(first.payload.block().hash()).unwrap(), Lookup::Unknown));
+    let restarted_precommit = UnicityParentAccountings::new().require_durability();
+    restarted_precommit.attach_store(precommit_store);
+    let genesis_only = history.recovery_provider(0);
+    reth_unicity_payload::recovery::hydrate_accounting(
+        &genesis_only,
+        &restarted_precommit,
+        PROFILE,
+    )
+    .unwrap();
+    assert!(restarted_precommit.get(&first.payload.block().hash()).is_none());
+
+    // Crash boundary B: Engine accepted the canonical block, but the companion write failed. The
+    // durable accounting record is enough to restore the current head; replay remains impossible
+    // without the companion and must not invent one.
+    let (_postcommit_dir, postcommit_store) = temp_store();
+    let postcommit_tokens = UnicityParentAccountings::new().require_durability();
+    postcommit_tokens.attach_store(postcommit_store.clone());
+    let (_, _, _, _, mut postcommit_context, postcommit_validator) = seal_fixture();
+    postcommit_context.state.parent_accounting = postcommit_tokens;
+    postcommit_context.store = Arc::new(FailingCompanionSink);
+    let (engine, seen) = fake_engine(PayloadStatus::new(
+        PayloadStatusEnum::Valid,
+        Some(first.payload.block().hash()),
+    ))
+    .await;
+    let handler =
+        seal_import_handler(first.client.clone(), postcommit_context, postcommit_validator, engine);
+    let status = handler
+        .new_payload_with_seal(
+            first.execution_payload.clone(),
+            vec![],
+            first.beacon_root,
+            &first.companion,
+        )
+        .await
+        .unwrap();
+    assert!(status.is_valid());
+    seen.await.unwrap();
+    assert!(postcommit_store.get_accounting(first.payload.block().hash()).unwrap().is_some());
+    assert!(matches!(postcommit_store.get(first.payload.block().hash()).unwrap(), Lookup::Unknown));
+    let restarted_postcommit = UnicityParentAccountings::new().require_durability();
+    restarted_postcommit.attach_store(postcommit_store);
+    let canonical_first = history.recovery_provider(1);
+    reth_unicity_payload::recovery::hydrate_accounting(
+        &canonical_first,
+        &restarted_postcommit,
+        PROFILE,
+    )
+    .unwrap();
+    assert!(restarted_postcommit.get(&first.payload.block().hash()).is_some());
 }
 
 /// Builds the genesis-bound execution input for `root`.

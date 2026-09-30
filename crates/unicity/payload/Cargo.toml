@@ -63,6 +63,7 @@ tracing.workspace = true
 [dev-dependencies]
 alloy-genesis.workspace = true
 alloy-trie = { workspace = true, features = ["std"] }
+reth-db-api.workspace = true
 reth-node-builder = { workspace = true, features = ["test-utils"] }
 reth-eth-wire-types.workspace = true
 reth-network-api.workspace = true

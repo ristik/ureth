@@ -1106,6 +1106,56 @@ mod tests {
         );
     }
 
+    #[test]
+    fn public_caller_cannot_advance_the_seal_registry_round() {
+        let parent = genesis_db();
+        let (_, mut candidate) = execute_registry_transition(
+            &executable_input(1, 1),
+            &parent,
+            ExecutionConfig { system_gas_limit: 500_000 },
+        )
+        .unwrap();
+
+        let mut next = executable_input(2, 2);
+        next.origin.input_record = InputRecordV2 {
+            round: 1,
+            epoch: 0,
+            previous_hash: Some(B256::repeat_byte(0x31)),
+            state_hash: Some(B256::repeat_byte(0x31)),
+            timestamp: 1,
+            block_hash: None,
+        };
+        let prepared = prepare_transition(&next).unwrap();
+        let public_caller = Address::repeat_byte(0x42);
+        let mut evm = Context::mainnet()
+            .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecId::CANCUN))
+            .with_db(&mut candidate)
+            .build_mainnet();
+        let mut open =
+            TxEnv::new_system_tx_with_caller(public_caller, SEAL_REGISTRY, prepared.open_data);
+        open.gas_limit = 500_000;
+        evm.ctx_mut().set_tx(open);
+        let result = MainnetHandler::<
+            _,
+            revm::context_interface::result::EVMError<core::convert::Infallible>,
+            _,
+        >::default()
+        .run_system_call(&mut evm)
+        .unwrap();
+        let state = evm.ctx_mut().journal_mut().finalize();
+        evm.ctx_mut().db_mut().commit(state);
+        drop(evm);
+
+        assert!(!result.is_success(), "a public caller must not execute privileged open");
+        assert_eq!(
+            candidate
+                .storage_ref(SEAL_REGISTRY, U256::from_be_bytes(OUTCOMES_ROUND_SLOT.0))
+                .unwrap(),
+            U256::from(1),
+            "a refused public call must leave the privileged round cursor unchanged"
+        );
+    }
+
     fn assert_registry_projection(
         db: &CacheDB<EmptyDB>,
         round: u64,
