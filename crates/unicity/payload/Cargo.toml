@@ -63,6 +63,7 @@ tracing.workspace = true
 [dev-dependencies]
 alloy-genesis.workspace = true
 alloy-trie = { workspace = true, features = ["std"] }
+reth-db-api.workspace = true
 reth-node-builder = { workspace = true, features = ["test-utils"] }
 reth-eth-wire-types.workspace = true
 reth-network-api.workspace = true
@@ -77,4 +78,5 @@ revm.workspace = true
 jsonrpsee = { workspace = true, features = ["client"] }
 serde_json = { workspace = true, features = ["std"] }
 tempfile.workspace = true
+tracing-subscriber.workspace = true
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread", "sync"] }
