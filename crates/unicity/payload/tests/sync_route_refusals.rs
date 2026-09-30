@@ -53,7 +53,7 @@ async fn launch_unicity_network() -> eyre::Result<NoopNetwork> {
         .await?;
     // The concrete return type makes this a production-builder assertion: changing the Unicity
     // node back to Reth's normal network builder makes this regression test stop compiling.
-    Ok(node.network.clone())
+    Ok(node.network)
 }
 
 #[tokio::test]
