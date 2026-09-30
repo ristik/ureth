@@ -1287,11 +1287,71 @@ where
 
 #[cfg(test)]
 mod tests {
-    use super::{companion_store_path, SealConfigV1};
+    use super::{
+        companion_store_path, GetPayloadWithSealV1Response, SealConfigV1, UnicityEngineApiModule,
+        UnicityEngineApiServer, DEFERRED_NEW_PAYLOAD_METHODS, SEAL_CAPABILITIES,
+    };
     use crate::node::UnicitySealConfig;
-    use alloy_primitives::Address;
-    use reth_unicity_execution::block::BlockProfile;
+    use alloy_primitives::{Address, B256};
+    use alloy_rpc_types_engine::{ForkchoiceState, ForkchoiceUpdated, PayloadId, PayloadStatus};
+    use jsonrpsee::{
+        core::RpcResult,
+        types::{ErrorObjectOwned, Response},
+        RpcModule,
+    };
+    use reth_rpc_api::IntoEngineApiRpcModule;
+    use reth_unicity_execution::{
+        block::BlockProfile,
+        wire::{SealBuildInput, SealCompanion},
+    };
     use std::path::Path;
+
+    struct TestStockEngineApi(RpcModule<()>);
+
+    impl IntoEngineApiRpcModule for TestStockEngineApi {
+        fn into_rpc_module(self) -> RpcModule<()> {
+            self.0
+        }
+    }
+
+    struct TestSealEngineApi;
+
+    fn unused_rpc_error() -> ErrorObjectOwned {
+        ErrorObjectOwned::owned(-32000, "unused test method", None::<()>)
+    }
+
+    #[async_trait::async_trait]
+    impl UnicityEngineApiServer for TestSealEngineApi {
+        async fn seal_config_v1(&self) -> RpcResult<SealConfigV1> {
+            Err(unused_rpc_error())
+        }
+
+        async fn fork_choice_updated_with_seal_v1(
+            &self,
+            _fork_choice_state: ForkchoiceState,
+            _payload_attributes: Option<super::UnicityPayloadAttributes>,
+            _seal_build_input: SealBuildInput,
+        ) -> RpcResult<ForkchoiceUpdated> {
+            Err(unused_rpc_error())
+        }
+
+        async fn get_payload_with_seal_v1(
+            &self,
+            _payload_id: PayloadId,
+        ) -> RpcResult<GetPayloadWithSealV1Response> {
+            Err(unused_rpc_error())
+        }
+
+        async fn new_payload_with_seal_v1(
+            &self,
+            _payload: super::ExecutionPayloadV3,
+            _expected_blob_versioned_hashes: Vec<B256>,
+            _parent_beacon_block_root: B256,
+            _seal_companion: SealCompanion,
+        ) -> RpcResult<PayloadStatus> {
+            Err(unused_rpc_error())
+        }
+    }
 
     #[test]
     fn seal_config_rpc_projects_the_node_owned_profile() {
@@ -1324,5 +1384,38 @@ mod tests {
             companion_store_path(Path::new("/data/mainnet")),
             Path::new("/data/mainnet/unicity/companions")
         );
+    }
+
+    #[tokio::test]
+    async fn generic_engine_pipeline_sync_methods_are_refused() {
+        let mut stock = RpcModule::new(());
+        for method in DEFERRED_NEW_PAYLOAD_METHODS {
+            stock.register_method(method, |_, _, _| ()).unwrap();
+        }
+        stock.register_method("engine_forkchoiceUpdatedV3", |_, _, _| ()).unwrap();
+
+        let module = UnicityEngineApiModule::new(TestStockEngineApi(stock), TestSealEngineApi)
+            .into_rpc_module();
+        let registered: Vec<_> = module.method_names().collect();
+        for method in DEFERRED_NEW_PAYLOAD_METHODS {
+            assert!(!registered.contains(method), "{method} would bypass paired-seal admission");
+            let request = format!(r#"{{"jsonrpc":"2.0","method":"{method}","params":[],"id":1}}"#);
+            let (response, _) = module.raw_json_request(&request, 1).await.unwrap();
+            let response: Response<'_, serde_json::Value> =
+                serde_json::from_str(response.get()).unwrap();
+            let result: Result<
+                jsonrpsee::types::response::Success<'_, serde_json::Value>,
+                ErrorObjectOwned,
+            > = response.try_into();
+            let error = result.unwrap_err();
+            assert_eq!(error.code(), -32601, "{method} must fail as unavailable");
+        }
+        for method in SEAL_CAPABILITIES {
+            assert!(
+                registered.contains(method),
+                "the paired-seal route {method} must remain registered"
+            );
+        }
+        assert!(registered.contains(&"engine_forkchoiceUpdatedV3"));
     }
 }
