@@ -29,9 +29,11 @@ use std::sync::{Arc, Mutex};
 use support::provider::FixtureProvider;
 
 const GENESIS_HASH: B256 =
-    b256!("5622984260859a170f61839f6f6114d57a653a3743049216f0451124fa77e269");
+    b256!("efbe99d08e86d7e06034bfcb0d48f0f40a92b321fb3f96ca82a58e83d0c62363");
 const GENESIS_ROOT: B256 =
-    b256!("cd7b3a14c0f90bf0a7acf6dd9e824b27b3bab825aeccfa2699539e4810ed65b4");
+    b256!("868d8ac89ecb4bd0ab588ab97aba438a51898b0eaf18860a054b224897100f4a");
+const INITIAL_ACTIVE_CONF_HASH: B256 =
+    b256!("002a719ed27ff7b185660ac29fe1f32269b0e3ab3f126716a52c47ec2b8a92dd");
 const FEE_COLLECTOR: Address = Address::new([0x77; 20]);
 const PROFILE: BlockProfile = BlockProfile {
     max_gas: 30_000_001,
@@ -108,9 +110,7 @@ fn input(round: u64, root_round: u64, parent_hash: B256) -> RootInputV2 {
                 block_hash: None,
             },
             tr_hash: technical_record_hash(&technical),
-            shard_conf_hash: b256!(
-                "002a719ed27ff7b185660ac29fe1f32269b0e3ab3f126716a52c47ec2b8a92dd"
-            ),
+            shard_conf_hash: INITIAL_ACTIVE_CONF_HASH,
         },
         technical,
         transitions: vec![],
@@ -155,9 +155,14 @@ fn acknowledgement_bytes(parent: B256) -> Vec<u8> {
         bytes(&mut ack, word.as_slice());
     }
     ack.push(1);
-    let mut transition = vec![0x87];
+    let new_conf = B256::repeat_byte(0x56);
+    let mut transition = vec![0x8d];
     text(&mut transition, "UNICITY_HANDOFF_EVM_TRANSITION");
-    transition.extend_from_slice(&[2, 1, 2]);
+    transition.extend_from_slice(&[3, 1, 2, 0, 1]);
+    bytes(&mut transition, INITIAL_ACTIVE_CONF_HASH.as_slice());
+    bytes(&mut transition, new_conf.as_slice());
+    transition.push(0);
+    bytes(&mut transition, B256::ZERO.as_slice());
     bytes(&mut transition, B256::repeat_byte(0x44).as_slice());
     bytes(&mut transition, B256::repeat_byte(0x45).as_slice());
     bytes(&mut transition, &ack);
@@ -174,8 +179,31 @@ fn acknowledgement_replays_before_a_paid_successor_transaction() {
     provider.set_block_hash(0, GENESIS_HASH);
     let mut ack_input = input(1, 1, GENESIS_HASH);
     ack_input.origin.root_epoch = 2;
+    ack_input.certified_epoch = 0;
+    ack_input.authorized_epoch = 1;
+    ack_input.technical.epoch = 1;
+    ack_input.origin.input_record.epoch = 0;
+    ack_input.origin.shard_conf_hash = B256::repeat_byte(0x56);
+    ack_input.origin.tr_hash = technical_record_hash(&ack_input.technical);
     ack_input.transitions = vec![acknowledgement_bytes(GENESIS_HASH)];
     let ack_input = Arc::new(ack_input);
+    // A same-height uncertified fork is not the frozen parent named by this acknowledgement.
+    let mut fork_header = chain_spec.genesis_header().clone();
+    fork_header.extra_data = vec![0x99].into();
+    let fork_hash = fork_header.hash_slow();
+    let fork_parent = SealedHeader::new(fork_header, fork_hash);
+    assert_ne!(fork_hash, GENESIS_HASH);
+    assert!(
+        BoundExecutionInput::from_validated_genesis(
+            ack_input.clone(),
+            PROFILE,
+            &fork_parent,
+            GENESIS_HASH,
+            FEE_COLLECTOR,
+        )
+        .is_err(),
+        "the ack candidate must be rebuilt on the certified frozen parent"
+    );
     let bound = Arc::new(
         BoundExecutionInput::from_validated_genesis(
             ack_input.clone(),
@@ -245,6 +273,12 @@ fn acknowledgement_replays_before_a_paid_successor_transaction() {
     assert_eq!(post_ack.root(), ack_header.state_root);
     let mut next_input = input(2, 2, ack_header.hash());
     next_input.origin.root_epoch = 2;
+    next_input.certified_epoch = 1;
+    next_input.authorized_epoch = 1;
+    next_input.technical.epoch = 1;
+    next_input.origin.input_record.epoch = 1;
+    next_input.origin.shard_conf_hash = B256::repeat_byte(0x56);
+    next_input.origin.tr_hash = technical_record_hash(&next_input.technical);
     let next_input = Arc::new(next_input);
     let next_bound = Arc::new(
         BoundExecutionInput::from_completed_parent(

@@ -81,7 +81,7 @@ use tempfile::tempdir;
 use tracing_subscriber::fmt::MakeWriter;
 
 const GENESIS_HASH: B256 =
-    b256!("5622984260859a170f61839f6f6114d57a653a3743049216f0451124fa77e269");
+    b256!("efbe99d08e86d7e06034bfcb0d48f0f40a92b321fb3f96ca82a58e83d0c62363");
 const FEE_COLLECTOR: Address = Address::new([0x77; 20]);
 const PROFILE: BlockProfile = BlockProfile {
     max_gas: 30_000_001,
@@ -1466,9 +1466,8 @@ struct CapturedRouteHistory {
 }
 
 /// Captures one deterministic paid, idle and root-origin-epoch-boundary chain through the real
-/// builder and getPayload-with-seal response path. The bounded profile keeps the shard epoch at
-/// zero and refuses non-empty shard-transition bodies; the third block therefore exercises the
-/// supported root-origin epoch boundary without claiming shard handoff support.
+/// builder and getPayload-with-seal response path. The third block is an ack-only EVM assignment
+/// transition on the frozen parent; follower import and restore replay consume the same bytes.
 async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
     let (genesis_client, mut parent, _, _, mut context, validator) = seal_fixture();
     let chain_spec = genesis_client.chain_spec.clone();
@@ -1495,7 +1494,26 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
             };
         }
         if root_epoch == 2 {
-            root.transitions = vec![epoch_ack_transition(1, 2, round, parent.hash())];
+            let old_conf = root.origin.shard_conf_hash;
+            let new_conf = B256::repeat_byte(0x56);
+            root.certified_epoch = 0;
+            root.authorized_epoch = 1;
+            root.technical.epoch = 1;
+            root.origin.input_record.epoch = 0;
+            root.origin.shard_conf_hash = new_conf;
+            root.origin.tr_hash = technical_record_hash(&root.technical);
+            root.transitions = vec![epoch_ack_transition(EpochAck {
+                old_root_epoch: 1,
+                new_root_epoch: 2,
+                old_shard_epoch: 0,
+                new_shard_epoch: 1,
+                old_active_conf_hash: old_conf,
+                new_active_conf_hash: new_conf,
+                span: 0,
+                span_commitment: B256::ZERO,
+                round,
+                parent: parent.hash(),
+            })];
         }
         let attrs = attributes(&root, parent.timestamp);
         let client = Client {
@@ -1612,7 +1630,32 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
 /// Creates the canonical local epoch-ack body consumed by the pinned registry EVM. Its IDs are
 /// deterministic test values; the upstream BFT verifier remains the certificate-authentication
 /// boundary and is not exercised by this Ureth route test.
-fn epoch_ack_transition(old_epoch: u64, new_epoch: u64, round: u64, parent: B256) -> Vec<u8> {
+struct EpochAck {
+    old_root_epoch: u64,
+    new_root_epoch: u64,
+    old_shard_epoch: u64,
+    new_shard_epoch: u64,
+    old_active_conf_hash: B256,
+    new_active_conf_hash: B256,
+    span: u64,
+    span_commitment: B256,
+    round: u64,
+    parent: B256,
+}
+
+fn epoch_ack_transition(ack: EpochAck) -> Vec<u8> {
+    let EpochAck {
+        old_root_epoch,
+        new_root_epoch,
+        old_shard_epoch,
+        new_shard_epoch,
+        old_active_conf_hash,
+        new_active_conf_hash,
+        span,
+        span_commitment,
+        round,
+        parent,
+    } = ack;
     fn cbor_head(out: &mut Vec<u8>, major: u8, value: u64) {
         let prefix = major << 5;
         if value < 24 {
@@ -1661,11 +1704,17 @@ fn epoch_ack_transition(old_epoch: u64, new_epoch: u64, round: u64, parent: B256
     uint(&mut ack, round);
 
     let mut transition = Vec::new();
-    array(&mut transition, 7);
+    array(&mut transition, 13);
     text(&mut transition, "UNICITY_HANDOFF_EVM_TRANSITION");
-    uint(&mut transition, 2);
-    uint(&mut transition, old_epoch);
-    uint(&mut transition, new_epoch);
+    uint(&mut transition, 3);
+    uint(&mut transition, old_root_epoch);
+    uint(&mut transition, new_root_epoch);
+    uint(&mut transition, old_shard_epoch);
+    uint(&mut transition, new_shard_epoch);
+    bytes(&mut transition, old_active_conf_hash.as_slice());
+    bytes(&mut transition, new_active_conf_hash.as_slice());
+    uint(&mut transition, span);
+    bytes(&mut transition, span_commitment.as_slice());
     bytes(&mut transition, B256::repeat_byte(0x44).as_slice());
     bytes(&mut transition, B256::repeat_byte(0x45).as_slice());
     bytes(&mut transition, &ack);

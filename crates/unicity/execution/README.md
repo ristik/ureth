@@ -1,9 +1,25 @@
 # Unicity execution kernel
 
-This inactive crate is the bounded M1 execution unit for the pinned `SealRegistry` v1 contract. It
-derives canonical v2 CBOR commitments from structured input, checks the technical-record hash and
-pinned registry code hash, then executes `open` followed by `finalize` with revm system-call
-semantics. The two calls share one gross, pre-refund gas cap. Only a fully finalized cloned state is
+This crate contains the bounded execution kernel and shared Reth block-execution adapter. H3 pins
+`SealRegistry` v2 to unicity-pos-contracts `h3/contracts-assignment` at
+`8b30801afaa887db0d7aa2e4957ecae2c01293e4`, including the runtime in
+`testdata/seal-registry-v2.json`. Its runtime code hash is
+`0x7787f3166565c8e5ebd73801bf71cbacf0cf69f6bcfb8dea8bedbef8198caf38`.
+
+Root-input v2 keeps its existing tuple. Its transition list now accepts one canonical
+`UNICITY_HANDOFF_EVM_TRANSITION/v3` body with the assignment's old/new root and shard epochs,
+active configuration hashes, and bounded supersession span. A root jump larger than one is accepted
+only with `span == rootDelta`, matching shard delta, a nonzero span commitment, and a span no larger
+than 64. The paired BFT verifier authenticates the ordered handoff history before this input reaches
+Ureth; this crate does not verify root or shard signatures. Build envelopes must repeat exactly the
+same transition bytes as root-input `D[]`, and the decoder refuses any mismatch.
+
+The kernel checks the certified/input-record epoch pairing on every path. Ordinary inputs require
+the certified and authorized shard epochs to match; an acknowledgement may authorize the installed
+successor epoch while certifying the frozen parent's previous epoch. The registry's immutable genesis
+configuration hash is loaded from parent state, while the authenticated active hash is supplied by
+the root origin/transition. The kernel then executes `open` followed by `finalize` with revm system-call
+semantics. Both calls share one gross, pre-refund gas cap. Only a fully finalized cloned state is
 returned; errors publish no state.
 
 The shared adapter wraps Reth's real Ethereum block executor for build and replay. One immutable job
@@ -33,8 +49,9 @@ genesis JSON whose pinned reth companion records genesis hash
 `system-outcome-vectors.json` was generated independently through bft-core
 `evmroot.SealRegistryCommitment` at `c9beef6c`.
 
-`signed-beacon-genesis.json` is a test-only standard-JSON variant generated with geth 1.14.11. It
-adds the stock beacon-roots code and funds the public secp256k1 scalar-1 test signer; it is never a
-deployment default. Its independent oracle pins genesis hash
-`0x5622984260859a170f61839f6f6114d57a653a3743049216f0451124fa77e269` and state root
-`0xcd7b3a14c0f90bf0a7acf6dd9e824b27b3bab825aeccfa2699539e4810ed65b4`.
+`seal-registry-v2-genesis.json` is a test-only H3-shaped genesis that substitutes the pinned v2
+runtime and initializes the assignment active hash. `generate-h3-assignment-beacon-genesis.go`
+adds the stock beacon-roots code and funds the public secp256k1 scalar-1 test signer; neither file
+is a deployment default. Its independent geth 1.14.11 oracle pins genesis hash
+`0xefbe99d08e86d7e06034bfcb0d48f0f40a92b321fb3f96ca82a58e83d0c62363` and state root
+`0x868d8ac89ecb4bd0ab588ab97aba438a51898b0eaf18860a054b224897100f4a`.
