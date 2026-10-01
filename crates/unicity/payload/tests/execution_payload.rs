@@ -1502,18 +1502,18 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
             root.origin.input_record.epoch = 0;
             root.origin.shard_conf_hash = new_conf;
             root.origin.tr_hash = technical_record_hash(&root.technical);
-            root.transitions = vec![epoch_ack_transition(
-                1,
-                2,
-                0,
-                1,
-                old_conf,
-                new_conf,
-                0,
-                B256::ZERO,
+            root.transitions = vec![epoch_ack_transition(EpochAck {
+                old_root_epoch: 1,
+                new_root_epoch: 2,
+                old_shard_epoch: 0,
+                new_shard_epoch: 1,
+                old_active_conf_hash: old_conf,
+                new_active_conf_hash: new_conf,
+                span: 0,
+                span_commitment: B256::ZERO,
                 round,
-                parent.hash(),
-            )];
+                parent: parent.hash(),
+            })];
         }
         let attrs = attributes(&root, parent.timestamp);
         let client = Client {
@@ -1630,7 +1630,7 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
 /// Creates the canonical local epoch-ack body consumed by the pinned registry EVM. Its IDs are
 /// deterministic test values; the upstream BFT verifier remains the certificate-authentication
 /// boundary and is not exercised by this Ureth route test.
-fn epoch_ack_transition(
+struct EpochAck {
     old_root_epoch: u64,
     new_root_epoch: u64,
     old_shard_epoch: u64,
@@ -1641,7 +1641,21 @@ fn epoch_ack_transition(
     span_commitment: B256,
     round: u64,
     parent: B256,
-) -> Vec<u8> {
+}
+
+fn epoch_ack_transition(ack: EpochAck) -> Vec<u8> {
+    let EpochAck {
+        old_root_epoch,
+        new_root_epoch,
+        old_shard_epoch,
+        new_shard_epoch,
+        old_active_conf_hash,
+        new_active_conf_hash,
+        span,
+        span_commitment,
+        round,
+        parent,
+    } = ack;
     fn cbor_head(out: &mut Vec<u8>, major: u8, value: u64) {
         let prefix = major << 5;
         if value < 24 {
