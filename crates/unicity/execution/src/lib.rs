@@ -438,7 +438,7 @@ pub(crate) fn prepare_transition(
     })
 }
 
-fn zero_assignment_projection() -> AssignmentProjection {
+const fn zero_assignment_projection() -> AssignmentProjection {
     AssignmentProjection {
         oldRootEpoch: 0,
         oldShardEpoch: 0,
@@ -467,7 +467,7 @@ fn assignment_projection(transition: EpochTransition) -> AssignmentProjection {
     }
 }
 
-/// Mirrors SealRegistry's `abi.encode(domain, first eight assignment projection fields)`.
+/// Mirrors `SealRegistry`'s `abi.encode(domain, first eight assignment projection fields)`.
 fn assignment_projection_hash(transition: EpochTransition) -> B256 {
     let domain = keccak256("unicity.seal-registry.v2/assignment-ack-projection");
     let mut encoded = Vec::with_capacity(9 * 32);
@@ -1430,6 +1430,7 @@ mod tests {
         );
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn transition_bytes(
         old_root_epoch: u64,
         new_root_epoch: u64,
@@ -1763,19 +1764,38 @@ mod tests {
         let new_conf = B256::repeat_byte(0x22);
         let missing = transition_bytes(1, 3, 1, 3, old_conf, new_conf, 0, B256::ZERO, 1, parent);
         assert!(wire::decode_epoch_transition(&missing).is_err());
-        let oversized = transition_bytes(
+        let max = wire::MAX_SUPERSESSION_SPAN;
+        // Every rule except the bound holds (shard delta == span == root delta, hash changed,
+        // nonzero commitment), so only the bound check can refuse the oversized case.
+        let at_limit = transition_bytes(
             1,
-            wire::MAX_SUPERSESSION_SPAN + 1,
+            1 + max,
             1,
-            wire::MAX_SUPERSESSION_SPAN + 1,
+            1 + max,
             old_conf,
             new_conf,
-            wire::MAX_SUPERSESSION_SPAN + 1,
+            max,
             B256::repeat_byte(0x33),
             1,
             parent,
         );
-        assert!(wire::decode_epoch_transition(&oversized).is_err());
+        assert!(wire::decode_epoch_transition(&at_limit).is_ok());
+        let oversized = transition_bytes(
+            1,
+            2 + max,
+            1,
+            2 + max,
+            old_conf,
+            new_conf,
+            max + 1,
+            B256::repeat_byte(0x33),
+            1,
+            parent,
+        );
+        assert_eq!(
+            wire::decode_epoch_transition(&oversized).unwrap_err(),
+            wire::CanonicalCborError::InvalidRootInput("supersession span exceeds bound")
+        );
         assert!(
             wire::decode_epoch_transition(&vec![0; wire::MAX_EPOCH_TRANSITION_BYTES + 1]).is_err()
         );

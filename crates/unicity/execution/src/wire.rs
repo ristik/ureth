@@ -302,6 +302,9 @@ pub(crate) fn decode_epoch_transition(
     let shard_delta = new_shard_epoch.checked_sub(old_shard_epoch);
     let assignment_changed =
         new_shard_epoch != old_shard_epoch || new_active_conf_hash != old_active_conf_hash;
+    if root_delta.is_some_and(|delta| delta > MAX_SUPERSESSION_SPAN) {
+        return Err(CanonicalCborError::InvalidRootInput("supersession span exceeds bound"));
+    }
     let span_ok = match root_delta {
         Some(1) if !assignment_changed => {
             shard_delta == Some(0) &&
@@ -315,8 +318,7 @@ pub(crate) fn decode_epoch_transition(
                 supersession_commitment == B256::ZERO
         }
         Some(delta) if delta > 1 => {
-            delta <= MAX_SUPERSESSION_SPAN &&
-                shard_delta == Some(delta) &&
+            shard_delta == Some(delta) &&
                 new_active_conf_hash != old_active_conf_hash &&
                 supersession_span == delta &&
                 supersession_commitment != B256::ZERO
