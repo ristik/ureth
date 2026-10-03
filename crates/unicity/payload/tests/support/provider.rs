@@ -74,6 +74,12 @@ impl FixtureProvider {
         this
     }
 
+    /// Every nonzero storage slot of one account, for whole-state comparisons.
+    #[allow(dead_code)]
+    pub(crate) fn storage_of(&self, address: Address) -> std::collections::BTreeMap<U256, U256> {
+        self.storage.get(&address).cloned().unwrap_or_default()
+    }
+
     pub(crate) fn set_block_hash(&mut self, number: u64, hash: B256) {
         self.hashes.insert(number, hash);
     }
