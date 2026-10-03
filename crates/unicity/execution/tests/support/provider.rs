@@ -65,6 +65,7 @@ impl FixtureProvider {
         this
     }
 
+    #[allow(dead_code)]
     pub(crate) fn signed_genesis() -> Self {
         let this = Self::from_json(include_str!("../../testdata/signed-beacon-genesis.json"));
         let oracle: serde_json::Value =
@@ -72,6 +73,12 @@ impl FixtureProvider {
                 .unwrap();
         assert_eq!(this.root(), oracle["stateRoot"].as_str().unwrap().parse::<B256>().unwrap());
         this
+    }
+
+    /// Every nonzero storage slot of one account, for whole-state comparisons.
+    #[allow(dead_code)]
+    pub(crate) fn storage_of(&self, address: Address) -> BTreeMap<U256, U256> {
+        self.storage.get(&address).cloned().unwrap_or_default()
     }
 
     pub(crate) fn set_block_hash(&mut self, number: u64, hash: B256) {
