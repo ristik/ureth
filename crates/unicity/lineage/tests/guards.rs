@@ -60,7 +60,7 @@ fn a_link_for_an_epoch_that_does_not_follow_the_tip_is_history_not_a_gap() {
     let h = g.with_v3(&ok).unwrap();
     // the tip is epoch 2: a body for epoch 2 (a repeat) is neither a gap nor a successor
     refused(&h, &ok, Kind::History, "does not follow");
-    let mut gap = ok.clone();
+    let mut gap = ok;
     gap.body.epoch = 4;
     refused(&h, &gap, Kind::MissingHistory, "after");
 }
