@@ -1,0 +1,170 @@
+//! Rust verification of the Go-generated lineage vectors (`testdata/go-lineage-vectors.json`).
+//!
+//! The vectors are produced by bft-core's production `q3format` verifier
+//! (`testdata/emit-go-lineage-vectors.go.txt`, at the #407 head). Every envelope is decoded and
+//! verified here from its bytes and the pinned genesis alone, and must reach the same verdict class
+//! as Go: the accepted ones the same derived epoch, A*, body id, activation commit id and
+//! epoch-anchor id; each refused one the same named refusal, not merely a refusal.
+
+mod support;
+
+use reth_unicity_lineage::{Envelope, History};
+use serde::Deserialize;
+use support::{array32, hex, testdata, unhex};
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct Expect {
+    epoch: u64,
+    start: u64,
+    version: u64,
+    scheme: u64,
+    #[serde(rename = "BodyID")]
+    body_id: String,
+    #[serde(rename = "CommitID")]
+    commit_id: String,
+    #[serde(rename = "AnchorID")]
+    anchor_id: String,
+    config_identity: String,
+    anchor_epoch: u64,
+    anchor_round: u64,
+}
+
+#[derive(Deserialize)]
+struct Case {
+    name: String,
+    envelope: String,
+    want: String,
+    expect: Option<Expect>,
+    after: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct Vectors {
+    network: u64,
+    genesis_trust_base: String,
+    genesis_id: String,
+    cases: Vec<Case>,
+}
+
+fn load() -> Vectors {
+    serde_json::from_str(&testdata("go-lineage-vectors.json")).expect("vectors parse")
+}
+
+fn genesis(v: &Vectors) -> History {
+    History::new(&unhex(&v.genesis_trust_base), array32(&v.genesis_id))
+        .expect("the pinned genesis verifies")
+}
+
+/// The Go sentinel name of the verdict on `raw` against `h`, and the extended history when
+/// accepted.
+fn verdict(h: &History, raw: &[u8]) -> (String, Option<History>) {
+    match Envelope::decode(raw).and_then(|e| h.verify_envelope(&e)) {
+        Ok(next) => (String::new(), Some(next)),
+        Err(e) => (e.go_name().to_owned(), None),
+    }
+}
+
+#[test]
+fn every_go_verdict_is_reproduced_from_the_bytes() {
+    let v = load();
+    let g = genesis(&v);
+    assert_eq!(g.network(), v.network);
+    assert_eq!(hex(&g.genesis()), v.genesis_id);
+    assert!(
+        v.cases.len() >= 40,
+        "the vector set is the full Go negative list, got {}",
+        v.cases.len()
+    );
+    let (mut accepted, mut refused) = (0, 0);
+    for c in &v.cases {
+        let base = match &c.after {
+            None => g.clone(),
+            Some(first) => {
+                let (w, h) = verdict(&g, &unhex(first));
+                assert_eq!(w, "", "{}: the retained envelope must itself be accepted", c.name);
+                h.expect("accepted")
+            }
+        };
+        let (got, next) = verdict(&base, &unhex(&c.envelope));
+        assert_eq!(got, c.want, "{}", c.name);
+        match (&c.expect, next) {
+            (Some(x), Some(h)) => {
+                accepted += 1;
+                let tip = h.tip();
+                assert_eq!(
+                    (tip.epoch(), tip.start(), tip.version(), tip.scheme()),
+                    (x.epoch, x.start, x.version, x.scheme),
+                    "{}",
+                    c.name
+                );
+                assert_eq!(hex(&tip.body_id()), x.body_id, "{}", c.name);
+                assert_eq!(hex(&tip.activation_commit_id()), x.commit_id, "{}", c.name);
+                assert_eq!(hex(&tip.anchor_id()), x.anchor_id, "{}", c.name);
+                assert_eq!(
+                    hex(&tip.config().expect("a V3 epoch has its tuple").identity()),
+                    x.config_identity,
+                    "{}",
+                    c.name
+                );
+                assert_eq!(tip.anchor(), (x.anchor_epoch, x.anchor_round), "{}", c.name);
+                assert_ne!(
+                    tip.body_id(),
+                    tip.anchor_id(),
+                    "the anchor id is neither the body nor the tuple identity"
+                );
+            }
+            (None, None) => {
+                assert!(!c.want.is_empty(), "{}: refused without a Go verdict", c.name);
+                refused += 1;
+            }
+            // a retained reference: accepted, and the history is the one it extended
+            (None, Some(h)) if c.after.is_some() => assert_eq!(h.tip().epoch(), 2, "{}", c.name),
+            (e, n) => {
+                panic!("{}: expected-accept {} but accepted {}", c.name, e.is_some(), n.is_some())
+            }
+        }
+    }
+    assert!(accepted >= 2 && refused >= 35, "accepted {accepted}, refused {refused}");
+}
+
+/// Every single-bit flip of the authenticated lineage bytes (everything after the opaque carriage
+/// fields: root input, transitions and target parent) is refused, with one named exception: the
+/// recovery byte of a 65-byte `R || S || V` signature. go-base verifies the 64-byte compact form
+/// and drops V, so Go accepts that flip too; nothing hashes a signature, so it cannot change an
+/// identity. Anything else accepted fails.
+#[test]
+fn no_flipped_bit_of_the_lineage_is_accepted_except_a_recovery_byte() {
+    let v = load();
+    let g = genesis(&v);
+    let c = &v.cases[0];
+    assert_eq!(c.want, "");
+    let raw = unhex(&c.envelope);
+    let want = g.verify_envelope(&Envelope::decode(&raw).expect("decode")).expect("accepted");
+    let target_parent = [0x88u8; 32];
+    let opaque_end =
+        raw.windows(32).position(|w| w == target_parent).expect("the target parent") + 32 + 1; // + the null block id
+    let (mut refused, mut recovery) = (0, 0);
+    for i in opaque_end..raw.len() {
+        for bit in [0x01u8, 0x80] {
+            let mut m = raw.clone();
+            m[i] ^= bit;
+            match Envelope::decode(&m).and_then(|e| g.verify_envelope(&e)) {
+                Err(_) => refused += 1,
+                Ok(next) => {
+                    // the byte must end a 65-byte signature: `0x58 0x41` heads the byte string that
+                    // ends at i
+                    assert!(
+                        i >= 66 && raw[i - 66] == 0x58 && raw[i - 65] == 0x41,
+                        "byte {i} bit {bit:#x} is not a recovery byte yet was accepted"
+                    );
+                    assert_eq!(next.tip().body_id(), want.tip().body_id());
+                    recovery += 1;
+                }
+            }
+        }
+    }
+    assert!(recovery > 0 && recovery <= 40, "recovery-byte flips: {recovery}");
+    assert_eq!(refused + recovery, (raw.len() - opaque_end) * 2);
+}

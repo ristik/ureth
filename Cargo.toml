@@ -44,6 +44,7 @@ members = [
     "crates/unicity/payload/",
     "crates/unicity/execution/",
     "crates/unicity/store/",
+    "crates/unicity/lineage/",
     "crates/ethereum/primitives/",
     "crates/ethereum/reth/",
     "crates/etl/",
@@ -359,6 +360,7 @@ reth-ethereum-payload-builder = { path = "crates/ethereum/payload" }
 reth-unicity-execution = { path = "crates/unicity/execution" }
 reth-unicity-payload = { path = "crates/unicity/payload" }
 reth-unicity-store = { path = "crates/unicity/store" }
+reth-unicity-lineage = { path = "crates/unicity/lineage" }
 reth-ethereum-cli = { path = "crates/ethereum/cli", default-features = false }
 reth-ethereum-consensus = { path = "crates/ethereum/consensus", default-features = false }
 reth-ethereum-engine-primitives = { path = "crates/ethereum/engine-primitives", default-features = false }

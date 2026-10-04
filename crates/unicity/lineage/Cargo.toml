@@ -1,0 +1,25 @@
+[package]
+name = "reth-unicity-lineage"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Inactive Q3 lineage and activation-proof verifier for Unicity, rooted in a pinned root genesis."
+readme = "README.md"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+k256 = { workspace = true, features = ["ecdsa", "std"] }
+sha2.workspace = true
+thiserror = { workspace = true, features = ["std"] }
+
+[dev-dependencies]
+k256 = { workspace = true, features = ["ecdsa", "std"] }
+serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["std"] }
+sha2.workspace = true

@@ -1,0 +1,481 @@
+package q3format
+
+import (
+	"crypto"
+	stdhex "encoding/hex"
+	"encoding/json"
+	"errors"
+	"os"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-core/evmroot"
+	"github.com/unicitynetwork/bft-core/handoff"
+	"github.com/unicitynetwork/bft-core/rootchain/consensus/storage"
+	rctypes "github.com/unicitynetwork/bft-core/rootchain/consensus/types"
+	"github.com/unicitynetwork/bft-go-base/types"
+	"github.com/unicitynetwork/bft-go-base/types/hex"
+)
+
+// Emits the Go side of the Rust conformance vectors (ureth C2a): `Q3_EMIT_RUST_VECTORS=/path/out.json go test ./q3format -run TestEmitRustVectors`.
+// Every envelope is classified by the production Go verifier; the Rust verifier must reach the same class from the bytes alone.
+
+type rustClaim struct {
+	Epoch, Start uint64
+	BodyID       string
+	CommitID     string
+	PriorVersion uint64
+	PriorID      string
+}
+
+type rustExpect struct {
+	Epoch, Start, Version, Scheme uint64
+	BodyID, CommitID, AnchorID    string
+	ConfigIdentity                string
+	AnchorEpoch, AnchorRound      uint64
+}
+
+type rustCase struct {
+	Name     string      `json:"name"`
+	Envelope string      `json:"envelope"`
+	Want     string      `json:"want"` // "" = accepted
+	Expect   *rustExpect `json:"expect,omitempty"`
+	Detail   string      `json:"detail,omitempty"`
+	After    string      `json:"after,omitempty"` // hex of an accepted envelope applied to the genesis history before this one
+}
+
+func hx(b []byte) string { return stdhex.EncodeToString(b) }
+
+func claimItems(c Claim) []any { return c.items() }
+
+// wireEnvelope encodes without Encode's decode-validation, so that bodies Go itself refuses can still be put on the wire.
+func wireEnvelope(e Envelope) []byte {
+	trans := make([]any, len(e.Transitions))
+	for i, t := range e.Transitions {
+		trans[i] = t
+	}
+	links := make([]any, len(e.Links))
+	for i, l := range e.Links {
+		links[i] = []any{l.Body.Encode(), l.Claim.items(), evidenceItems(l.Evidence), l.Proof, receiptItems(l.Receipts)}
+	}
+	var block any
+	if len(e.BlockID) != 0 {
+		block = e.BlockID
+	}
+	return enc(envelopeDomain, uint64(EnvelopeVersion), e.RootInput, trans, e.TargetParent, block, links)
+}
+
+var sentinels = []struct {
+	name string
+	err  error
+}{
+	{"ErrActivation", ErrActivation}, {"ErrBinding", ErrBinding}, {"ErrNetwork", ErrNetwork}, {"ErrGenesis", ErrGenesis},
+	{"ErrPrior", ErrPrior}, {"ErrMissingHistory", ErrMissingHistory}, {"ErrHistory", ErrHistory}, {"ErrBody", ErrBody},
+	{"ErrConfig", ErrConfig}, {"ErrScheme", ErrScheme}, {"ErrReceiptMissing", ErrReceiptMissing}, {"ErrReceiptDuplicate", ErrReceiptDuplicate},
+	{"ErrReceiptUnknown", ErrReceiptUnknown}, {"ErrReceiptSignature", ErrReceiptSignature}, {"ErrReceiptContext", ErrReceiptContext},
+	{"ErrConflict", ErrConflict}, {"ErrEnvelope", ErrEnvelope}, {"ErrTooLarge", ErrTooLarge}, {"ErrFormat", ErrFormat}, {"ErrVersion", ErrVersion},
+}
+
+// classify names the most specific sentinel the error matches. Order matters where Go joins several: the first match in the list wins
+// except that ErrActivation (the old-committee refusal) is preferred over the verifier's own wrapped errors.
+func classify(err error) string {
+	if err == nil {
+		return ""
+	}
+	for _, s := range sentinels {
+		if errors.Is(err, s.err) {
+			return s.name
+		}
+	}
+	return "other: " + err.Error()
+}
+
+// proofWith is commitProof with the phase and ordered round of the last control step and the commit round chosen by the caller, for the
+// clauses a consistent proof cannot reach through commitProof's own fixed values.
+func proofWith(t *testing.T, tb *types.RootTrustBaseV1, s signers, rec evmroot.OrderedHandoffRecord, phase string, finalRound, commitRound uint64, signedBy ...string) handoff.OldCommitProof {
+	t.Helper()
+	net := tb.NetworkID
+	parent, err := storage.NewGenesisBlock(net, crypto.SHA256, storage.ProfileHandoff)
+	require.NoError(t, err)
+	zero := make([]byte, 32)
+	steps := []struct {
+		round       uint64
+		kind, phase string
+		frozen, tr  []byte
+	}{{2, "prepare", "prepared", zero, zero}, {3, "freeze", "frozen", rec.FrozenID, zero}, {finalRound, rec.Kind, phase, rec.FrozenID, rec.SuccessorTRHash}}
+	for _, st := range steps {
+		ordered := rec
+		ordered.OrderedRound, ordered.Kind, ordered.FrozenID, ordered.SuccessorTRHash = st.round, st.kind, st.frozen, st.tr
+		previous := parent.ShardState.Control
+		parent.ShardState.Control = &evmroot.ControlState{Network: rec.Network, Epoch: rec.Epoch, PredecessorBodyID: rec.PredecessorBodyID,
+			Attempt: rec.Attempt, Phase: st.phase, OrderedRound: st.round, RecordBytes: ordered.Bytes(), PreviousDigest: previous.Digest()}
+	}
+	control := *parent.ShardState.Control
+	tree, _, err := parent.ShardState.UnicityTree(crypto.SHA256)
+	require.NoError(t, err)
+	path, err := tree.Certificate(evmroot.D4ControlPartition)
+	require.NoError(t, err)
+	stamp := types.NewTimestamp()
+	vote := &rctypes.RoundInfo{Version: 1, RoundNumber: commitRound + 1, Epoch: rec.Epoch, Timestamp: stamp, ParentRoundNumber: commitRound, CurrentRootHash: tree.RootHash()}
+	voteHash, err := vote.Hash(crypto.SHA256)
+	require.NoError(t, err)
+	seal := &types.UnicitySeal{Version: 1, NetworkID: net, RootChainRoundNumber: commitRound, Epoch: rec.Epoch, Timestamp: stamp, Hash: tree.RootHash(), PreviousHash: voteHash}
+	signed, err := seal.SigBytes()
+	require.NoError(t, err)
+	qc := &rctypes.QuorumCert{VoteInfo: vote, LedgerCommitInfo: seal, Signatures: map[string]hex.Bytes{}}
+	for _, id := range signedBy {
+		sig, err := s[id].SignBytes(signed)
+		require.NoError(t, err)
+		qc.Signatures[id] = sig
+	}
+	return handoff.OldCommitProof{Profile: evmroot.D4Profile, Record: rec, Control: control, ControlPath: path, CommitQC: qc}
+}
+
+func TestEmitRustVectors(t *testing.T) {
+	out := os.Getenv("Q3_EMIT_RUST_VECTORS")
+	if out == "" {
+		t.Skip("set Q3_EMIT_RUST_VECTORS to emit the Rust conformance vectors")
+	}
+	w := newWorld(t, 0)
+	genesis := w.h.entries[0].tb
+	genesisBytes, err := types.Cbor.Marshal(genesis)
+	require.NoError(t, err)
+	genesisID, err := genesis.Hash(crypto.SHA256)
+	require.NoError(t, err)
+
+	envelopeFor := func(h *History, l Link) (Envelope, bool) {
+		// the claim is what the production verifier derives when it accepts the link, else the claim a sender would make from the proof
+		if next, err := h.WithV3(l); err == nil {
+			l.Claim = next.Tip().claim()
+			return Envelope{RootInput: []byte{1, 1, 1, 1}, Transitions: [][]byte{[]byte("t1")}, TargetParent: fill(0x88), Links: []Link{l}}, true
+		}
+		var rec evmroot.OrderedHandoffRecord
+		if p, err := decodeProof(l.Proof); err == nil {
+			rec = p.Record
+		}
+		tip := h.Tip()
+		l.Claim = Claim{Epoch: l.Body.Epoch, Start: rec.ActivationRound, BodyID: l.Body.Identity(), CommitID: [32]byte(rec.ID()), PriorVersion: tip.version, PriorID: tip.bodyID}
+		return Envelope{RootInput: []byte{1, 1, 1, 1}, Transitions: [][]byte{[]byte("t1")}, TargetParent: fill(0x88), Links: []Link{l}}, false
+	}
+	classifyEnv := func(h *History, raw []byte) (string, *History) {
+		e, err := DecodeEnvelope(raw)
+		if err != nil {
+			return classify(err), nil
+		}
+		next, err := h.VerifyEnvelope(e)
+		return classify(err), next
+	}
+
+	var cases []rustCase
+	add := func(name string, h *History, e Envelope, detail string) {
+		raw := wireEnvelope(e)
+		want, next := classifyEnv(h, raw)
+		c := rustCase{Name: name, Envelope: hx(raw), Want: want, Detail: detail}
+		if want == "" {
+			tip := next.Tip()
+			ce, _ := tip.Config()
+			ep, rd := tip.Anchor()
+			c.Expect = &rustExpect{Epoch: tip.epoch, Start: tip.start, Version: tip.version, Scheme: tip.scheme, BodyID: hx(tip.bodyID[:]), CommitID: hx(tip.commitID[:]),
+				AnchorID: hx(tip.anchorID[:]), ConfigIdentity: hx(func() []byte { i := ce.Identity(); return i[:] }()), AnchorEpoch: ep, AnchorRound: rd}
+		}
+		cases = append(cases, c)
+	}
+
+	// acceptance controls
+	pos := w.link(spec{})
+	e, ok := envelopeFor(w.h, pos)
+	require.True(t, ok)
+	add("positive: first V3 link over the genesis", w.h, e, "")
+	min := w.link(spec{activate: 20})
+	e, ok = envelopeFor(w.h, min)
+	require.True(t, ok)
+	add("positive: A* equal to A_min", w.h, e, "")
+
+	other := func(b byte) []byte { return fill(b) }
+	type neg struct {
+		name string
+		sp   spec
+	}
+	for _, n := range []neg{
+		{"uncommitted freeze record", spec{record: func(r *evmroot.OrderedHandoffRecord) { r.Kind = "freeze" }}},
+		{"quorum by weight is short", spec{signedBy: []string{"a", "b"}}},
+		{"unknown signers", spec{proof: func(p *handoff.OldCommitProof) {
+			s := newSigners(t, "a", "b", "c")
+			signed, err := p.CommitQC.LedgerCommitInfo.SigBytes()
+			require.NoError(t, err)
+			for id, sg := range s {
+				p.CommitQC.Signatures[id], err = sg.SignBytes(signed)
+				require.NoError(t, err)
+			}
+		}}},
+		{"forged control leaf", spec{proof: func(p *handoff.OldCommitProof) { p.Control.PreviousDigest = other(1) }}},
+		{"record epoch", spec{record: func(r *evmroot.OrderedHandoffRecord) { r.Epoch = 2 }}},
+		{"record network", spec{record: func(r *evmroot.OrderedHandoffRecord) { r.Network = 6 }}},
+		{"another body", spec{record: func(r *evmroot.OrderedHandoffRecord) { r.NextBodyID = other(1) }}},
+		{"another predecessor", spec{body: func(b *BodyV3) {
+			b.ChangeRecordHash = evmroot.D4CandidateContextHash(b.Network, other(1), 3, fill(0x44), b.EarliestActivation)
+		}, record: func(r *evmroot.OrderedHandoffRecord) {
+			r.PredecessorBodyID = other(1)
+			r.FrozenID = evmroot.D4FrozenID(r.NextBodyID, fill(0x55), fill(0x66), fill(0x44), 3, other(1))
+		}}},
+		{"A* before A_min", spec{activate: 19}},
+		{"another frozen id", spec{record: func(r *evmroot.OrderedHandoffRecord) { r.FrozenID = other(1) }}},
+		{"another summary", spec{evidence: func(e *Evidence) { e.Summary = other(1) }}},
+		{"another parent", spec{evidence: func(e *Evidence) { e.FrozenParent = other(1) }}},
+		{"another candidate", spec{body: func(b *BodyV3) {
+			b.ChangeRecordHash = evmroot.D4CandidateContextHash(b.Network, b.PredecessorHash, 3, other(1), b.EarliestActivation)
+		}}},
+		{"another attempt", spec{body: func(b *BodyV3) {
+			b.ChangeRecordHash = evmroot.D4CandidateContextHash(b.Network, func() []byte { b := w.h.Tip().bodyID; return b[:] }(), 4, fill(0x44), b.EarliestActivation)
+		}}},
+		{"short candidate", spec{evidence: func(e *Evidence) { e.CandidateDigest = e.CandidateDigest[:31] }}},
+		{"no summary", spec{evidence: func(e *Evidence) { e.Summary = nil }}},
+		{"network", spec{body: func(b *BodyV3) { b.Network, b.Config = 6, Q3Config(6, b.Config.Genesis) }}},
+		{"tuple network", spec{body: func(b *BodyV3) { b.Config = Q3Config(6, b.Config.Genesis) }}},
+		{"genesis", spec{body: func(b *BodyV3) { b.Config.Genesis = arr32(9) }}},
+		{"predecessor", spec{body: func(b *BodyV3) { b.PredecessorHash = fill(1) }}},
+		{"epoch gap", spec{body: func(b *BodyV3) { b.Epoch = 3 }}},
+		{"epoch repeated", spec{body: func(b *BodyV3) { b.Epoch = 1 }}},
+		{"invalid body threshold", spec{body: func(b *BodyV3) { b.RootThreshold = 8 }}},
+		{"weight above the cap", spec{body: func(b *BodyV3) { b.Members[0].Weight = evmroot.MaxMemberWeight + 1 }}},
+		{"duplicate key", spec{body: func(b *BodyV3) { b.Members[1].ConsensusKey = b.Members[0].ConsensusKey }}},
+		{"missing receipt", spec{receipts: func(r []Receipt) []Receipt { return r[:3] }}},
+		{"duplicate receipt", spec{receipts: func(r []Receipt) []Receipt { return append(r, r[0]) }}},
+		{"unknown receipt signer", spec{receipts: func(r []Receipt) []Receipt { r[0].NodeID = "zz"; return r }}},
+		{"forged receipt signature", spec{receipts: func(r []Receipt) []Receipt { r[1].Signature = append([]byte(nil), r[0].Signature...); return r }}},
+	} {
+		l := w.link(n.sp)
+		e, _ := envelopeFor(w.h, l)
+		add("negative: "+n.name, w.h, e, "")
+	}
+
+	// the commit proof, clause by clause: each case changes one thing and re-signs what it must so that only that clause can refuse
+	resign := func(qc *rctypes.QuorumCert, ids ...string) {
+		h, err := qc.VoteInfo.Hash(crypto.SHA256)
+		require.NoError(t, err)
+		qc.LedgerCommitInfo.PreviousHash = h
+		signed, err := qc.LedgerCommitInfo.SigBytes()
+		require.NoError(t, err)
+		qc.Signatures = map[string]hex.Bytes{}
+		for _, id := range ids {
+			qc.Signatures[id], err = w.signers[1][id].SignBytes(signed)
+			require.NoError(t, err)
+		}
+	}
+	abc := []string{"a", "b", "c"}
+	optional := func(p *handoff.OldCommitProof) *rctypes.QuorumCert {
+		v := *p.CommitQC.VoteInfo
+		v.RoundNumber, v.ParentRoundNumber = p.CommitQC.LedgerCommitInfo.RootChainRoundNumber, p.CommitQC.LedgerCommitInfo.RootChainRoundNumber-1
+		seal := *p.CommitQC.LedgerCommitInfo
+		seal.Signatures = nil
+		qc := &rctypes.QuorumCert{VoteInfo: &v, LedgerCommitInfo: &seal}
+		resign(qc, abc...)
+		return qc
+	}
+	for _, n := range []neg{
+		{"optional certificate, valid", spec{proof: func(p *handoff.OldCommitProof) { p.OptionalQC = optional(p) }}},
+		{"optional certificate, wrong round", spec{proof: func(p *handoff.OldCommitProof) {
+			q := optional(p)
+			q.VoteInfo.RoundNumber, q.VoteInfo.ParentRoundNumber = 3, 2
+			resign(q, abc...)
+			p.OptionalQC = q
+		}}},
+		{"optional certificate, wrong epoch", spec{proof: func(p *handoff.OldCommitProof) {
+			q := optional(p)
+			q.VoteInfo.Epoch = 2
+			resign(q, abc...)
+			p.OptionalQC = q
+		}}},
+		{"optional certificate, wrong timestamp", spec{proof: func(p *handoff.OldCommitProof) {
+			q := optional(p)
+			q.VoteInfo.Timestamp++
+			resign(q, abc...)
+			p.OptionalQC = q
+		}}},
+		{"optional certificate, wrong root", spec{proof: func(p *handoff.OldCommitProof) {
+			q := optional(p)
+			q.VoteInfo.CurrentRootHash = other(3)
+			resign(q, abc...)
+			p.OptionalQC = q
+		}}},
+		{"optional certificate, short of quorum", spec{proof: func(p *handoff.OldCommitProof) {
+			q := optional(p)
+			resign(q, "a", "b")
+			p.OptionalQC = q
+		}}},
+		{"optional certificate, no vote info", spec{proof: func(p *handoff.OldCommitProof) {
+			q := optional(p)
+			q.VoteInfo = nil
+			p.OptionalQC = q
+		}}},
+		{"optional certificate, no commit info", spec{proof: func(p *handoff.OldCommitProof) {
+			q := optional(p)
+			q.LedgerCommitInfo = nil
+			p.OptionalQC = q
+		}}},
+		{"commit certificate rounds: vote round not c+1", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC.VoteInfo.RoundNumber = 6; resign(p.CommitQC, abc...) }}},
+		{"commit certificate rounds: parent not c", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC.VoteInfo.ParentRoundNumber = 3; resign(p.CommitQC, abc...) }}},
+		{"commit certificate rounds: c before the ordered round", spec{proof: func(p *handoff.OldCommitProof) {
+			p.CommitQC.LedgerCommitInfo.RootChainRoundNumber = 3
+			p.CommitQC.VoteInfo.RoundNumber, p.CommitQC.VoteInfo.ParentRoundNumber = 4, 3
+			resign(p.CommitQC, abc...)
+		}}},
+		{"commit certificate rounds: zero commit round", spec{proof: func(p *handoff.OldCommitProof) {
+			p.CommitQC.LedgerCommitInfo.RootChainRoundNumber = 0
+			p.CommitQC.VoteInfo.RoundNumber, p.CommitQC.VoteInfo.ParentRoundNumber = 1, 0
+			resign(p.CommitQC, abc...)
+		}}},
+		{"commit certificate: vote epoch", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC.VoteInfo.Epoch = 2; resign(p.CommitQC, abc...) }}},
+		{"commit certificate: seal network", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC.LedgerCommitInfo.NetworkID = 6; resign(p.CommitQC, abc...) }}},
+		{"commit certificate: seal epoch", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC.LedgerCommitInfo.Epoch = 2; resign(p.CommitQC, abc...) }}},
+		{"commit certificate: seal later than the vote", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC.LedgerCommitInfo.Timestamp++; resign(p.CommitQC, abc...) }}},
+		{"commit certificate: timestamps before the genesis time", spec{proof: func(p *handoff.OldCommitProof) {
+			p.CommitQC.VoteInfo.Timestamp, p.CommitQC.LedgerCommitInfo.Timestamp = 1000, 1000
+			resign(p.CommitQC, abc...)
+		}}},
+		{"commit certificate: zero timestamps", spec{proof: func(p *handoff.OldCommitProof) {
+			p.CommitQC.VoteInfo.Timestamp, p.CommitQC.LedgerCommitInfo.Timestamp = 0, 0
+			resign(p.CommitQC, abc...)
+		}}},
+		{"commit certificate: state root", spec{proof: func(p *handoff.OldCommitProof) {
+			p.CommitQC.LedgerCommitInfo.Hash = other(3)
+			resign(p.CommitQC, abc...)
+		}}},
+		{"commit certificate: vote root", spec{proof: func(p *handoff.OldCommitProof) {
+			p.CommitQC.VoteInfo.CurrentRootHash = other(3)
+			resign(p.CommitQC, abc...)
+		}}},
+		{"commit certificate: previous hash is not the vote info hash", spec{proof: func(p *handoff.OldCommitProof) {
+			p.CommitQC.LedgerCommitInfo.PreviousHash = other(3)
+			signed, err := p.CommitQC.LedgerCommitInfo.SigBytes()
+			require.NoError(t, err)
+			for _, id := range abc {
+				p.CommitQC.Signatures[id], err = w.signers[1][id].SignBytes(signed)
+				require.NoError(t, err)
+			}
+		}}},
+		{"commit certificate: version", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC.VoteInfo.Version = 2; resign(p.CommitQC, abc...) }}},
+		{"commit certificate: unsigned", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC.Signatures = map[string]hex.Bytes{} }}},
+		{"commit certificate: one forged signature beside a quorum", spec{signedBy: []string{"a", "b", "c", "d"}, proof: func(p *handoff.OldCommitProof) {
+			p.CommitQC.Signatures["d"] = append(hex.Bytes(nil), p.CommitQC.Signatures["a"]...)
+		}}},
+		{"commit certificate: strictly all four valid", spec{signedBy: []string{"a", "b", "c", "d"}}},
+		{"commit certificate: nil vote info", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC.VoteInfo = nil }}},
+		{"commit certificate: nil commit info", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC.LedgerCommitInfo = nil }}},
+		{"commit certificate: absent", spec{proof: func(p *handoff.OldCommitProof) { p.CommitQC = nil }}},
+		{"control path: absent", spec{proof: func(p *handoff.OldCommitProof) { p.ControlPath = nil }}},
+		{"control path: partition", spec{proof: func(p *handoff.OldCommitProof) { p.ControlPath.Partition = 5 }}},
+		{"control path: version", spec{proof: func(p *handoff.OldCommitProof) { p.ControlPath.Version = 2 }}},
+		{"control path: a step for the control partition", spec{proof: func(p *handoff.OldCommitProof) {
+			p.ControlPath.HashSteps = []*types.PathItem{{Key: evmroot.D4ControlPartition, Hash: other(1)}}
+		}}},
+		{"control path: a step that changes the root", spec{proof: func(p *handoff.OldCommitProof) {
+			p.ControlPath.HashSteps = []*types.PathItem{{Key: 7, Hash: other(1)}}
+		}}},
+		{"control: phase", spec{proof: func(p *handoff.OldCommitProof) { p.Control.Phase = "frozen" }}},
+		{"control: network", spec{proof: func(p *handoff.OldCommitProof) { p.Control.Network = 6 }}},
+		{"control: epoch", spec{proof: func(p *handoff.OldCommitProof) { p.Control.Epoch = 2 }}},
+		{"control: attempt", spec{proof: func(p *handoff.OldCommitProof) { p.Control.Attempt = 4 }}},
+		{"control: ordered round", spec{proof: func(p *handoff.OldCommitProof) { p.Control.OrderedRound = 3 }}},
+		{"control: predecessor", spec{proof: func(p *handoff.OldCommitProof) { p.Control.PredecessorBodyID = other(1) }}},
+		{"control: record bytes", spec{proof: func(p *handoff.OldCommitProof) {
+			p.Control.RecordBytes = append(append([]byte(nil), p.Control.RecordBytes...), 0)
+		}}},
+		{"control: short previous digest", spec{proof: func(p *handoff.OldCommitProof) { p.Control.PreviousDigest = p.Control.PreviousDigest[:31] }}},
+		{"control: frozen parent changes the leaf", spec{proof: func(p *handoff.OldCommitProof) { p.Control.FrozenParent = other(1) }}},
+		{"proof profile", spec{proof: func(p *handoff.OldCommitProof) { p.Profile = 1 }}},
+		{"record: kind freeze under a committed control phase", spec{proof: func(p *handoff.OldCommitProof) {
+			rec := p.Record
+			rec.Kind = "freeze"
+			*p = proofWith(t, w.h.Tip().tb, w.signers[1], rec, "committed", 4, 4, abc...)
+		}}},
+		{"record: ordered round zero", spec{proof: func(p *handoff.OldCommitProof) {
+			rec := p.Record
+			rec.OrderedRound = 0
+			*p = proofWith(t, w.h.Tip().tb, w.signers[1], rec, "committed", 0, 4, abc...)
+		}}},
+		{"record: activation before the ordered round", spec{proof: func(p *handoff.OldCommitProof) {
+			rec := p.Record
+			rec.ActivationRound = 3
+			*p = proofWith(t, w.h.Tip().tb, w.signers[1], rec, "committed", 4, 4, abc...)
+		}}},
+		{"acceptance control for the rebuilt proof", spec{proof: func(p *handoff.OldCommitProof) {
+			*p = proofWith(t, w.h.Tip().tb, w.signers[1], p.Record, "committed", 4, 4, abc...)
+		}}},
+		{"commit certificate rounds: commit round is MaxUint64", spec{proof: func(p *handoff.OldCommitProof) {
+			*p = proofWith(t, w.h.Tip().tb, w.signers[1], p.Record, "committed", 4, ^uint64(0), abc...)
+		}}},
+		{"record: pipeline depth", spec{aMin: 5, activate: 6}},
+		{"record: zero frozen id", spec{record: func(r *evmroot.OrderedHandoffRecord) { r.FrozenID = make([]byte, 32) }}},
+		{"record: zero successor TR", spec{record: func(r *evmroot.OrderedHandoffRecord) { r.SuccessorTRHash = make([]byte, 32) }}},
+		{"record: short successor TR", spec{record: func(r *evmroot.OrderedHandoffRecord) { r.SuccessorTRHash = make([]byte, 31) }}},
+		{"record: attempt differs from the control leaf", spec{record: func(r *evmroot.OrderedHandoffRecord) { r.Attempt = 9 }}},
+	} {
+		l := w.link(n.sp)
+		e, _ := envelopeFor(w.h, l)
+		add("proof: "+n.name, w.h, e, "")
+	}
+
+	// the claim must equal the derived activation, field for field
+	for name, mut := range map[string]func(*Claim){
+		"claim epoch":         func(c *Claim) { c.Epoch++ },
+		"claim start":         func(c *Claim) { c.Start++ },
+		"claim body":          func(c *Claim) { c.BodyID[0] ^= 1 },
+		"claim commit id":     func(c *Claim) { c.CommitID[0] ^= 1 },
+		"claim prior version": func(c *Claim) { c.PriorVersion = 2 },
+		"claim prior id":      func(c *Claim) { c.PriorID[0] ^= 1 },
+	} {
+		l := w.link(spec{})
+		e, ok := envelopeFor(w.h, l)
+		require.True(t, ok)
+		mut(&e.Links[0].Claim)
+		add("negative: "+name, w.h, e, "")
+	}
+
+	// a second V3 link has no scheme-2 commit verifier: ErrScheme, never scheme 1
+	l1 := w.link(spec{})
+	h1, err := w.h.WithV3(l1)
+	require.NoError(t, err)
+	genesisHistory := w.h
+	w.h = h1
+	l2 := w.link(spec{aMin: 21, activate: 40, signedBy: []string{"n1", "n2"}})
+	w.h = genesisHistory
+	e1, _ := envelopeFor(w.h, l1)
+	e1.Links[0].Claim = h1.Tip().claim()
+	// a two-link envelope: the first accepted, the second refused with ErrScheme
+	l2.Claim = Claim{Epoch: 3, Start: 40}
+	two := Envelope{RootInput: []byte{1, 1, 1, 1}, Transitions: [][]byte{[]byte("t1")}, TargetParent: fill(0x88), Links: []Link{e1.Links[0], l2}}
+	add("negative: second V3 link is scheme 2 and has no verifier", w.h, two, "")
+
+	// missing history: only the second link is supplied against the genesis-only history
+	only2 := Envelope{RootInput: []byte{1, 1, 1, 1}, Transitions: [][]byte{[]byte("t1")}, TargetParent: fill(0x88), Links: []Link{l2}}
+	add("negative: missing ancestor (only epoch 3 supplied)", w.h, only2, "")
+
+	// a retained reference: verified entry presented again on the extended history is accepted; presented differently, it conflicts
+	rawRef := wireEnvelope(e1)
+	_, next := classifyEnv(w.h, rawRef)
+	require.NotNil(t, next)
+	want, _ := classifyEnv(next, rawRef)
+	cases = append(cases, rustCase{Name: "retained reference to an already verified link", Envelope: hx(rawRef), Want: want, After: hx(rawRef), Detail: "verify against the history already extended by the same envelope"})
+	conf := e1
+	conf.Links = []Link{e1.Links[0]}
+	conf.Links[0].Claim.Start++
+	rawConf := wireEnvelope(conf)
+	wantC, _ := classifyEnv(next, rawConf)
+	cases = append(cases, rustCase{Name: "retained reference differing from the verified entry", Envelope: hx(rawConf), Want: wantC, After: hx(rawRef), Detail: "verify against the history already extended by the retained envelope"})
+
+	doc := map[string]any{
+		"note":              "Generated by bft-core q3format TestEmitRustVectors at the #407 head; signers are random, so the file is generated once and committed.",
+		"network":           testNetwork,
+		"genesisTrustBase":  hx(genesisBytes),
+		"genesisId":         hx(genesisID),
+		"genesisRoundStart": 0,
+		"cases":             cases,
+	}
+	b, err := json.MarshalIndent(doc, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(out, append(b, '\n'), 0o644))
+	for _, c := range cases {
+		t.Logf("%-70s -> %q", c.Name, c.Want)
+	}
+}
