@@ -295,9 +295,11 @@ impl History {
         let mut cur = self.clone();
         for l in &e.links {
             if let Ok(have) = cur.for_epoch(l.body.epoch) {
-                if have.claim() != l.claim {
-                    return Err(Error::new(Kind::Conflict, format_args!("epoch {}", l.body.epoch)));
-                }
+                let prior =
+                    l.body.epoch.checked_sub(1).and_then(|p| cur.for_epoch(p).ok()).ok_or_else(
+                        || conflict(l, "no retained predecessor to authenticate the proof"),
+                    )?;
+                have.retained(prior, l)?;
                 continue;
             }
             let next = cur.with_v3(l)?;
@@ -313,6 +315,51 @@ impl History {
             cur = next;
         }
         Ok(cur)
+    }
+}
+
+fn conflict(l: &Link, what: impl std::fmt::Display) -> Error {
+    Error::new(Kind::Conflict, format_args!("epoch {}: {what}", l.body.epoch))
+}
+
+impl Entry {
+    /// Checks a link for an epoch the history already holds. It is a reference to the verified
+    /// entry, not a second verification, so nothing the link carries may differ from it: the
+    /// claim, the recomputed identity of the supplied canonical body (a claim alone never names
+    /// the body), and the committed record, candidate evidence and receipts it presents. Any
+    /// difference is [`Kind::Conflict`]: conflicting evidence is never ignored because the claim
+    /// happens to match. The supplied commit proof is authenticated in full under the retained
+    /// predecessor's committee (the record id does not commit to the signatures or the
+    /// inclusion path), exactly as a fresh activation would be, so a forged proof that names
+    /// the right record is a conflict. Go joins the conflict with the underlying activation,
+    /// binding or receipt sentinel; the cause is in the detail here.
+    fn retained(&self, prior: &Self, l: &Link) -> Result<()> {
+        if self.claim() != l.claim {
+            return Err(conflict(l, "claim"));
+        }
+        let id = l.body.identity();
+        if id != self.body_id || id != l.claim.body_id {
+            return Err(conflict(l, "body identity"));
+        }
+        let p = OldCommitProof::decode(&l.proof)?;
+        if prior.scheme != 1 {
+            return Err(Error::new(Kind::Scheme, format_args!("scheme {}", prior.scheme)));
+        }
+        let v = p.verify(&prior.tb).map_err(|e| {
+            conflict(l, format_args!("the supplied proof does not authenticate: {e}"))
+        })?;
+        if v.record_id != self.commit_id {
+            return Err(conflict(l, "committed record"));
+        }
+        bind_candidate(&l.body, p.record(), &l.evidence).map_err(|e| conflict(l, e))?;
+        let candidate = <[u8; 32]>::try_from(l.evidence.candidate_digest.as_slice())
+            .map_err(|_| conflict(l, "candidate digest"))?;
+        verify_receipts(
+            &l.body,
+            &ReceiptContext::for_body(&l.body, p.record().attempt, candidate),
+            &l.receipts,
+        )
+        .map_err(|e| conflict(l, e))
     }
 }
 

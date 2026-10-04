@@ -411,8 +411,20 @@ fn read_qc(v: &Value) -> Result<Option<Qc>> {
                 previous_hash: r.opt_bytes(usize::MAX)?.map(<[u8]>::to_vec).unwrap_or_default(),
                 hash: r.opt_bytes(usize::MAX)?.map(<[u8]>::to_vec).unwrap_or_default(),
             };
+            // the embedded seal's own signature map is never signed or used, but it is typed like
+            // go-base's `SignatureMap` (text signer ids, byte-string signatures):
+            // anything else fails Go's typed decode
             match r.take()? {
-                Value::Null | Value::Map(_) => {}
+                Value::Null => {}
+                Value::Map(pairs) => {
+                    for (k, sig) in pairs {
+                        if !matches!((k, sig), (Value::Text(_), Value::Bytes(_))) {
+                            return Err(format(
+                                "seal signature map entry is not (text, byte string)",
+                            ));
+                        }
+                    }
+                }
                 _ => return Err(format("seal signatures")),
             }
             r.done()?;

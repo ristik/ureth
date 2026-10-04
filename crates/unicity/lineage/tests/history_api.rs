@@ -121,8 +121,14 @@ fn only_the_pinned_bytes_start_a_history() {
 }
 
 #[derive(Deserialize)]
+struct File {
+    worlds: Vec<World>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Vectors {
+struct World {
+    name: String,
     genesis_trust_base: String,
     genesis_id: String,
     cases: Vec<Case>,
@@ -136,7 +142,8 @@ struct Case {
 
 #[test]
 fn the_resolver_covers_exactly_the_verified_intervals() {
-    let v: Vectors = serde_json::from_str(&testdata("go-lineage-vectors.json")).unwrap();
+    let f: File = serde_json::from_str(&testdata("go-lineage-vectors.json")).unwrap();
+    let v = f.worlds.into_iter().find(|w| w.name == "genesis-start-0").unwrap();
     let g = History::new(&unhex(&v.genesis_trust_base), array32(&v.genesis_id)).unwrap();
     let case =
         v.cases.iter().find(|c| c.name.starts_with("positive: first")).expect("positive case");

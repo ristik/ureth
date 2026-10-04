@@ -27,6 +27,9 @@ For each V3 link the verifier does not trust a supplied body id, projection or c
 4. derives the activation commit id and the epoch-anchor id `(E, A*-1)` and requires the envelope's claim to equal
    them field for field (`Kind::Binding` otherwise).
 
+A link for an epoch the history already holds is a *retained* link and is not trusted for matching its claim: the body
+identity is recomputed, the supplied commit proof is authenticated under the retained predecessor's committee, and the
+committed record, candidate evidence and receipts must be the entry's (`Kind::Conflict` otherwise, as in #407's `retained`).
 An epoch the history lacks is `Kind::MissingHistory`; an unknown epoch or round is `Kind::UnknownEpoch`, never a
 legacy default. A previous epoch signed under scheme 2 is `Kind::Scheme`: there is no scheme-2 commit verifier yet
 and no fallback to scheme 1. Every refusal is a typed `Error` whose `Kind::go_name()` is the name of the matching Go
@@ -49,14 +52,13 @@ sentinel in `bft-core/q3format`.
 `tests/` holds the Go/Rust suites. Vectors are committed under `testdata/` with their provenance:
 
 * `go-lineage-vectors.json` is not part of #406/#407; it is emitted by bft-core's production `q3format` verifier at the #407 head
-  (`767cb360`) through `emit-go-lineage-vectors.go.txt` (copy it into `q3format/` as `rustvectors_test.go` and run
+  (`d36d3611`) through `emit-go-lineage-vectors.go.txt` (copy it into `q3format/` as `rustvectors_test.go` and run
   `Q3_EMIT_RUST_VECTORS=out.json go test ./q3format -run TestEmitRustVectors`). The signers are random, so the file
   is generated once and committed. Rust reaches the same named verdict for every case, and the same epoch, A*, body
   id, activation commit id and anchor id for the accepted ones.
 * `q3format-vectors.json` is #407's golden file (pinned by SHA-256 in `tests/vector_pins.rs`) (config, body, predecessor hashes, receipt message, envelope).
-* `domain_bound_vectors.json` is the Q1 file merged in #394 (`e33070b6`). It holds votes (the committing one carries
-  both components of the paired signature), timeouts and a timeout certificate, but no standalone scheme-2
-  quorum-certificate vector.
+* `domain_bound_vectors.json` is the Q1 file at merged #406 (`c82cc826`): nine vectors, the seven of #394 plus #396's two
+  paired quorum certificates (committing, with vote and seal signature maps, and non-committing). All are reproduced.
 
 go-base verifies the 64-byte compact form of a 65-byte signature and drops its recovery byte, so flipping that byte
 leaves a signature valid in Go and here; nothing hashes a signature, so no identity can change.

@@ -9,11 +9,22 @@ use serde::Deserialize;
 use support::{array32, testdata, unhex};
 
 #[derive(Deserialize)]
+struct File {
+    worlds: Vec<World>,
+}
+
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct Vectors {
+struct World {
+    name: String,
     genesis_trust_base: String,
     genesis_id: String,
     cases: Vec<Case>,
+}
+
+fn world(name: &str) -> World {
+    let f: File = serde_json::from_str(&testdata("go-lineage-vectors.json")).unwrap();
+    f.worlds.into_iter().find(|w| w.name == name).unwrap_or_else(|| panic!("world {name}"))
 }
 
 #[derive(Deserialize)]
@@ -23,7 +34,7 @@ struct Case {
 }
 
 fn setup() -> (History, Link) {
-    let v: Vectors = serde_json::from_str(&testdata("go-lineage-vectors.json")).unwrap();
+    let v = world("genesis-start-0");
     let g = History::new(&unhex(&v.genesis_trust_base), array32(&v.genesis_id)).unwrap();
     let c = v.cases.iter().find(|c| c.name.starts_with("positive: first")).unwrap();
     let link = Envelope::decode(&unhex(&c.envelope)).unwrap().links.remove(0);
@@ -96,4 +107,38 @@ fn the_body_rules_hold_on_the_struct_not_only_through_decode() {
     );
     bad(&|x| x.config.network = 0, "required");
     bad(&|x| x.config.genesis = [0; 32], "required");
+}
+
+fn history_of(w: &World) -> History {
+    History::new(&unhex(&w.genesis_trust_base), array32(&w.genesis_id)).expect("genesis")
+}
+
+fn first_link(w: &World) -> Link {
+    let c = w
+        .cases
+        .iter()
+        .find(|c| c.name.starts_with("positive: first"))
+        .expect("the first-link case");
+    Envelope::decode(&unhex(&c.envelope)).unwrap().links.remove(0)
+}
+
+/// A* must follow the epoch start of the epoch it replaces. The same A* = 25 link, in three worlds
+/// whose genesis epoch starts at 30, 25 and 24 (each its own authenticated committee), is refused
+/// below and at the start and accepted above it.
+#[test]
+fn activation_must_follow_the_start_of_the_epoch_it_replaces() {
+    for (name, accepted) in
+        [("genesis-start-30", false), ("genesis-start-25", false), ("genesis-start-24", true)]
+    {
+        let w = world(name);
+        let (h, l) = (history_of(&w), first_link(&w));
+        assert_eq!(l.claim.start, 25, "{name}: every world activates at A* = 25");
+        if accepted {
+            let next =
+                h.with_v3(&l).unwrap_or_else(|e| panic!("{name}: acceptance control refused: {e}"));
+            assert_eq!(next.tip().start(), 25);
+        } else {
+            refused(&h, &l, Kind::Binding, "does not follow the epoch start");
+        }
+    }
 }

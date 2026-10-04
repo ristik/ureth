@@ -1,6 +1,7 @@
 package q3format
 
 import (
+	"bytes"
 	"crypto"
 	stdhex "encoding/hex"
 	"encoding/json"
@@ -69,11 +70,11 @@ var sentinels = []struct {
 	name string
 	err  error
 }{
-	{"ErrActivation", ErrActivation}, {"ErrBinding", ErrBinding}, {"ErrNetwork", ErrNetwork}, {"ErrGenesis", ErrGenesis},
+	{"ErrConflict", ErrConflict}, {"ErrActivation", ErrActivation}, {"ErrBinding", ErrBinding}, {"ErrNetwork", ErrNetwork}, {"ErrGenesis", ErrGenesis},
 	{"ErrPrior", ErrPrior}, {"ErrMissingHistory", ErrMissingHistory}, {"ErrHistory", ErrHistory}, {"ErrBody", ErrBody},
 	{"ErrConfig", ErrConfig}, {"ErrScheme", ErrScheme}, {"ErrReceiptMissing", ErrReceiptMissing}, {"ErrReceiptDuplicate", ErrReceiptDuplicate},
 	{"ErrReceiptUnknown", ErrReceiptUnknown}, {"ErrReceiptSignature", ErrReceiptSignature}, {"ErrReceiptContext", ErrReceiptContext},
-	{"ErrConflict", ErrConflict}, {"ErrEnvelope", ErrEnvelope}, {"ErrTooLarge", ErrTooLarge}, {"ErrFormat", ErrFormat}, {"ErrVersion", ErrVersion},
+	{"ErrEnvelope", ErrEnvelope}, {"ErrTooLarge", ErrTooLarge}, {"ErrFormat", ErrFormat}, {"ErrVersion", ErrVersion},
 }
 
 // classify names the most specific sentinel the error matches. Order matters where Go joins several: the first match in the list wins
@@ -131,12 +132,9 @@ func proofWith(t *testing.T, tb *types.RootTrustBaseV1, s signers, rec evmroot.O
 	return handoff.OldCommitProof{Profile: evmroot.D4Profile, Record: rec, Control: control, ControlPath: path, CommitQC: qc}
 }
 
-func TestEmitRustVectors(t *testing.T) {
-	out := os.Getenv("Q3_EMIT_RUST_VECTORS")
-	if out == "" {
-		t.Skip("set Q3_EMIT_RUST_VECTORS to emit the Rust conformance vectors")
-	}
-	w := newWorld(t, 0)
+// emitWorld classifies every case of one world (one random genesis committee) with the production verifier. A world that is not
+// full carries only the first-link control, for the genesis-start cases.
+func emitWorld(t *testing.T, w *world, full bool) ([]rustCase, []byte, []byte) {
 	genesis := w.h.entries[0].tb
 	genesisBytes, err := types.Cbor.Marshal(genesis)
 	require.NoError(t, err)
@@ -184,8 +182,11 @@ func TestEmitRustVectors(t *testing.T) {
 	// acceptance controls
 	pos := w.link(spec{})
 	e, ok := envelopeFor(w.h, pos)
-	require.True(t, ok)
+	require.True(t, ok || !full, "the full world's control is accepted; a late genesis world may refuse it")
 	add("positive: first V3 link over the genesis", w.h, e, "")
+	if !full {
+		return cases, genesisBytes, genesisID
+	}
 	min := w.link(spec{activate: 20})
 	e, ok = envelopeFor(w.h, min)
 	require.True(t, ok)
@@ -464,18 +465,76 @@ func TestEmitRustVectors(t *testing.T) {
 	wantC, _ := classifyEnv(next, rawConf)
 	cases = append(cases, rustCase{Name: "retained reference differing from the verified entry", Envelope: hx(rawConf), Want: wantC, After: hx(rawRef), Detail: "verify against the history already extended by the retained envelope"})
 
+	// a retained link authenticates what it supplies: nothing may differ from the verified entry even though the claim matches
+	retainedCase := func(name string, mutate func(l *Link)) {
+		l := e1.Links[0]
+		l.Receipts = append([]Receipt(nil), l.Receipts...)
+		l.Proof = append([]byte(nil), l.Proof...)
+		mutate(&l)
+		raw := wireEnvelope(Envelope{RootInput: []byte{1, 1, 1, 1}, Transitions: [][]byte{[]byte("t1")}, TargetParent: fill(0x88), Links: []Link{l}})
+		got, _ := classifyEnv(next, raw)
+		cases = append(cases, rustCase{Name: "retained: " + name, Envelope: hx(raw), Want: got, After: hx(rawRef), Detail: "verify against the history already extended by the retained envelope"})
+	}
+	retainedCase("body differs, claim unchanged", func(l *Link) { l.Body.StateSummary = fill(0x23) })
+	retainedCase("commit proof signature forged, record unchanged", func(l *Link) {
+		p, err := decodeProof(l.Proof)
+		require.NoError(t, err)
+		forged := append(hex.Bytes(nil), p.CommitQC.Signatures["a"]...)
+		forged[10] ^= 1
+		p.CommitQC.Signatures["a"] = forged
+		l.Proof, err = types.Cbor.Marshal(p)
+		require.NoError(t, err)
+	})
+	retainedCase("evidence differs", func(l *Link) { l.Evidence.Summary = fill(0x24) })
+	retainedCase("receipt signature forged", func(l *Link) { l.Receipts[1].Signature = append([]byte(nil), l.Receipts[0].Signature...) })
+	retainedCase("receipts missing", func(l *Link) { l.Receipts = l.Receipts[:3] })
+	retainedCase("proof absent", func(l *Link) { l.Proof = nil })
+	retainedCase("acceptance control: nothing differs", func(l *Link) {})
+
+	// the embedded seal's own signature map is typed like go-base's SignatureMap: {"a": 1} fails the typed proof decode
+	patched := func(l Link) Link {
+		p, err := decodeProof(l.Proof)
+		require.NoError(t, err)
+		seal, err := types.Cbor.Marshal(p.CommitQC.LedgerCommitInfo)
+		require.NoError(t, err)
+		require.Equal(t, byte(0xf6), seal[len(seal)-1], "the embedded seal signatures are null")
+		patchedSeal := append(append([]byte(nil), seal[:len(seal)-1]...), 0xa1, 0x61, 0x61, 0x01)
+		require.Equal(t, 1, bytes.Count(l.Proof, seal))
+		l.Proof = bytes.Replace(l.Proof, seal, patchedSeal, 1)
+		return l
+	}
+	lp := w.link(spec{})
+	ep, _ := envelopeFor(w.h, lp)
+	ep.Links[0] = patched(ep.Links[0])
+	add("negative: embedded seal signature map is not (text, bytes)", w.h, ep, "")
+
+	return cases, genesisBytes, genesisID
+}
+
+func TestEmitRustVectors(t *testing.T) {
+	out := os.Getenv("Q3_EMIT_RUST_VECTORS")
+	if out == "" {
+		t.Skip("set Q3_EMIT_RUST_VECTORS to emit the Rust conformance vectors")
+	}
+	var worlds []map[string]any
+	// the genesis epoch starts at round 0 for the full list; the late worlds have A* = 25 against genesis starts 30, 25 and 24
+	for _, ws := range []struct {
+		name  string
+		start uint64
+		full  bool
+	}{{"genesis-start-0", 0, true}, {"genesis-start-30", 30, false}, {"genesis-start-25", 25, false}, {"genesis-start-24", 24, false}} {
+		cases, gen, id := emitWorld(t, newWorld(t, ws.start), ws.full)
+		worlds = append(worlds, map[string]any{"name": ws.name, "genesisStart": ws.start, "genesisTrustBase": hx(gen), "genesisId": hx(id), "cases": cases})
+		for _, c := range cases {
+			t.Logf("%-16s %-70s -> %q", ws.name, c.Name, c.Want)
+		}
+	}
 	doc := map[string]any{
-		"note":              "Generated by bft-core q3format TestEmitRustVectors at the #407 head; signers are random, so the file is generated once and committed.",
-		"network":           testNetwork,
-		"genesisTrustBase":  hx(genesisBytes),
-		"genesisId":         hx(genesisID),
-		"genesisRoundStart": 0,
-		"cases":             cases,
+		"note":    "Generated by bft-core q3format TestEmitRustVectors at the #407 head d36d3611; signers are random, so the file is generated once and committed.",
+		"network": testNetwork,
+		"worlds":  worlds,
 	}
 	b, err := json.MarshalIndent(doc, "", "  ")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(out, append(b, '\n'), 0o644))
-	for _, c := range cases {
-		t.Logf("%-70s -> %q", c.Name, c.Want)
-	}
 }

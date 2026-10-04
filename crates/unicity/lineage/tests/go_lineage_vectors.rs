@@ -40,19 +40,31 @@ struct Case {
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Vectors {
+struct File {
     network: u64,
+    worlds: Vec<World>,
+}
+
+/// One world: one genesis committee and the cases verified against it.
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct World {
+    name: String,
     genesis_trust_base: String,
     genesis_id: String,
     cases: Vec<Case>,
 }
 
-fn load() -> Vectors {
+fn vector_file() -> File {
     serde_json::from_str(&testdata("go-lineage-vectors.json")).expect("vectors parse")
 }
 
-fn genesis(v: &Vectors) -> History {
+/// The full world: genesis epoch starting at round 0, with the whole negative list.
+fn load() -> World {
+    vector_file().worlds.into_iter().find(|w| w.name == "genesis-start-0").expect("the full world")
+}
+
+fn genesis(v: &World) -> History {
     History::new(&unhex(&v.genesis_trust_base), array32(&v.genesis_id))
         .expect("the pinned genesis verifies")
 }
@@ -70,10 +82,10 @@ fn verdict(h: &History, raw: &[u8]) -> (String, Option<History>) {
 fn every_go_verdict_is_reproduced_from_the_bytes() {
     let v = load();
     let g = genesis(&v);
-    assert_eq!(g.network(), v.network);
+    assert_eq!(g.network(), vector_file().network);
     assert_eq!(hex(&g.genesis()), v.genesis_id);
     assert!(
-        v.cases.len() >= 40,
+        v.cases.len() >= 100,
         "the vector set is the full Go negative list, got {}",
         v.cases.len()
     );
@@ -126,7 +138,7 @@ fn every_go_verdict_is_reproduced_from_the_bytes() {
             }
         }
     }
-    assert!(accepted >= 2 && refused >= 35, "accepted {accepted}, refused {refused}");
+    assert!(accepted >= 4 && refused >= 90, "accepted {accepted}, refused {refused}");
 }
 
 /// Every single-bit flip of the authenticated lineage bytes (everything after the opaque carriage

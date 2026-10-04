@@ -92,14 +92,15 @@ fn vote_info(v: &serde_json::Value) -> VoteInfo {
 }
 
 #[test]
-fn the_set_is_the_seven_committed_vectors() {
+fn the_set_is_the_nine_merged_vectors() {
     let (set, cfg) = load();
-    assert_eq!(set.vectors.len(), 7);
+    assert_eq!(set.vectors.len(), 9);
+    assert_eq!(set.vectors.iter().filter(|v| v.kind == "quorumCertificate").count(), 2);
     assert_eq!(cfg.vote_domain(), format!("root-vote/{}", set.root_genesis_hex));
     assert_eq!(cfg.timeout_domain(), format!("root-timeout/{}", set.root_genesis_hex));
     let schemes: Vec<_> = set.vectors.iter().map(|v| (v.scheme, v.kind.as_str())).collect();
     assert_eq!(schemes.iter().filter(|(s, _)| *s == 1).count(), 2);
-    assert_eq!(schemes.iter().filter(|(s, _)| *s == 2).count(), 5);
+    assert_eq!(schemes.iter().filter(|(s, _)| *s == 2).count(), 7);
 }
 
 #[test]
@@ -440,4 +441,146 @@ fn malformed_statements_and_signatures_are_refused_by_kind() {
         *s.last_mut().unwrap() = last;
         assert_eq!(votesig::check_signature_shape(&s).is_ok(), ok, "length {len} last byte {last}");
     }
+}
+
+/// The compressed key of each of signers 1, 2 and 3: 1 and 2 are the vote and timeout vectors'
+/// keys, 3 is recovered from the timeout certificate's signature over its embedded legacy QC (the
+/// vectors give no key for it).
+fn signer_keys(set: &Set) -> BTreeMap<String, Vec<u8>> {
+    let mut keys = BTreeMap::new();
+    for (id, kind) in [("1", "vote"), ("2", "timeout")] {
+        let v = set.vectors.iter().find(|v| v.scheme == 2 && v.kind == kind).expect("vector");
+        keys.insert(id.to_owned(), unhex(&v.public_key_hex));
+    }
+    let tc = set.vectors.iter().find(|v| v.kind == "timeoutCertificate").expect("certificate");
+    let wire = dec(&unhex(&tc.wire_hex));
+    let qc = wire.arr()[1].arr()[0].arr()[2].arr();
+    let signed = seal_sig_bytes(&qc[1]);
+    let sig = qc[2]
+        .map()
+        .iter()
+        .find(|(k, _)| k.text() == "3")
+        .map(|(_, s)| s.bytes().to_vec())
+        .expect("signer 3");
+    keys.insert(
+        "3".to_owned(),
+        votesig::recover_signer(&signed, &sig).expect("recoverable").to_vec(),
+    );
+    keys
+}
+
+#[test]
+fn the_paired_quorum_certificates_are_reproduced_byte_for_byte() {
+    let (set, cfg) = load();
+    let keys = signer_keys(&set);
+    let mut seen = 0;
+    for v in set.vectors.iter().filter(|v| v.kind == "quorumCertificate") {
+        seen += 1;
+        let vi = VoteInfo {
+            epoch: num(&v.inputs, "epoch"),
+            round: num(&v.inputs, "round"),
+            parent: num(&v.inputs, "parentRound"),
+            exec: [0x5e; 32],
+        };
+        let signers: Vec<String> = v.inputs["signers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|s| s.as_str().unwrap().to_owned())
+            .collect();
+        // wire: [2, [voteInfo, ledgerCommitInfo, voteSignatureMap, sealSignatureMap|null]]
+        let wire = dec(&unhex(&v.wire_hex));
+        assert_eq!(wire.arr()[0].uint(), 2, "{}", v.name);
+        let m = wire.arr()[1].arr();
+        let wvi = m[0].arr();
+        assert_eq!(
+            (wvi[0].uint(), wvi[1].uint(), wvi[2].uint()),
+            (vi.epoch, vi.round, vi.parent),
+            "{}",
+            v.name
+        );
+        assert_eq!(wvi[3].bytes(), vi.exec);
+        let vh = cfg.vote_info_hash(&vi).expect("vote info hash");
+        assert_eq!(
+            hex(&vh),
+            v.derived_hex.as_ref().expect("derived")["voteInfoHash"],
+            "{}",
+            v.name
+        );
+        let seal = m[1].tagged(SEAL).arr();
+        assert_eq!(seal[5].bytes(), vh, "{}: PreviousHash is VH", v.name);
+        let commit = match &seal[6] {
+            Val::Null => Commit { hash: None, round: seal[2].uint() },
+            h => Commit {
+                hash: Some(h.bytes().try_into().expect("32 bytes")),
+                round: seal[2].uint(),
+            },
+        };
+        let pv = cfg.vote_preimage(&vi, &commit).expect("preimage");
+        assert_eq!(hex(&pv), v.signed_bytes_hex, "{}", v.name);
+        assert_eq!(hex(&votesig::digest(&pv)), v.digest_hex, "{}", v.name);
+
+        let vote_sigs: BTreeMap<String, Vec<u8>> =
+            m[2].map().iter().map(|(k, s)| (k.text().to_owned(), s.bytes().to_vec())).collect();
+        assert_eq!(
+            vote_sigs.keys().cloned().collect::<Vec<_>>(),
+            signers,
+            "{}: exactly the listed signers",
+            v.name
+        );
+        for (id, sig) in &vote_sigs {
+            assert_eq!(hex(sig), v.signatures_hex[&format!("vote/{id}")], "{} signer {id}", v.name);
+            assert!(
+                votesig::verify_preimage(&keys[id], &pv, sig),
+                "{} signer {id}: the vote signature",
+                v.name
+            );
+            assert_eq!(
+                votesig::recover_signer(&pv, sig).map(|k| k.to_vec()),
+                Some(keys[id].clone()),
+                "{} signer {id}",
+                v.name
+            );
+        }
+        if commit.hash.is_some() {
+            let native = seal_sig_bytes(&m[1]);
+            assert_eq!(
+                hex(&native),
+                v.derived_hex.as_ref().unwrap()["nativeSealSigBytes"],
+                "{}",
+                v.name
+            );
+            let seal_sigs: BTreeMap<String, Vec<u8>> =
+                m[3].map().iter().map(|(k, s)| (k.text().to_owned(), s.bytes().to_vec())).collect();
+            assert_eq!(
+                seal_sigs.keys().collect::<Vec<_>>(),
+                vote_sigs.keys().collect::<Vec<_>>(),
+                "{}: matching signer sets in both maps",
+                v.name
+            );
+            for (id, sig) in &seal_sigs {
+                assert_eq!(
+                    hex(sig),
+                    v.signatures_hex[&format!("seal/{id}")],
+                    "{} signer {id}",
+                    v.name
+                );
+                assert!(
+                    votesig::verify_preimage(&keys[id], &native, sig),
+                    "{} signer {id}: the seal signature",
+                    v.name
+                );
+                assert_ne!(sig, &vote_sigs[id], "the pair is two different signatures");
+            }
+        } else {
+            assert_eq!(
+                m[3],
+                Val::Null,
+                "{}: a non-committing certificate has no seal signature map",
+                v.name
+            );
+            assert!(v.signatures_hex.keys().all(|k| k.starts_with("vote/")), "{}", v.name);
+        }
+    }
+    assert_eq!(seen, 2);
 }
