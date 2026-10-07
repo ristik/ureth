@@ -1,6 +1,6 @@
 {
   "repository": "ristik/native-bridge-plugins",
-  "revision": "4256bb42b993e5ec0793ddfdf4832c417668e124",
+  "revision": "85a8e507eabe6aaaf5a117b0d435b0e0a9aec802",
   "sha256": {
     "interop.md": "07c8ee9602037d86caf0b0fa4d66832abfba0cbd0a793cb02dda7d6ed002080e",
     "abi.json": "73714a4a6e143049e96c01997436b9316707f4fe45e43f536d82cf2dc5d6a654",
@@ -9,8 +9,8 @@
     "sdk-trust-base.md": "4240485c09d0d5c2e86e3e5d88e79b08314d37a309229cf8970d5a21f3fc8b2e",
     "kernel-expectations.json": "f1d55e7ff94c68194f45afc5e9f98cd7bcdc4610ed38378649d5366b3dc98282"
   },
-  "corpusRevision": "4256bb42b993e5ec0793ddfdf4832c417668e124",
-  "corpusManifestSha256": "99c0a3c222af572013d38f1d53c7019213c256e64c012e497c8d32bf3014dfb7",
-  "oracleRevision": "0a57e73ccc06d0bb0767ab02e6b5e1389f9d78b3",
+  "corpusRevision": "85a8e507eabe6aaaf5a117b0d435b0e0a9aec802",
+  "corpusManifestSha256": "d890912549947d1ade346002206ebe306d6937c3e43b7fe3ea1d338eb6827820",
+  "oracleRevision": "2b6d9494cca8033b495ea97ff33d660ee84f9760",
   "upstreamStatus": "sealed-candidate-unmerged"
 }

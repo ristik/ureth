@@ -5,10 +5,10 @@ address `0x0104`. No production crate imports it and no node factory registers i
 `0x0103` remains reserved. This does not enable bridging or change B1.
 
 The byte contract is native-bridge-plugins PR1 revision
-`4256bb42b993e5ec0793ddfdf4832c417668e124`; exact source artifacts and their digests
+`85a8e507eabe6aaaf5a117b0d435b0e0a9aec802`; exact source artifacts and their digests
 are under `protocol/`. The sealed candidate corpus has manifest digest
-`99c0a3c222af572013d38f1d53c7019213c256e64c012e497c8d32bf3014dfb7` and Go oracle
-revision `0a57e73ccc06d0bb0767ab02e6b5e1389f9d78b3`. All 296 sealed cases replay
+`d890912549947d1ade346002206ebe306d6937c3e43b7fe3ea1d338eb6827820` and Go oracle
+revision `2b6d9494cca8033b495ea97ff33d660ee84f9760`. All 336 sealed cases replay
 against that oracle. The ordinary Rust test suite enforces all 116 B2 kernel calls
 with exact ABI output or exact halt diagnostics, plus corpus/artifact integrity.
 The remaining operations concern SDK codecs, policy, offline backing, composition
@@ -30,9 +30,11 @@ zero and values above 65535 halt with `IntRange`. The sealed corpus includes
 cfg-bound and signed mints, prepare calls and independent mint wire checks.
 Local constructors independently cover the same boundary.
 
-CI verifies the checked-in sealed digest and replays all 116 pure Kernel calls
-without fetching bft-core. Full exact Go replay of all 296 cases runs locally
-and in bft-core CI; ureth CI has no private-repository token dependency.
+CI verifies the checked-in sealed digest and replays all 116 pure Kernel calls.
+A separate CI job anonymously checks out the public bft-core source commit
+pinned in provenance and replays all 336 cases with exact outcomes; it also
+regenerates and compares every data file. Full Go replay runs locally and in
+bft-core CI as well. No repository secret is needed.
 
 ## Boundary
 

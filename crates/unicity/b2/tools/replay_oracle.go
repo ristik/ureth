@@ -94,7 +94,7 @@ func main() {
 			kernels = append(kernels, kernelCase{c.ID, expected})
 		}
 	}
-	if total != 296 || len(kernels) != 116 {
+	if total != 336 || len(kernels) != 116 {
 		panic(fmt.Sprintf("unexpected coverage: %d/%d", total, len(kernels)))
 	}
 	data, err := json.MarshalIndent(kernels, "", "  ")
