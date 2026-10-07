@@ -8,7 +8,7 @@
 
 mod support;
 
-use reth_unicity_lineage::{Envelope, History, Kind};
+use reth_unicity_lineage::{Envelope, History};
 use serde::Deserialize;
 use support::{array32, hex, testdata, unhex};
 

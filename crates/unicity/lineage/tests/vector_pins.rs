@@ -6,10 +6,9 @@ mod support;
 
 use support::{hex, sha256, testdata};
 
-/// `q3format/testdata/vectors.json` at the head of bft-core #407, `d36d3611`. #407 (B2) is not
-/// merged: the merged B1 file at #406 is
-/// `0b526fee0b16b3f9eace1b31dd5482e4589befc5e951b71f51129d8ec6e3084a` and lacks the envelope field.
-/// Re-pin once #407 merges.
+/// `q3format/testdata/vectors.json` at merged bft-core #407, `dfd6657b`. The B1 file at #406 is
+/// `0b526fee0b16b3f9eace1b31dd5482e4589befc5e951b71f51129d8ec6e3084a` and lacks the envelope
+/// field.
 const Q3FORMAT_VECTORS: &str = "b5302754686d4aa9ca29fddb3b139517f4e741d2d220b0bfb266eae6ff29a103";
 /// `network/protocol/abdrc/testdata/domain_bound_vectors.json` at merged #406
 /// `c82cc8266390357b1166913b59269e063cce37d8` (nine vectors, including #396's two paired quorum

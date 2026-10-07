@@ -1,0 +1,159 @@
+package q3format
+
+import (
+	"bytes"
+	stdhex "encoding/hex"
+	"encoding/json"
+	"os"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+	"github.com/unicitynetwork/bft-go-base/types"
+)
+
+// Appends the typed proof-decode parity cases (ureth C2a) to the committed go-lineage-vectors.json without regenerating it (the
+// signers are random): `Q3_APPEND_RUST_VECTORS=/path/go-lineage-vectors.json go test ./q3format -run TestAppendRustVectors`.
+// Each case patches the wire bytes of the committed first-link proof; the production Go verifier classifies the result, and the
+// Rust verifier must reach the same sentinel from the same bytes.
+
+func TestAppendRustVectors(t *testing.T) {
+	path := os.Getenv("Q3_APPEND_RUST_VECTORS")
+	if path == "" {
+		t.Skip("set Q3_APPEND_RUST_VECTORS to the committed vector file")
+	}
+	file, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var doc map[string]any
+	require.NoError(t, json.Unmarshal(file, &doc))
+	var world map[string]any
+	for _, w := range doc["worlds"].([]any) {
+		if w.(map[string]any)["name"] == "genesis-start-0" {
+			world = w.(map[string]any)
+		}
+	}
+	require.NotNil(t, world)
+	gen, err := stdhex.DecodeString(world["genesisTrustBase"].(string))
+	require.NoError(t, err)
+	var tb types.RootTrustBaseV1
+	require.NoError(t, types.Cbor.Unmarshal(gen, &tb))
+	h, err := NewHistory(&tb)
+	require.NoError(t, err)
+
+	cases := world["cases"].([]any)
+	first := cases[0].(map[string]any)
+	require.Equal(t, "positive: first V3 link over the genesis", first["name"])
+	raw, err := stdhex.DecodeString(first["envelope"].(string))
+	require.NoError(t, err)
+	e, err := DecodeEnvelope(raw)
+	require.NoError(t, err)
+	proof := e.Links[0].Proof
+	p, err := decodeProof(proof)
+	require.NoError(t, err)
+
+	classifyEnv := func(raw []byte) string {
+		e, err := DecodeEnvelope(raw)
+		if err != nil {
+			return classify(err)
+		}
+		_, err = h.VerifyEnvelope(e)
+		return classify(err)
+	}
+	withProof := func(patched []byte) []byte {
+		l := e.Links[0]
+		l.Proof = patched
+		out := e
+		out.Links = []Link{l}
+		return wireEnvelope(out)
+	}
+	// replaces the one occurrence of old in the proof
+	patch := func(old, repl []byte) []byte {
+		require.Equal(t, 1, bytes.Count(proof, old))
+		return bytes.Replace(proof, old, repl, 1)
+	}
+	// the embedded seal is [tag, 1, network, ...]: version 1 then the network as the next items of the 8-item array
+	seal, err := types.Cbor.Marshal(p.CommitQC.LedgerCommitInfo)
+	require.NoError(t, err)
+	hdr := []byte{0x88, 0x01, 0x05}
+	i := bytes.Index(seal, hdr)
+	require.Positive(t, i)
+	sealWithNetwork := func(enc ...byte) []byte {
+		return append(append(append([]byte(nil), seal[:i+2]...), enc...), seal[i+3:]...)
+	}
+	sig, err := types.Cbor.Marshal(p.CommitQC.Signatures["a"])
+	require.NoError(t, err)
+	signerA := []byte{0x61, 0x61}
+
+	add := func(name string, patched []byte) {
+		raw := withProof(patched)
+		want := classifyEnv(raw)
+		t.Logf("%-70s -> %q", name, want)
+		cases = append(cases, map[string]any{"name": name, "envelope": stdhex.EncodeToString(raw), "want": want,
+			"detail": "the committed first-link proof with one wire-level patch; classified by the production Go verifier"})
+	}
+	add("proof wire: unpatched re-encode (acceptance control)", proof)
+	add("proof wire: seal network 65535 decodes, then the network binding fails", patch(seal, sealWithNetwork(0x19, 0xff, 0xff)))
+	add("proof wire: seal network 65536 overflows uint16", patch(seal, sealWithNetwork(0x1a, 0x00, 0x01, 0x00, 0x00)))
+	add("proof wire: seal network 2^64-1 overflows uint16", patch(seal, sealWithNetwork(0x1b, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff)))
+	add("proof wire: null commit QC signature decodes, then authentication fails", patch(append(append([]byte(nil), signerA...), sig...), append(append([]byte(nil), signerA...), 0xf6)))
+	add("proof wire: empty commit QC signature decodes, then authentication fails", patch(append(append([]byte(nil), signerA...), sig...), append(append([]byte(nil), signerA...), 0x40)))
+
+	world["cases"] = cases
+	b, err := json.MarshalIndent(doc, "", "  ")
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, append(b, '\n'), 0o644))
+}
+
+// TestReplayRustVectors is the Go side of the shared oracle: every case of the committed file, in every world, classified by the
+// production Go verifier from its bytes must give the recorded verdict (and an accepted one the recorded identities).
+// `Q3_REPLAY_RUST_VECTORS=/path/go-lineage-vectors.json go test ./q3format -run TestReplayRustVectors`.
+func TestReplayRustVectors(t *testing.T) {
+	path := os.Getenv("Q3_REPLAY_RUST_VECTORS")
+	if path == "" {
+		t.Skip("set Q3_REPLAY_RUST_VECTORS to the committed vector file")
+	}
+	file, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var doc struct {
+		Worlds []struct {
+			Name             string
+			GenesisTrustBase string
+			Cases            []rustCase
+		}
+	}
+	require.NoError(t, json.Unmarshal(file, &doc))
+	require.NotEmpty(t, doc.Worlds)
+	for _, w := range doc.Worlds {
+		gen, err := stdhex.DecodeString(w.GenesisTrustBase)
+		require.NoError(t, err)
+		var tb types.RootTrustBaseV1
+		require.NoError(t, types.Cbor.Unmarshal(gen, &tb))
+		g, err := NewHistory(&tb)
+		require.NoError(t, err)
+		run := func(h *History, hexEnv string) (string, *History) {
+			raw, err := stdhex.DecodeString(hexEnv)
+			require.NoError(t, err)
+			e, err := DecodeEnvelope(raw)
+			if err != nil {
+				return classify(err), nil
+			}
+			next, err := h.VerifyEnvelope(e)
+			return classify(err), next
+		}
+		for _, c := range w.Cases {
+			base := g
+			if c.After != "" {
+				got, next := run(g, c.After)
+				require.Equal(t, "", got, "%s/%s: the retained envelope must itself be accepted", w.Name, c.Name)
+				base = next
+			}
+			got, next := run(base, c.Envelope)
+			require.Equal(t, c.Want, got, "%s/%s", w.Name, c.Name)
+			if c.Expect != nil {
+				require.NotNil(t, next)
+				tip := next.Tip()
+				require.Equal(t, c.Expect.BodyID, hx(tip.bodyID[:]), "%s/%s", w.Name, c.Name)
+				require.Equal(t, c.Expect.CommitID, hx(tip.commitID[:]), "%s/%s", w.Name, c.Name)
+			}
+		}
+	}
+}

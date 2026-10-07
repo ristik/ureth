@@ -404,7 +404,18 @@ fn read_qc(v: &Value) -> Result<Option<Qc>> {
             let mut r = tagged(v, SEAL_TAG, 8)?;
             let s = Seal {
                 version: versioned(r.uint()?, "unicity seal")?,
-                network: r.uint()?,
+                // go-base's NetworkID is a uint16 and its seal decoder refuses overflow
+                // (types/unicity_seal.go:157), a typed-decode failure before any authentication
+                network: {
+                    let n = r.uint()?;
+                    if n > u64::from(u16::MAX) {
+                        return Err(format(format_args!(
+                            "seal network ID {n} exceeds maximum value {}",
+                            u16::MAX
+                        )));
+                    }
+                    n
+                },
                 round: r.uint()?,
                 epoch: r.uint()?,
                 timestamp: r.uint()?,
@@ -431,12 +442,16 @@ fn read_qc(v: &Value) -> Result<Option<Qc>> {
             Some(s)
         }
     };
+    // the quorum certificate's map is `map[string]hex.Bytes`: a null value decodes to a nil byte
+    // slice (rootchain/consensus/types/quorum_certificate.go:33) that fails authentication, so it
+    // is an empty signature here, not a format error
     let signatures = match f.take()? {
         Value::Null => Signatures::new(),
         Value::Map(pairs) => pairs
             .iter()
             .map(|(k, s)| match (k, s) {
                 (Value::Text(k), Value::Bytes(s)) => Ok((k.clone(), s.clone())),
+                (Value::Text(k), Value::Null) => Ok((k.clone(), Vec::new())),
                 _ => Err(format("quorum certificate signature entry")),
             })
             .collect::<Result<_>>()?,
