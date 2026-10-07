@@ -10,8 +10,8 @@ mod semantics;
 
 use sha2::{Digest, Sha256};
 
-/// Exact protocol snapshot with sealed candidate corpus; upstream merge is pending.
-pub const PROTOCOL_REVISION: &str = "4ccb290b44a373f4a5a8f997b05300231dd9bc00";
+/// Exact protocol snapshot and sealed corpus pinned to merged upstream revisions.
+pub const PROTOCOL_REVISION: &str = "f35edc2652567e579a5940479039043e82a67f77";
 /// This address remains inactive in all production node factories.
 pub const ADDRESS: alloy_primitives::Address =
     alloy_primitives::address!("0000000000000000000000000000000000000104");

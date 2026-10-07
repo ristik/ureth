@@ -5,10 +5,10 @@ address `0x0104`. No production crate imports it and no node factory registers i
 `0x0103` remains reserved. This does not enable bridging or change B1.
 
 The byte contract is native-bridge-plugins PR1 revision
-`4ccb290b44a373f4a5a8f997b05300231dd9bc00`; exact source artifacts and their digests
-are under `protocol/`. The sealed candidate corpus has manifest digest
-`d890912549947d1ade346002206ebe306d6937c3e43b7fe3ea1d338eb6827820` and Go oracle
-revision `2b6d9494cca8033b495ea97ff33d660ee84f9760`. All 336 sealed cases replay
+`f35edc2652567e579a5940479039043e82a67f77`; exact source artifacts and their digests
+are under `protocol/`. The sealed release corpus has manifest digest
+`1e924fc33ae47e7625bd030d5b067bfc786810a4d32570f4cdc8acd040014286` and Go oracle
+revision `52fe1934ce707edecec0a0df05b6a77eaf54e53e`. All 336 sealed cases replay
 against that oracle. The ordinary Rust test suite enforces all 116 B2 kernel calls
 with exact ABI output or exact halt diagnostics, plus corpus/artifact integrity.
 The remaining operations concern SDK codecs, policy, offline backing, composition
@@ -17,11 +17,11 @@ not a second golden corpus. `kernel-expectations.json` is derived by executing t
 pinned Go Kernel on the sealed inputs, after verifying all original expectations;
 this also preserves the direct PrepareLock/ABI distinction for zero amounts.
 
-PR1 and bft-core #422 are **unmerged**. These are sealed candidate revision pins,
-not merged release pins. Release/activation remains gated on their merge and the
-corresponding pin update (`verify_protocol.py --require-release`). No merge or
-activation is claimed. The SDK-extension pure core remains a constants-only
-skeleton, so this crate implements the narrow relation itself.
+Native-bridge-plugins PR1 and bft-core #422 are merged. The protocol, corpus
+and oracle pins reference their merge commits; `verify_protocol.py --require-release`
+checks the released snapshot. Activation remains gated and bridging stays inactive.
+The SDK-extension pure core remains a constants-only skeleton, so this crate
+implements the narrow relation itself.
 
 Both SDK 3.0.1 NetworkId codecs require `1..=65535`. The shared profile,
 manifest schema, Go oracle and Rust Cfg/mint wire decoders enforce that range;

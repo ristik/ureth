@@ -8,9 +8,9 @@ import sys
 root = Path(__file__).resolve().parents[1] / 'protocol'
 pin = json.loads((root / 'pin.json').read_text())
 assert pin['repository'] == 'ristik/native-bridge-plugins'
-assert pin['revision'] == '4ccb290b44a373f4a5a8f997b05300231dd9bc00'
+assert pin['revision'] == 'f35edc2652567e579a5940479039043e82a67f77'
 assert pin['corpusRevision'] == pin['revision']
-assert pin['oracleRevision'] == '2b6d9494cca8033b495ea97ff33d660ee84f9760'
+assert pin['oracleRevision'] == '52fe1934ce707edecec0a0df05b6a77eaf54e53e'
 for name, expected in pin['sha256'].items():
     actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
     assert actual == expected, (name, actual, expected)
