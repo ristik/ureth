@@ -96,9 +96,9 @@ fn sealed_corpus_exact_kernel_outcomes() {
                 }
                 // These ops belong to SDK codecs, policy, offline backing,
                 // composition or the vault; replay_oracle.go checks all of them.
-                "trust-input" | "cfg-decode" | "identifiers" | "value-data" | "derive" | "unlock" |
-                "policy-decode" | "envelope-policy" | "token-project" | "justification" |
-                "lock-backing" | "mpt" | "compose" => continue,
+                "trust-input" | "cfg-decode" | "identifiers" | "value-data" | "derive" |
+                "unlock" | "policy-decode" | "envelope-policy" | "token-project" |
+                "justification" | "lock-backing" | "mpt" | "compose" => continue,
                 other => panic!("unclassified corpus operation {other}"),
             };
             replayed += 1;
