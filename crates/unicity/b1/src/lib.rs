@@ -2,7 +2,7 @@
 //!
 //! Authority comes exclusively from the current EVM journal after authenticated
 //! block admission. This crate neither authenticates history nor enables a fork.
-mod cbor;
+pub mod cbor;
 mod certificate;
 pub mod provider;
 mod registry;

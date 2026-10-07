@@ -3,10 +3,15 @@
 use crate::{Malformed, Reader};
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Item<'a> {
+/// A borrowed item produced only by a successful bounded scan.
+pub struct Item<'a> {
+    /// Exact encoded bytes.
     pub raw: &'a [u8],
+    /// CBOR major type.
     pub major: u8,
+    /// Decoded shortest-form argument.
     pub arg: u64,
+    /// Content after the head.
     pub data: &'a [u8],
 }
 fn head(r: &mut Reader<'_>) -> Result<(u8, u64), Malformed> {
@@ -26,7 +31,18 @@ fn head(r: &mut Reader<'_>) -> Result<(u8, u64), Malformed> {
     }
     Ok((first >> 5, n))
 }
-fn scan(r: &mut Reader<'_>, depth: usize, tokens: &mut usize) -> Result<(), Malformed> {
+fn scan(
+    r: &mut Reader<'_>,
+    depth: usize,
+    tokens: &mut usize,
+    token: bool,
+) -> Result<(), Malformed> {
+    if token && r.data.first().is_some_and(|b| matches!(b >> 5, 3 | 5)) {
+        return Err(Malformed::Cbor);
+    }
+    if token && r.data.first().is_some_and(|b| matches!(b & 31, 28..=30)) {
+        return Err(Malformed::Canonical);
+    }
     *tokens += 1;
     if *tokens > 32768 {
         return Err(Malformed::Limit);
@@ -64,7 +80,7 @@ fn scan(r: &mut Reader<'_>, depth: usize, tokens: &mut usize) -> Result<(), Malf
             let mut keys: [&[u8]; 64] = [&[]; 64];
             for i in 0..count {
                 let start = r.data;
-                scan(r, depth + 1, tokens)?;
+                scan(r, depth + 1, tokens, token)?;
                 if m == 5 && i % 2 == 0 {
                     let key = &start[..start.len() - r.data.len()];
                     let idx = (i / 2) as usize;
@@ -81,9 +97,22 @@ fn scan(r: &mut Reader<'_>, depth: usize, tokens: &mut usize) -> Result<(), Malf
     Ok(())
 }
 
-pub(crate) fn one<'a>(data: &'a [u8], tokens: &mut usize) -> Result<Item<'a>, Malformed> {
+/// Scan exactly one complete CBOR tree without allocation; share the item budget
+/// across buffers by passing the same counter.
+pub fn one<'a>(data: &'a [u8], tokens: &mut usize) -> Result<Item<'a>, Malformed> {
     let mut r = Reader { data };
-    scan(&mut r, 0, tokens)?;
+    scan(&mut r, 0, tokens, false)?;
+    if !r.data.is_empty() {
+        return Err(Malformed::Trailing);
+    }
+    item(data)
+}
+/// Scan the token profile subset (uint, bstr, array, tag and null) without
+/// changing the broader native certificate grammar. Share the token counter
+/// across Cfg, history and embedded payloads.
+pub fn one_token<'a>(data: &'a [u8], tokens: &mut usize) -> Result<Item<'a>, Malformed> {
+    let mut r = Reader { data };
+    scan(&mut r, 0, tokens, true)?;
     if !r.data.is_empty() {
         return Err(Malformed::Trailing);
     }
@@ -95,21 +124,19 @@ fn item(data: &[u8]) -> Result<Item<'_>, Malformed> {
     Ok(Item { raw: data, major, arg, data: r.data })
 }
 impl<'a> Item<'a> {
-    pub(crate) const fn null(self) -> bool {
+    /// Whether this is the null item.
+    pub const fn null(self) -> bool {
         self.major == 7 && self.arg == 22
     }
-    pub(crate) const fn uint(self, max: u64) -> Result<u64, Malformed> {
+    /// Require a bounded unsigned integer.
+    pub const fn uint(self, max: u64) -> Result<u64, Malformed> {
         if self.major != 0 || self.arg > max {
             return Err(Malformed::Shape);
         }
         Ok(self.arg)
     }
-    pub(crate) const fn blob(
-        self,
-        major: u8,
-        min: usize,
-        max: usize,
-    ) -> Result<&'a [u8], Malformed> {
+    /// Require a bounded byte or text string.
+    pub const fn blob(self, major: u8, min: usize, max: usize) -> Result<&'a [u8], Malformed> {
         if self.major != major || self.data.len() < min {
             return Err(Malformed::Shape);
         }
@@ -118,13 +145,15 @@ impl<'a> Item<'a> {
         }
         Ok(self.data)
     }
-    pub(crate) const fn bytes(self, n: usize) -> Result<&'a [u8], Malformed> {
+    /// Require an exact-width byte string.
+    pub const fn bytes(self, n: usize) -> Result<&'a [u8], Malformed> {
         if self.major != 2 || self.arg != n as u64 {
             return Err(Malformed::Shape);
         }
         Ok(self.data)
     }
-    pub(crate) fn array<const N: usize>(self) -> Result<[Self; N], Malformed> {
+    /// Require an exact-arity array.
+    pub fn array<const N: usize>(self) -> Result<[Self; N], Malformed> {
         if self.major != 4 || self.arg != N as u64 {
             return Err(Malformed::Shape);
         }
@@ -134,7 +163,8 @@ impl<'a> Item<'a> {
         }
         Ok(out)
     }
-    pub(crate) fn tagged<const N: usize>(self, tag: u64) -> Result<[Self; N], Malformed> {
+    /// Require a tag, array arity and literal version 1.
+    pub fn tagged<const N: usize>(self, tag: u64) -> Result<[Self; N], Malformed> {
         if self.major != 6 || self.arg != tag {
             return Err(Malformed::Shape);
         }
@@ -144,7 +174,8 @@ impl<'a> Item<'a> {
         }
         Ok(a)
     }
-    pub(crate) const fn collection(self, major: u8, max: u64) -> Result<u64, Malformed> {
+    /// Require a bounded container, allowing null as empty.
+    pub const fn collection(self, major: u8, max: u64) -> Result<u64, Malformed> {
         if self.null() {
             return Ok(0);
         }
@@ -156,11 +187,14 @@ impl<'a> Item<'a> {
         }
         Ok(self.arg)
     }
-    pub(crate) const fn children(self) -> Children<'a> {
+    /// Iterate validated child items without allocation.
+    pub const fn children(self) -> Children<'a> {
         Children { rest: if self.null() { &[] } else { self.data } }
     }
 }
-pub(crate) struct Children<'a> {
+/// Borrowed children of a validated container.
+#[derive(Debug)]
+pub struct Children<'a> {
     rest: &'a [u8],
 }
 impl<'a> Iterator for Children<'a> {
@@ -173,7 +207,7 @@ impl<'a> Iterator for Children<'a> {
         let mut r = Reader { data: start };
         // All views originate in the successful full-tree scan. Rescanning a
         // child only locates its boundary; it cannot observe new caller bytes.
-        scan(&mut r, 0, &mut 0).expect("validated CBOR child");
+        scan(&mut r, 0, &mut 0, false).expect("validated CBOR child");
         self.rest = r.data;
         Some(item(&start[..start.len() - r.data.len()]).expect("validated CBOR head"))
     }
@@ -228,5 +262,24 @@ mod shape_tests {
         let a = one(&[0x82, 0, 0], &mut 0).unwrap();
         assert_eq!(a.collection(4, 1), Err(Malformed::Limit));
         assert_eq!(a.array::<1>().unwrap_err(), Malformed::Shape);
+    }
+}
+
+#[cfg(test)]
+mod token_tests {
+    use super::*;
+    #[test]
+    fn token_subset_does_not_change_certificate_grammar() {
+        for b in [&[0x60][..], &[0xa0]] {
+            assert_eq!(one_token(b, &mut 0).unwrap_err(), Malformed::Cbor);
+            assert!(one(b, &mut 0).is_ok());
+        }
+        for b in [&[0x1c][..], &[0x1d], &[0x1e]] {
+            assert_eq!(one_token(b, &mut 0).unwrap_err(), Malformed::Canonical);
+            assert_eq!(one(b, &mut 0).unwrap_err(), Malformed::Cbor);
+        }
+        assert_eq!(one_token(&[0x81, 0xa0], &mut 0).unwrap_err(), Malformed::Cbor);
+        assert_eq!(one_token(&[0, 0], &mut 0).unwrap_err(), Malformed::Trailing);
+        assert_eq!(one_token(&[0], &mut 32768).unwrap_err(), Malformed::Limit);
     }
 }
