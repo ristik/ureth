@@ -10,7 +10,7 @@ Root-input v2 keeps its existing tuple. Its transition list now accepts one cano
 `UNICITY_HANDOFF_EVM_TRANSITION/v3` body with the assignment's old/new root and shard epochs,
 active configuration hashes, and bounded supersession span. A root jump larger than one is accepted
 only with `span == rootDelta`, matching shard delta, a nonzero span commitment, and a span no larger
-than 64. The paired BFT verifier authenticates the ordered handoff history before this input reaches
+than 2 (a committed primary and its one recovery). The paired BFT verifier authenticates the ordered handoff history before this input reaches
 Ureth; this crate does not verify root or shard signatures. Build envelopes must repeat exactly the
 same transition bytes as root-input `D[]`, and the decoder refuses any mismatch.
 
