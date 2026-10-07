@@ -76,7 +76,7 @@ use reth_payload_builder_primitives::PayloadBuilderError;
 use reth_payload_primitives::PayloadAttributes;
 use reth_storage_api::StateProviderFactory;
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
-use reth_unicity_execution::block_executor::UnicityEvmConfig;
+use reth_unicity_execution::{block_executor::UnicityEvmConfig, pairing::PairBinding};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{error::Error, fmt, sync::Arc};
@@ -282,6 +282,7 @@ pub struct ResolvedPayloadJob {
     attributes: UnicityPayloadAttributes,
     payload_id: PayloadId,
     evm_config: UnicityEvmConfig,
+    pair_binding: Option<PairBinding>,
 }
 
 impl ResolvedPayloadJob {
@@ -304,7 +305,14 @@ impl ResolvedPayloadJob {
                 &next_block_attributes(&parent, &attributes, builder_config),
             )
             .map_err(|error| PayloadJobResolutionError(error.message()))?;
-        Ok(Self { parent, attributes, payload_id, evm_config })
+        Ok(Self { parent, attributes, payload_id, evm_config, pair_binding: None })
+    }
+
+    /// Attaches the verified pair binding the job was admitted under, so the companion the build
+    /// path returns carries it. A job without one cannot produce a companion.
+    pub const fn with_pair_binding(mut self, binding: PairBinding) -> Self {
+        self.pair_binding = Some(binding);
+        self
     }
 
     /// Checks that `config` still selects this exact immutable job.
@@ -331,6 +339,7 @@ impl ResolvedPayloadJob {
     pub(crate) fn same_build_input(&self, other: &Self) -> bool {
         self.parent == other.parent &&
             self.attributes == other.attributes &&
+            self.pair_binding == other.pair_binding &&
             self.evm_config.root_input() == other.evm_config.root_input()
     }
 }

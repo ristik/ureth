@@ -11,6 +11,7 @@ use tempfile::tempdir;
 fn companion(tag: u8) -> SealCompanion {
     SealCompanion {
         root_input: Bytes::from(vec![tag; 32]),
+        pair_binding: Bytes::from(vec![tag; 11]),
         witnesses: vec![Bytes::from(vec![tag; 7]), Bytes::from(vec![tag; 3])],
         provenance: format!("test-{tag}"),
     }

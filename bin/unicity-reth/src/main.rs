@@ -17,11 +17,11 @@ use reth_cli_util::allocator::tikv_jemalloc_sys as _;
 #[unsafe(export_name = "malloc_conf")]
 static MALLOC_CONF: &[u8] = b"prof:true,prof_active:true,lg_prof_sample:19\0";
 
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 use clap::{Args, Parser};
 use reth_config::Config as RethConfig;
 use reth_ethereum_cli::{chainspec::EthereumChainSpecParser, interface::Cli};
-use reth_unicity_execution::block::BlockProfile;
+use reth_unicity_execution::{block::BlockProfile, pairing::PairPins};
 use reth_unicity_payload::{
     recovery::ACCOUNTING_WINDOW, SealJobRegistry, UnicityNode, UnicityRetentionConfig,
     UnicitySealConfig,
@@ -38,6 +38,15 @@ struct UnicityArgs {
     /// Beneficiary every Unicity payload attributes must name.
     #[arg(long = "unicity.fee-collector", value_name = "ADDRESS")]
     fee_collector: Address,
+
+    /// Root network identifier this pair is pinned to. Every pair binding must name it.
+    #[arg(long = "unicity.network-id", value_name = "ID")]
+    network_id: u64,
+
+    /// Identity of the pinned root genesis this pair is pinned to. Every pair binding must name
+    /// it.
+    #[arg(long = "unicity.root-genesis-id", value_name = "HASH")]
+    root_genesis_id: B256,
 
     /// Header gas limit (`g_max`), retained as the real EVM block gas limit.
     #[arg(long = "unicity.max-gas", default_value_t = 30_000_000)]
@@ -174,7 +183,14 @@ fn main() {
                     "proof-source retention protection is disabled; pruning may permanently remove data required for offline proof capture"
                 );
             }
-            let seal = UnicitySealConfig { profile, fee_collector: args.fee_collector };
+            let seal = UnicitySealConfig {
+                profile,
+                fee_collector: args.fee_collector,
+                pins: PairPins {
+                    network_id: args.network_id,
+                    root_genesis_id: args.root_genesis_id,
+                },
+            };
 
             info!(target: "reth::cli", "Launching Unicity node");
             let handle = builder
@@ -205,6 +221,8 @@ mod tests {
     fn companion_retention_covers_accounting_repair() {
         let args = UnicityArgs {
             fee_collector: Address::ZERO,
+            network_id: 1,
+            root_genesis_id: B256::repeat_byte(1),
             max_gas: 30_000_000,
             system_gas: 2_000_000,
             base_fee_floor: 1_000_000,
@@ -222,6 +240,8 @@ mod tests {
     fn proof_args(enabled: bool, companion_retention_depth: Option<u64>) -> UnicityArgs {
         UnicityArgs {
             fee_collector: Address::ZERO,
+            network_id: 1,
+            root_genesis_id: B256::repeat_byte(1),
             max_gas: 30_000_000,
             system_gas: 2_000_000,
             base_fee_floor: 1_000_000,
@@ -318,6 +338,8 @@ mod tests {
             .try_get_matches_from([
                 "unicity",
                 "--unicity.fee-collector=0x0000000000000000000000000000000000000000",
+                "--unicity.network-id=1",
+                "--unicity.root-genesis-id=0x0101010101010101010101010101010101010101010101010101010101010101",
             ])
             .unwrap();
         let defaults = UnicityArgs::from_arg_matches(&matches).unwrap();
@@ -327,6 +349,8 @@ mod tests {
             .try_get_matches_from([
                 "unicity",
                 "--unicity.fee-collector=0x0000000000000000000000000000000000000000",
+                "--unicity.network-id=1",
+                "--unicity.root-genesis-id=0x0101010101010101010101010101010101010101010101010101010101010101",
                 "--unicity.no-proof-source",
             ])
             .unwrap();
@@ -343,6 +367,8 @@ mod tests {
             .try_get_matches_from([
                 "unicity",
                 "--unicity.fee-collector=0x0000000000000000000000000000000000000000",
+                "--unicity.network-id=1",
+                "--unicity.root-genesis-id=0x0101010101010101010101010101010101010101010101010101010101010101",
             ])
             .unwrap();
         let args = UnicityArgs::from_arg_matches(&matches).unwrap();

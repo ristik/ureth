@@ -72,6 +72,10 @@ use reth_unicity_execution::{
     block::BlockAccountingError,
     block_executor::{replay_complete, BoundExecutionInput, UnicityEvmConfig},
     node_evm::UnicityBlockExecutionRegistry,
+    pairing::{
+        attributes_digest, verify_pair_binding, ExpectedSubject, PairBinding, PairBindingError,
+        PairContext,
+    },
     wire::{
         bind_completed_parent, bind_validated_genesis, CanonicalCborError, SealBuildInput,
         SealCompanion,
@@ -168,6 +172,11 @@ pub struct SealConfigV1 {
     pub change_denominator: u64,
     /// Configured fee beneficiary.
     pub fee_collector: Address,
+    /// Root network identifier the pair is pinned to.
+    pub network_id: u64,
+    /// Identity of the pinned root genesis. The local Go side compares both pins with its own
+    /// before the first build.
+    pub root_genesis_id: B256,
 }
 
 impl From<UnicitySealConfig> for SealConfigV1 {
@@ -180,6 +189,8 @@ impl From<UnicitySealConfig> for SealConfigV1 {
             elasticity: seal.profile.elasticity,
             change_denominator: seal.profile.change_denominator,
             fee_collector: seal.fee_collector,
+            network_id: seal.pins.network_id,
+            root_genesis_id: seal.pins.root_genesis_id,
         }
     }
 }
@@ -221,6 +232,8 @@ pub enum SealBuildError {
     ParentAccountingUnavailable,
     /// The decoded input does not bind to the resolved parent.
     Binding(BlockAccountingError),
+    /// The local pair's binding is absent or does not match what this node holds.
+    PairBinding(PairBindingError),
     /// The node has not published its payload builder configuration yet.
     BuilderConfigUnavailable,
     /// The job was rejected by its own immutable binding checks.
@@ -243,6 +256,7 @@ impl fmt::Display for SealBuildError {
                 formatter.write_str("parent accounting token is not available")
             }
             Self::Binding(error) => write!(formatter, "parent binding failed: {error:?}"),
+            Self::PairBinding(error) => error.fmt(formatter),
             Self::BuilderConfigUnavailable => {
                 formatter.write_str("payload builder configuration is not published")
             }
@@ -279,6 +293,10 @@ pub enum SealImportError {
     ParentAccountingMissing,
     /// The decoded input does not bind to the resolved parent.
     Binding(BlockAccountingError),
+    /// The local pair's binding is absent or does not match what this node holds.
+    PairBinding(PairBindingError),
+    /// The companion could not be made durable, so the block is not forwarded.
+    CompanionNotDurable(String),
     /// Local execution rejected the block.
     Replay(String),
     /// A provider read failed; this is internal state, not caller input.
@@ -303,6 +321,10 @@ impl fmt::Display for SealImportError {
                 formatter.write_str("parent accounting token is not retained")
             }
             Self::Binding(error) => write!(formatter, "parent binding failed: {error:?}"),
+            Self::PairBinding(error) => error.fmt(formatter),
+            Self::CompanionNotDurable(error) => {
+                write!(formatter, "companion is not durable: {error}")
+            }
             Self::Replay(error) => write!(formatter, "local execution rejected the block: {error}"),
             Self::Provider(error) => write!(formatter, "provider read failed: {error}"),
         }
@@ -363,6 +385,28 @@ where
 
     let chain_spec = provider.chain_spec();
     let genesis_hash = chain_spec.genesis_hash();
+    // The local pair's own Go verification must have named exactly this build before anything is
+    // installed. No later step can substitute for it, and a missing binding never falls through.
+    let job_digest = attributes_digest(
+        attributes.inner.timestamp,
+        attributes.inner.prev_randao,
+        attributes.inner.suggested_fee_recipient,
+        attributes
+            .inner
+            .parent_beacon_block_root
+            .ok_or(SealBuildError::PairBinding(PairBindingError::JobMismatch))?,
+    );
+    let pair = verify_pair_binding(
+        &seal_build_input.pair_binding,
+        &PairContext {
+            pins: context.seal.pins,
+            execution_genesis_hash: genesis_hash,
+            parent: &parent,
+            root: &root,
+            subject: ExpectedSubject::Build { attributes_digest: job_digest },
+        },
+    )
+    .map_err(SealBuildError::PairBinding)?;
     let bound = if parent.number == 0 && parent.hash() == genesis_hash {
         bind_validated_genesis(
             root,
@@ -392,7 +436,8 @@ where
     let evm_config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec), Arc::new(bound));
     let job =
         ResolvedPayloadJob::new(Arc::new(parent), attributes.clone(), evm_config, builder_config)
-            .map_err(SealBuildError::Job)?;
+            .map_err(SealBuildError::Job)?
+            .with_pair_binding(pair);
     context.registry.insert(job).map_err(|_| SealBuildError::DuplicatePayloadId)?;
     Ok(attributes)
 }
@@ -447,11 +492,15 @@ pub fn companion_not_retained_error(payload_id: PayloadId) -> EngineApiError {
 /// The witness list is empty because the build input carries no witnesses. Witnesses are the
 /// authentication material a follower needs, bft-core holds the authenticated certificate, and it
 /// is the party that can populate them before dissemination. See the crate README.
-pub fn build_seal_companion(root_input: &RootInputV2) -> Result<SealCompanion, SealCompanionError> {
+pub fn build_seal_companion(
+    root_input: &RootInputV2,
+    pair_binding: &PairBinding,
+) -> Result<SealCompanion, SealCompanionError> {
     let root_input =
         root_input.canonical_cbor().map_err(|error| SealCompanionError(format!("{error:?}")))?;
     Ok(SealCompanion {
         root_input: root_input.into(),
+        pair_binding: pair_binding.canonical_cbor().into(),
         witnesses: Vec::new(),
         provenance: BUILD_PROVENANCE.to_owned(),
     })
@@ -459,9 +508,9 @@ pub fn build_seal_companion(root_input: &RootInputV2) -> Result<SealCompanion, S
 
 /// The write surface the seal handlers use to record a companion.
 ///
-/// This is deliberately one method: this unit only writes. The read lookup, pruning and horizon
-/// surfaces stay on [`CompanionStore`] and are wired by the later unit. The trait exists so a test
-/// can substitute a sink whose write fails and prove that a store failure cannot change a verdict.
+/// The read lookup, pruning and horizon surfaces stay on [`CompanionStore`]. The trait exists so a
+/// test can substitute a sink whose write fails and prove that a block is neither published nor
+/// forwarded while its companion is not durable.
 pub trait CompanionSink: fmt::Debug + Send + Sync {
     /// Records `companion` under `block_hash`, durable on return.
     fn put(
@@ -470,6 +519,9 @@ pub trait CompanionSink: fmt::Debug + Send + Sync {
         block_number: u64,
         companion: &SealCompanion,
     ) -> Result<(), StoreError>;
+
+    /// Drops the entry for `block_hash`, for a block the engine refused.
+    fn remove(&self, block_hash: B256) -> Result<(), StoreError>;
 }
 
 impl CompanionSink for CompanionStore {
@@ -480,6 +532,10 @@ impl CompanionSink for CompanionStore {
         companion: &SealCompanion,
     ) -> Result<(), StoreError> {
         Self::put(self, block_hash, block_number, companion)
+    }
+
+    fn remove(&self, block_hash: B256) -> Result<(), StoreError> {
+        Self::remove(self, block_hash)
     }
 }
 
@@ -555,7 +611,9 @@ pub fn import_response(error: SealImportError) -> Result<PayloadStatus, EngineAp
         SealImportError::UnknownParent | SealImportError::ParentAccountingMissing => {
             Ok(PayloadStatus::from_status(PayloadStatusEnum::Syncing))
         }
-        error @ SealImportError::Provider(_) => Err(EngineApiError::Internal(Box::new(error))),
+        error @ (SealImportError::Provider(_) | SealImportError::CompanionNotDurable(_)) => {
+            Err(EngineApiError::Internal(Box::new(error)))
+        }
         error => Ok(PayloadStatus::from_status(PayloadStatusEnum::Invalid {
             validation_error: error.to_string(),
         })),
@@ -582,23 +640,6 @@ impl<Provider> UnicityEngineApiImpl<Provider> {
         payload_store: PayloadStore<UnicityEngineTypes>,
     ) -> Self {
         Self { provider, beacon_consensus, context, validator, payload_store }
-    }
-
-    /// Records `companion` for `block_hash`, logging a failure instead of returning it.
-    ///
-    /// D2 part 3 says an unproducible companion does not un-certify a block, so a store failure
-    /// must not change a verdict. Returning a `Result` here would invite a `?` at the call sites,
-    /// which is the bug this method exists to prevent.
-    fn record_companion(&self, block_hash: B256, block_number: u64, companion: &SealCompanion) {
-        if let Err(error) = self.context.store.put(block_hash, block_number, companion) {
-            tracing::error!(
-                target: "reth::unicity",
-                %block_hash,
-                block_number,
-                %error,
-                "failed to retain the seal companion; the verdict is unchanged"
-            );
-        }
     }
 }
 
@@ -656,7 +697,12 @@ where
             .registry
             .root_input(&payload_id)
             .ok_or_else(|| companion_not_retained_error(payload_id))?;
-        let seal_companion = build_seal_companion(&root_input)
+        let pair_binding = self
+            .context
+            .registry
+            .pair_binding(&payload_id)
+            .ok_or_else(|| companion_not_retained_error(payload_id))?;
+        let seal_companion = build_seal_companion(&root_input, &pair_binding)
             .map_err(|error| EngineApiError::Internal(Box::new(error)))?;
 
         // Capture the key before the payload is consumed by the conversion. The store key is the
@@ -667,10 +713,13 @@ where
         let envelope: ExecutionPayloadEnvelopeV3 =
             payload.try_into().map_err(|_| EngineApiError::UnknownPayload)?;
 
-        // Write the companion this method is about to return. A store failure is logged and does
-        // not change the response: D2 part 3 says an unproducible companion does not un-certify a
-        // block, so this must not become a `?`.
-        self.record_companion(block_hash, block_number, &seal_companion);
+        // The companion must be durable before the payload is handed to the shard node, which
+        // publishes both. An unretained companion would leave a block that cannot be re-verified
+        // after a restart, so a store failure is an error here, not a log line.
+        self.context
+            .store
+            .put(block_hash, block_number, &seal_companion)
+            .map_err(|error| EngineApiError::Internal(Box::new(error)))?;
 
         Ok(GetPayloadWithSealV1Response {
             execution_payload: envelope.execution_payload,
@@ -720,6 +769,13 @@ where
         let block_number = prepared.block_number;
         let _parent_lease = prepared.parent_lease;
 
+        // The companion, with the binding it was admitted under, is made durable before the engine
+        // sees the block. A crash after this point leaves an unreferenced entry that recovery
+        // never reads; a crash before it leaves no block. A failed write forwards nothing.
+        if let Err(error) = self.context.store.put(block_hash, block_number, seal_companion) {
+            return import_response(SealImportError::CompanionNotDurable(error.to_string()));
+        }
+
         // The engine tree resolves this input when it executes the forwarded block. Register it
         // before the forward, because the engine can begin executing as soon as the message is
         // sent.
@@ -735,10 +791,18 @@ where
             .await
             .map_err(EngineApiError::NewPayload)?;
 
-        // Retain only a block the engine accepted. An INVALID or SYNCING verdict leaves no entry,
-        // and a store failure is logged rather than allowed to change the verdict.
-        if status.is_valid() {
-            self.record_companion(block_hash, block_number, seal_companion);
+        // A block the engine did not accept keeps no companion; the shard node presents it again
+        // with a fresh binding when it retries. The removal is best effort: a leftover entry names
+        // a block that is not canonical, and recovery reads companions only by canonical hash.
+        if !status.is_valid() &&
+            let Err(error) = self.context.store.remove(block_hash)
+        {
+            tracing::error!(
+                target: "reth::unicity",
+                %block_hash,
+                %error,
+                "failed to drop the companion of a refused block"
+            );
         }
 
         Ok(status)
@@ -796,10 +860,25 @@ where
             .map_err(|error| SealImportError::Provider(error.to_string()))?
             .ok_or(SealImportError::UnknownParent)?;
 
-        // 5. Bind through the U3a entry points. The token is the genesis bootstrap or the token the
-        //    build path or a previous import published, never a value derived from the header.
+        // 5. The receiving pair's own Go verification must have named exactly this block, parent
+        //    and input. This is the one gate every import takes, whatever the companion's
+        //    provenance: live follow, fresh paired sync and re-execution all arrive here.
         let chain_spec = self.provider.chain_spec();
         let genesis_hash = chain_spec.genesis_hash();
+        verify_pair_binding(
+            &seal_companion.pair_binding,
+            &PairContext {
+                pins: self.context.seal.pins,
+                execution_genesis_hash: genesis_hash,
+                parent: &parent,
+                root: &root,
+                subject: ExpectedSubject::Import { block_hash: block.hash() },
+            },
+        )
+        .map_err(SealImportError::PairBinding)?;
+
+        // 5b. Bind through the U3a entry points. The token is the genesis bootstrap or the token
+        //    the build path or a previous import published, never a value derived from the header.
         let (bound, parent_lease) = if parent.number == 0 && parent.hash() == genesis_hash {
             bind_validated_genesis(
                 root,
@@ -1302,6 +1381,7 @@ mod tests {
     use reth_rpc_api::IntoEngineApiRpcModule;
     use reth_unicity_execution::{
         block::BlockProfile,
+        pairing::PairPins,
         wire::{SealBuildInput, SealCompanion},
     };
     use std::path::Path;
@@ -1364,6 +1444,7 @@ mod tests {
                 change_denominator: 8,
             },
             fee_collector: Address::repeat_byte(0x12),
+            pins: PairPins { network_id: 9, root_genesis_id: B256::repeat_byte(0x44) },
         };
         let reported = SealConfigV1::from(seal);
         assert_eq!(reported.version, 1);
@@ -1373,9 +1454,13 @@ mod tests {
         assert_eq!(reported.elasticity, seal.profile.elasticity);
         assert_eq!(reported.change_denominator, seal.profile.change_denominator);
         assert_eq!(reported.fee_collector, seal.fee_collector);
+        assert_eq!(reported.network_id, 9);
+        assert_eq!(reported.root_genesis_id, B256::repeat_byte(0x44));
         let json = serde_json::to_value(reported).unwrap();
         assert_eq!(json["feeCollector"], serde_json::json!(seal.fee_collector));
         assert_eq!(json["changeDenominator"], 8);
+        assert_eq!(json["networkId"], 9);
+        assert_eq!(json["rootGenesisId"], serde_json::json!(B256::repeat_byte(0x44)));
     }
 
     #[test]

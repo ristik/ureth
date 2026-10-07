@@ -1,10 +1,17 @@
 //! Emits the next seal build request for the process restart smoke test.
+//!
+//! Arguments: `round parent_hash parent_timestamp parent_number execution_genesis_hash
+//! root_genesis_id`. The binding it emits is the one a local Go verification would supply; the
+//! node under test is pinned to network 3 and the given root genesis.
 
 use alloy_primitives::{b256, Address, B256};
 use alloy_rpc_types_engine::PayloadAttributes;
 use reth_unicity_execution::{
-    derive_beacon_root, derive_prev_randao, derive_timestamp, technical_record_hash,
-    wire::SealBuildInput, InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2,
+    derive_beacon_root, derive_prev_randao, derive_timestamp,
+    pairing::{attributes_digest, transitions_hash, PairBinding, PairSubject},
+    technical_record_hash,
+    wire::SealBuildInput,
+    InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2,
 };
 use reth_unicity_payload::UnicityPayloadAttributes;
 use std::str::FromStr;
@@ -14,6 +21,9 @@ fn main() {
     let round: u64 = args[1].parse().unwrap();
     let parent_hash = B256::from_str(&args[2]).unwrap();
     let parent_timestamp: u64 = args[3].parse().unwrap();
+    let parent_number: u64 = args[4].parse().unwrap();
+    let execution_genesis_hash = B256::from_str(&args[5]).unwrap();
+    let root_genesis_id = B256::from_str(&args[6]).unwrap();
     let technical = TechnicalRecordV2 {
         round,
         epoch: 0,
@@ -65,7 +75,31 @@ fn main() {
         },
         commitment: root.input_commitment().unwrap(),
     };
-    let input =
-        SealBuildInput { root_input: root.canonical_cbor().unwrap().into(), transitions: vec![] };
+    let binding = PairBinding {
+        network_id: root.network_id,
+        root_genesis_id,
+        execution_genesis_hash,
+        parent_hash,
+        parent_number,
+        origin_root_epoch: root.origin.root_epoch,
+        origin_root_round: root.origin.root_round,
+        configuration_id: root.origin.shard_conf_hash,
+        activation_id: B256::repeat_byte(0xac),
+        root_input_hash: root.input_commitment().unwrap(),
+        transitions_hash: transitions_hash(&root.transitions),
+        subject: PairSubject::Build {
+            attributes_digest: attributes_digest(
+                attrs.inner.timestamp,
+                attrs.inner.prev_randao,
+                attrs.inner.suggested_fee_recipient,
+                attrs.inner.parent_beacon_block_root.unwrap(),
+            ),
+        },
+    };
+    let input = SealBuildInput {
+        root_input: root.canonical_cbor().unwrap().into(),
+        transitions: vec![],
+        pair_binding: binding.canonical_cbor().into(),
+    };
     println!("{}", serde_json::json!({"attributes": attrs, "input": input}));
 }

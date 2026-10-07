@@ -39,6 +39,14 @@ use serde::{Deserialize, Serialize};
 pub const MAX_EPOCH_TRANSITION_BYTES: usize = 16 * 1024;
 /// Maximum number of committed handoffs summarized by a folded acknowledgement.
 pub const MAX_SUPERSESSION_SPAN: u64 = 64;
+/// Maximum number of transition bodies one root input carries; the profile supports one.
+pub const MAX_ROOT_TRANSITIONS: usize = 1;
+/// Maximum canonical root-input size: one maximal transition plus the fixed tuple.
+pub const MAX_ROOT_INPUT_BYTES: usize = 32 * 1024;
+/// Maximum shard identifier length.
+pub const MAX_SHARD_ID_BYTES: usize = 32;
+/// Maximum leader identifier length.
+pub const MAX_LEADER_BYTES: usize = 256;
 
 /// Build-path parameter `sealBuildInput = { rootInput, transitions }`.
 ///
@@ -54,11 +62,21 @@ pub struct SealBuildInput {
     pub root_input: Bytes,
     /// Byte-for-byte copy of root input's committed transition array.
     pub transitions: Vec<Bytes>,
+    /// Canonical [`crate::pairing::PairBinding`] the local Go verification produced for this build
+    /// job. Required: a request without one is refused before anything is installed.
+    pub pair_binding: Bytes,
 }
 
 impl SealBuildInput {
     /// Decodes `root_input` and binds the parallel transition envelope to its committed `D[]`.
     pub fn decode_root_input(&self) -> Result<RootInputV2, CanonicalCborError> {
+        if self.transitions.len() > MAX_ROOT_TRANSITIONS {
+            return Err(CanonicalCborError::TooLarge {
+                what: "envelope transition count",
+                len: self.transitions.len(),
+                limit: MAX_ROOT_TRANSITIONS,
+            });
+        }
         let root = RootInputV2::from_canonical_cbor(&self.root_input)?;
         if root.transitions.len() != self.transitions.len() ||
             root.transitions
@@ -86,6 +104,10 @@ impl SealBuildInput {
 pub struct SealCompanion {
     /// Canonical CBOR bytes for one root input.
     pub root_input: Bytes,
+    /// Canonical [`crate::pairing::PairBinding`] the receiving pair's own Go verification
+    /// produced for the exact block this companion accompanies. It is retained with the
+    /// companion, so recovery re-checks the same binding rather than trusting the stored input.
+    pub pair_binding: Bytes,
     /// Authentication witness byte strings; opaque to this crate.
     pub witnesses: Vec<Bytes>,
     /// Companion provenance label.
@@ -153,6 +175,13 @@ impl RootInputV2 {
     /// bytes after the top-level array. A byte string that decodes to a structurally valid but
     /// profile-invalid root input is refused as [`CanonicalCborError::InvalidRootInput`].
     pub fn from_canonical_cbor(input: &[u8]) -> Result<Self, CanonicalCborError> {
+        if input.len() > MAX_ROOT_INPUT_BYTES {
+            return Err(CanonicalCborError::TooLarge {
+                what: "root input",
+                len: input.len(),
+                limit: MAX_ROOT_INPUT_BYTES,
+            });
+        }
         let mut decoder = Decoder::new(input);
         let value = decode_root_input(&mut decoder)?;
         decoder.finish()?;
@@ -177,7 +206,7 @@ fn decode_root_input(decoder: &mut Decoder<'_>) -> Result<RootInputV2, Canonical
         version: decoder.read_uint()?,
         network_id: decoder.read_uint()?,
         partition_id: decoder.read_uint()?,
-        shard_id: decoder.read_bytes()?.to_vec(),
+        shard_id: decoder.read_bounded_bytes("shard id", MAX_SHARD_ID_BYTES)?.to_vec(),
         authorized_round: decoder.read_uint()?,
         certified_epoch: decoder.read_uint()?,
         authorized_epoch: decoder.read_uint()?,
@@ -235,7 +264,7 @@ fn decode_technical(decoder: &mut Decoder<'_>) -> Result<TechnicalRecordV2, Cano
     Ok(TechnicalRecordV2 {
         round: decoder.read_uint()?,
         epoch: decoder.read_uint()?,
-        leader: decoder.read_text()?.to_owned(),
+        leader: decoder.read_bounded_text("leader", MAX_LEADER_BYTES)?.to_owned(),
         stat_hash: decoder.read_word()?,
         fee_hash: decoder.read_word()?,
     })
@@ -243,11 +272,16 @@ fn decode_technical(decoder: &mut Decoder<'_>) -> Result<TechnicalRecordV2, Cano
 
 fn decode_byte_string_array(decoder: &mut Decoder<'_>) -> Result<Vec<Vec<u8>>, CanonicalCborError> {
     let length = decoder.read_array()?;
-    // Do not pre-allocate from the untrusted length: a nine-byte head can claim a huge count while
-    // the input ends immediately. Pushing instead fails at the first missing byte.
+    if length > MAX_ROOT_TRANSITIONS {
+        return Err(CanonicalCborError::TooLarge {
+            what: "transition count",
+            len: length,
+            limit: MAX_ROOT_TRANSITIONS,
+        });
+    }
     let mut values = Vec::new();
     for _ in 0..length {
-        values.push(decoder.read_bytes()?.to_vec());
+        values.push(decoder.read_bounded_bytes("transition", MAX_EPOCH_TRANSITION_BYTES)?.to_vec());
     }
     Ok(values)
 }
@@ -392,6 +426,15 @@ pub enum CanonicalCborError {
     LengthOutOfRange,
     /// A text string was not valid UTF-8.
     InvalidUtf8,
+    /// A field, count or whole input exceeded its fixed bound; nothing was copied or allocated.
+    TooLarge {
+        /// The bounded item.
+        what: &'static str,
+        /// Length or count supplied.
+        len: usize,
+        /// The bound.
+        limit: usize,
+    },
     /// A structurally valid root input failed [`RootInputV2::origin_class`].
     InvalidRootInput(&'static str),
 }
@@ -417,6 +460,9 @@ impl std::fmt::Display for CanonicalCborError {
             }
             Self::LengthOutOfRange => formatter.write_str("CBOR length does not fit usize"),
             Self::InvalidUtf8 => formatter.write_str("CBOR text string is not valid UTF-8"),
+            Self::TooLarge { what, len, limit } => {
+                write!(formatter, "{what} of {len} exceeds the bound {limit}")
+            }
             Self::InvalidRootInput(reason) => write!(formatter, "invalid root input: {reason}"),
         }
     }
@@ -428,14 +474,56 @@ impl std::error::Error for CanonicalCborError {}
 ///
 /// It intentionally exposes only the value kinds the profile uses, so anything else is a type
 /// error rather than something later code has to defend against.
-struct Decoder<'a> {
+pub(crate) struct Decoder<'a> {
     input: &'a [u8],
     offset: usize,
 }
 
 impl<'a> Decoder<'a> {
-    const fn new(input: &'a [u8]) -> Self {
+    pub(crate) const fn new(input: &'a [u8]) -> Self {
         Self { input, offset: 0 }
+    }
+
+    /// A byte string no longer than `limit`, refused before its content is touched.
+    fn read_bounded_bytes(
+        &mut self,
+        what: &'static str,
+        limit: usize,
+    ) -> Result<&'a [u8], CanonicalCborError> {
+        match self.read_head()? {
+            (2, length) => {
+                let length =
+                    usize::try_from(length).map_err(|_| CanonicalCborError::LengthOutOfRange)?;
+                if length > limit {
+                    return Err(CanonicalCborError::TooLarge { what, len: length, limit });
+                }
+                self.take(length)
+            }
+            (major, _) => {
+                Err(CanonicalCborError::UnexpectedItem { major, expected: "byte string" })
+            }
+        }
+    }
+
+    /// A text string no longer than `limit` bytes, refused before its content is touched.
+    fn read_bounded_text(
+        &mut self,
+        what: &'static str,
+        limit: usize,
+    ) -> Result<&'a str, CanonicalCborError> {
+        match self.read_head()? {
+            (3, length) => {
+                let length =
+                    usize::try_from(length).map_err(|_| CanonicalCborError::LengthOutOfRange)?;
+                if length > limit {
+                    return Err(CanonicalCborError::TooLarge { what, len: length, limit });
+                }
+                std::str::from_utf8(self.take(length)?).map_err(|_| CanonicalCborError::InvalidUtf8)
+            }
+            (major, _) => {
+                Err(CanonicalCborError::UnexpectedItem { major, expected: "text string" })
+            }
+        }
     }
 
     fn take(&mut self, length: usize) -> Result<&'a [u8], CanonicalCborError> {
@@ -453,7 +541,7 @@ impl<'a> Decoder<'a> {
         self.input.get(self.offset).copied().ok_or(CanonicalCborError::UnexpectedEof)
     }
 
-    const fn finish(&self) -> Result<(), CanonicalCborError> {
+    pub(crate) const fn finish(&self) -> Result<(), CanonicalCborError> {
         if self.offset == self.input.len() {
             Ok(())
         } else {
@@ -507,7 +595,7 @@ impl<'a> Decoder<'a> {
         Ok((major, argument))
     }
 
-    fn read_uint(&mut self) -> Result<u64, CanonicalCborError> {
+    pub(crate) fn read_uint(&mut self) -> Result<u64, CanonicalCborError> {
         match self.read_head()? {
             (0, value) => Ok(value),
             (major, _) => {
@@ -529,7 +617,7 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn read_text(&mut self) -> Result<&'a str, CanonicalCborError> {
+    pub(crate) fn read_text(&mut self) -> Result<&'a str, CanonicalCborError> {
         let bytes = match self.read_head()? {
             (3, length) => {
                 let length =
@@ -543,7 +631,7 @@ impl<'a> Decoder<'a> {
         std::str::from_utf8(bytes).map_err(|_| CanonicalCborError::InvalidUtf8)
     }
 
-    fn read_array(&mut self) -> Result<usize, CanonicalCborError> {
+    pub(crate) fn read_array(&mut self) -> Result<usize, CanonicalCborError> {
         match self.read_head()? {
             (4, length) => {
                 usize::try_from(length).map_err(|_| CanonicalCborError::LengthOutOfRange)
@@ -552,7 +640,7 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn read_word(&mut self) -> Result<B256, CanonicalCborError> {
+    pub(crate) fn read_word(&mut self) -> Result<B256, CanonicalCborError> {
         let bytes = self.read_bytes()?;
         if bytes.len() != 32 {
             return Err(CanonicalCborError::WrongByteStringLength {
@@ -802,6 +890,7 @@ mod tests {
         let value = SealBuildInput {
             root_input: sample().canonical_cbor().unwrap().into(),
             transitions: vec![],
+            pair_binding: Bytes::from(vec![0x01]),
         };
         let json = serde_json::to_string(&value).unwrap();
         assert!(json.contains("\"rootInput\":\"0x"), "rootInput is a 0x-hex byte string: {json}");
@@ -814,6 +903,7 @@ mod tests {
         let value = SealBuildInput {
             root_input: sample().canonical_cbor().unwrap().into(),
             transitions: vec![Bytes::from(vec![0xaa])],
+            pair_binding: Bytes::new(),
         };
         assert_eq!(
             value.decode_root_input(),
@@ -827,6 +917,7 @@ mod tests {
     fn seal_companion_round_trips_as_json() {
         let value = SealCompanion {
             root_input: sample().canonical_cbor().unwrap().into(),
+            pair_binding: Bytes::from(vec![0x01]),
             witnesses: vec![Bytes::from(vec![0x0a, 0x0b]), Bytes::new()],
             provenance: "newPayload".into(),
         };
@@ -839,19 +930,21 @@ mod tests {
     #[test]
     fn seal_build_input_json_shape_is_enforced() {
         let root = root_input_hex();
-        let good = format!(r#"{{"rootInput":"{root}","transitions":[]}}"#);
+        let good = format!(r#"{{"rootInput":"{root}","transitions":[],"pairBinding":"0x00"}}"#);
         assert!(serde_json::from_str::<SealBuildInput>(&good).is_ok());
 
-        let unknown = format!(r#"{{"rootInput":"{root}","transitions":[],"bogus":1}}"#);
+        let unknown =
+            format!(r#"{{"rootInput":"{root}","transitions":[],"pairBinding":"0x00","bogus":1}}"#);
         assert!(serde_json::from_str::<SealBuildInput>(&unknown).is_err());
 
         let missing = format!(r#"{{"rootInput":"{root}"}}"#);
         assert!(serde_json::from_str::<SealBuildInput>(&missing).is_err());
 
-        let wrong_type = format!(r#"{{"rootInput":"{root}","transitions":5}}"#);
+        let wrong_type =
+            format!(r#"{{"rootInput":"{root}","transitions":5,"pairBinding":"0x00"}}"#);
         assert!(serde_json::from_str::<SealBuildInput>(&wrong_type).is_err());
 
-        let bad_hex = r#"{"rootInput":"0xzz","transitions":[]}"#;
+        let bad_hex = r#"{"rootInput":"0xzz","transitions":[],"pairBinding":"0x00"}"#;
         assert!(serde_json::from_str::<SealBuildInput>(bad_hex).is_err());
 
         let parsed: SealBuildInput = serde_json::from_str(&good).unwrap();
@@ -861,26 +954,36 @@ mod tests {
     #[test]
     fn seal_companion_json_shape_is_enforced() {
         let root = root_input_hex();
-        let good = format!(r#"{{"rootInput":"{root}","witnesses":[],"provenance":"build"}}"#);
+        let good = format!(
+            r#"{{"rootInput":"{root}","pairBinding":"0x00","witnesses":[],"provenance":"build"}}"#
+        );
         assert!(serde_json::from_str::<SealCompanion>(&good).is_ok());
 
-        let unknown =
-            format!(r#"{{"rootInput":"{root}","witnesses":[],"provenance":"build","x":0}}"#);
+        let unknown = format!(
+            r#"{{"rootInput":"{root}","pairBinding":"0x00","witnesses":[],"provenance":"build","x":0}}"#
+        );
         assert!(serde_json::from_str::<SealCompanion>(&unknown).is_err());
 
         let missing = format!(r#"{{"rootInput":"{root}","witnesses":[]}}"#);
         assert!(serde_json::from_str::<SealCompanion>(&missing).is_err());
 
-        let wrong_type = format!(r#"{{"rootInput":"{root}","witnesses":[],"provenance":7}}"#);
+        let wrong_type = format!(
+            r#"{{"rootInput":"{root}","pairBinding":"0x00","witnesses":[],"provenance":7}}"#
+        );
         assert!(serde_json::from_str::<SealCompanion>(&wrong_type).is_err());
 
-        let bad_hex = r#"{"rootInput":"0xzz","witnesses":[],"provenance":"build"}"#;
+        let bad_hex =
+            r#"{"rootInput":"0xzz","pairBinding":"0x00","witnesses":[],"provenance":"build"}"#;
         assert!(serde_json::from_str::<SealCompanion>(bad_hex).is_err());
     }
 
     #[test]
     fn non_canonical_nested_root_inputs_are_refused_through_the_envelope() {
-        let build = SealBuildInput { root_input: vec![0x80].into(), transitions: vec![] };
+        let build = SealBuildInput {
+            root_input: vec![0x80].into(),
+            transitions: vec![],
+            pair_binding: Bytes::new(),
+        };
         assert_eq!(
             build.decode_root_input(),
             Err(CanonicalCborError::WrongArity { expected: 11, found: 0 })
@@ -888,6 +991,7 @@ mod tests {
 
         let companion = SealCompanion {
             root_input: vec![0x01].into(),
+            pair_binding: Bytes::new(),
             witnesses: vec![],
             provenance: "build".into(),
         };
@@ -895,6 +999,149 @@ mod tests {
             companion.decode_root_input(),
             Err(CanonicalCborError::UnexpectedItem { major: 0, expected: "array" })
         );
+    }
+
+    #[test]
+    fn a_root_input_over_the_size_bound_is_refused_before_it_is_read() {
+        let oversized = vec![0u8; MAX_ROOT_INPUT_BYTES + 1];
+        assert_eq!(
+            decode_error(&oversized),
+            CanonicalCborError::TooLarge {
+                what: "root input",
+                len: MAX_ROOT_INPUT_BYTES + 1,
+                limit: MAX_ROOT_INPUT_BYTES
+            }
+        );
+    }
+
+    #[test]
+    fn an_overlong_shard_id_is_refused_by_name() {
+        let mut value = sample();
+        value.shard_id = vec![7; MAX_SHARD_ID_BYTES + 1];
+        let encoded = value.canonical_cbor().unwrap();
+        assert_eq!(
+            decode_error(&encoded),
+            CanonicalCborError::TooLarge {
+                what: "shard id",
+                len: MAX_SHARD_ID_BYTES + 1,
+                limit: MAX_SHARD_ID_BYTES
+            }
+        );
+        value.shard_id = vec![7; MAX_SHARD_ID_BYTES];
+        assert!(RootInputV2::from_canonical_cbor(&value.canonical_cbor().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn an_overlong_leader_is_refused_by_name() {
+        let mut value = sample();
+        value.technical.leader = "l".repeat(MAX_LEADER_BYTES + 1);
+        value.origin.tr_hash = technical_record_hash(&value.technical);
+        let encoded = value.canonical_cbor().unwrap();
+        assert_eq!(
+            decode_error(&encoded),
+            CanonicalCborError::TooLarge {
+                what: "leader",
+                len: MAX_LEADER_BYTES + 1,
+                limit: MAX_LEADER_BYTES
+            }
+        );
+        value.technical.leader = "l".repeat(MAX_LEADER_BYTES);
+        value.origin.tr_hash = technical_record_hash(&value.technical);
+        assert!(RootInputV2::from_canonical_cbor(&value.canonical_cbor().unwrap()).is_ok());
+    }
+
+    #[test]
+    fn a_second_transition_is_refused_by_count_before_any_is_read() {
+        let mut encoded = encoded_sample();
+        assert_eq!(encoded.pop(), Some(0x80), "the sample ends with an empty transition array");
+        // Two empty byte strings: the count alone is over the bound.
+        encoded.extend_from_slice(&[0x82, 0x40, 0x40]);
+        assert_eq!(
+            decode_error(&encoded),
+            CanonicalCborError::TooLarge {
+                what: "transition count",
+                len: 2,
+                limit: MAX_ROOT_TRANSITIONS
+            }
+        );
+    }
+
+    #[test]
+    fn an_oversized_transition_is_refused_by_length_before_it_is_copied() {
+        let mut encoded = encoded_sample();
+        encoded.pop();
+        // One element claiming a four-gigabyte byte string while the input ends: refused by the
+        // bound, not by running out of input.
+        encoded.extend_from_slice(&[0x81, 0x5a, 0xff, 0xff, 0xff, 0xff]);
+        assert_eq!(
+            decode_error(&encoded),
+            CanonicalCborError::TooLarge {
+                what: "transition",
+                len: u32::MAX as usize,
+                limit: MAX_EPOCH_TRANSITION_BYTES
+            }
+        );
+    }
+
+    #[test]
+    fn a_transition_count_with_no_element_following_is_truncation() {
+        let mut encoded = encoded_sample();
+        encoded.pop();
+        encoded.push(0x81);
+        assert_eq!(decode_error(&encoded), CanonicalCborError::UnexpectedEof);
+    }
+
+    #[test]
+    fn the_build_envelope_refuses_more_transitions_than_the_profile_carries() {
+        let build = SealBuildInput {
+            root_input: encoded_sample().into(),
+            transitions: vec![vec![1].into(), vec![2].into()],
+            pair_binding: Bytes::new(),
+        };
+        assert_eq!(
+            build.decode_root_input(),
+            Err(CanonicalCborError::TooLarge {
+                what: "envelope transition count",
+                len: 2,
+                limit: MAX_ROOT_TRANSITIONS
+            })
+        );
+    }
+
+    fn envelope_json(extra: &str) -> String {
+        format!(r#"{{"rootInput":"0x80","transitions":[],"pairBinding":"0x80"{extra}}}"#)
+    }
+
+    #[test]
+    fn the_envelopes_require_the_binding_and_refuse_unknown_and_duplicate_fields() {
+        assert!(serde_json::from_str::<SealBuildInput>(&envelope_json("")).is_ok());
+        // Absent.
+        assert!(serde_json::from_str::<SealBuildInput>(r#"{"rootInput":"0x80","transitions":[]}"#)
+            .unwrap_err()
+            .to_string()
+            .contains("missing field `pairBinding`"));
+        // Duplicate.
+        assert!(serde_json::from_str::<SealBuildInput>(&envelope_json(r#","pairBinding":"0x81""#))
+            .unwrap_err()
+            .to_string()
+            .contains("duplicate field `pairBinding`"));
+        // Unknown.
+        assert!(serde_json::from_str::<SealBuildInput>(&envelope_json(r#","legacy":1"#))
+            .unwrap_err()
+            .to_string()
+            .contains("unknown field `legacy`"));
+        // The companion envelope is held to the same rules.
+        let companion = r#"{"rootInput":"0x80","witnesses":[],"provenance":"build""#;
+        assert!(serde_json::from_str::<SealCompanion>(&format!("{companion}}}"))
+            .unwrap_err()
+            .to_string()
+            .contains("missing field `pairBinding`"));
+        assert!(serde_json::from_str::<SealCompanion>(&format!(
+            r#"{companion},"pairBinding":"0x80","pairBinding":"0x80"}}"#
+        ))
+        .unwrap_err()
+        .to_string()
+        .contains("duplicate field `pairBinding`"));
     }
 
     #[test]

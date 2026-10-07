@@ -19,6 +19,7 @@ use reth_primitives_traits::SealedHeader;
 use reth_unicity_execution::{
     block::BlockProfile,
     block_executor::{CompletedParent, UnicityEvmConfig},
+    pairing::PairBinding,
     RootInputV2,
 };
 
@@ -118,6 +119,15 @@ impl SealJobRegistry {
             .iter()
             .find(|job| job.payload_id == *payload_id)
             .map(|job| job.evm_config.root_input().clone())
+    }
+
+    /// Returns the verified pair binding the job with `payload_id` was admitted under.
+    pub fn pair_binding(&self, payload_id: &PayloadId) -> Option<PairBinding> {
+        self.lock()
+            .jobs
+            .iter()
+            .find(|job| job.payload_id == *payload_id)
+            .and_then(|job| job.pair_binding)
     }
 
     /// Installs `job`, accepting an identical retry without replacing the existing job.

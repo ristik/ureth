@@ -52,6 +52,10 @@ use reth_unicity_execution::{
         BlockExecutionRegistryError, UnicityBlockExecutionRegistry, UnicityNodeEvmConfig,
         UnicityNodeEvmError,
     },
+    pairing::{
+        attributes_digest, reference_binding, ExpectedSubject, PairBinding, PairBindingError,
+        PairContext, PairPins, PairSubject, SUBJECT_BUILD, SUBJECT_IMPORT,
+    },
     technical_record_hash,
     wire::{SealBuildInput, SealCompanion},
     InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY,
@@ -60,8 +64,8 @@ use reth_unicity_payload::{
     build_seal_companion, prepare_seal_build, refusal_response, unicity_engine_capabilities,
     CompanionPruner, CompanionSink, ExecutionPayloadJobResolver, FixedPayloadJobResolver,
     GetPayloadWithSealV1Response, PayloadJobResolutionError, ResolvedPayloadJob, SealBuildContext,
-    SealBuildError, SealBuildState, SealCompanionLookup, SealJobRegistry, UnicityConsensus,
-    UnicityEngineApiImpl, UnicityEngineTypes, UnicityEngineValidator,
+    SealBuildError, SealBuildState, SealCompanionLookup, SealImportError, SealJobRegistry,
+    UnicityConsensus, UnicityEngineApiImpl, UnicityEngineTypes, UnicityEngineValidator,
     UnicityExecutionPayloadBuilder, UnicityNode, UnicityParentAccountings,
     UnicityPayloadAttributes, UnicityRetentionConfig, UnicityRpcModuleImpl, UnicityRpcServer,
     UnicitySealConfig, COMPANION_NOT_RETAINED_CODE, DEFAULT_SEAL_JOB_CAPACITY, SEAL_CAPABILITIES,
@@ -69,16 +73,14 @@ use reth_unicity_payload::{
 use reth_unicity_store::{open as open_companion_store, CompanionStore, Lookup, StoreError};
 use std::{
     collections::BTreeMap,
-    io::{self, Write},
     ops::{RangeBounds, RangeInclusive},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, Mutex, OnceLock,
+        Arc, OnceLock,
     },
 };
 use support::provider::FixtureProvider;
 use tempfile::tempdir;
-use tracing_subscriber::fmt::MakeWriter;
 
 const GENESIS_HASH: B256 =
     b256!("efbe99d08e86d7e06034bfcb0d48f0f40a92b321fb3f96ca82a58e83d0c62363");
@@ -1018,7 +1020,11 @@ fn seal_fixture() -> (
         state: SealBuildState {
             registry: SealJobRegistry::new(),
             builder_config,
-            seal: UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR },
+            seal: UnicitySealConfig {
+                profile: PROFILE,
+                fee_collector: FEE_COLLECTOR,
+                pins: PAIR_PINS,
+            },
             parent_accounting: UnicityParentAccountings::default(),
             execution_inputs: UnicityBlockExecutionRegistry::default(),
             retention: UnicityRetentionConfig::default(),
@@ -1045,6 +1051,10 @@ impl CompanionSink for NoopCompanionSink {
     ) -> Result<(), StoreError> {
         Ok(())
     }
+
+    fn remove(&self, _block_hash: B256) -> Result<(), StoreError> {
+        Ok(())
+    }
 }
 
 /// A sink whose every write fails.
@@ -1063,37 +1073,9 @@ impl CompanionSink for FailingCompanionSink {
     ) -> Result<(), StoreError> {
         Err(StoreError::Io(std::io::Error::other("forced store failure")))
     }
-}
 
-#[derive(Clone, Default)]
-struct CapturedLogWriter(Arc<Mutex<Vec<u8>>>);
-
-struct CapturedLogBuffer(Arc<Mutex<Vec<u8>>>);
-
-impl Write for CapturedLogBuffer {
-    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-        let mut buffer =
-            self.0.lock().map_err(|_| io::Error::other("captured log buffer poisoned"))?;
-        buffer.extend_from_slice(bytes);
-        Ok(bytes.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
-    }
-}
-
-impl CapturedLogWriter {
-    fn contents(&self) -> String {
-        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
-    }
-}
-
-impl<'a> MakeWriter<'a> for CapturedLogWriter {
-    type Writer = CapturedLogBuffer;
-
-    fn make_writer(&'a self) -> Self::Writer {
-        CapturedLogBuffer(self.0.clone())
+    fn remove(&self, _block_hash: B256) -> Result<(), StoreError> {
+        Err(StoreError::Io(std::io::Error::other("forced store failure")))
     }
 }
 
@@ -1107,10 +1089,70 @@ fn temp_store() -> (tempfile::TempDir, Arc<CompanionStore>) {
     (dir, store)
 }
 
-fn seal_input(root: &RootInputV2) -> SealBuildInput {
+const PAIR_PINS: PairPins = PairPins { network_id: 3, root_genesis_id: B256::repeat_byte(0x5a) };
+const TEST_ACTIVATION: B256 = B256::repeat_byte(0xac);
+
+/// The binding the local pair's Go verification would hand over for `subject`.
+fn pair_binding(
+    parent: &SealedHeader,
+    root: &RootInputV2,
+    subject: ExpectedSubject,
+) -> PairBinding {
+    pair_binding_on(GENESIS_HASH, parent, root, subject)
+}
+
+/// [`pair_binding`] for a chain whose execution genesis is `genesis_hash`.
+fn pair_binding_on(
+    genesis_hash: B256,
+    parent: &SealedHeader,
+    root: &RootInputV2,
+    subject: ExpectedSubject,
+) -> PairBinding {
+    reference_binding(
+        &PairContext {
+            pins: PAIR_PINS,
+            execution_genesis_hash: genesis_hash,
+            parent,
+            root,
+            subject,
+        },
+        TEST_ACTIVATION,
+    )
+    .unwrap()
+}
+
+/// The build subject the handler derives from `attrs`.
+fn build_subject(attrs: &UnicityPayloadAttributes) -> ExpectedSubject {
+    ExpectedSubject::Build {
+        attributes_digest: attributes_digest(
+            attrs.inner.timestamp,
+            attrs.inner.prev_randao,
+            attrs.inner.suggested_fee_recipient,
+            attrs.inner.parent_beacon_block_root.unwrap(),
+        ),
+    }
+}
+
+fn seal_input(
+    parent: &SealedHeader,
+    root: &RootInputV2,
+    attrs: &UnicityPayloadAttributes,
+) -> SealBuildInput {
     SealBuildInput {
         root_input: root.canonical_cbor().unwrap().into(),
         transitions: root.transitions.iter().cloned().map(Into::into).collect(),
+        pair_binding: pair_binding(parent, root, build_subject(attrs)).canonical_cbor().into(),
+    }
+}
+
+/// The companion a follower's pair presents for the block `block_hash` built on `parent`.
+fn import_companion(parent: &SealedHeader, root: &RootInputV2, block_hash: B256) -> SealCompanion {
+    let binding = pair_binding(parent, root, ExpectedSubject::Import { block_hash });
+    SealCompanion {
+        root_input: root.canonical_cbor().unwrap().into(),
+        pair_binding: binding.canonical_cbor().into(),
+        witnesses: Vec::new(),
+        provenance: "newPayload".to_owned(),
     }
 }
 
@@ -1118,7 +1160,11 @@ fn seal_input(root: &RootInputV2) -> SealBuildInput {
 fn seal_build_rejects_non_canonical_root_input_as_invalid() {
     let (client, _parent, _root, attrs, context, validator) = seal_fixture();
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
-    let bad = SealBuildInput { root_input: vec![0x80].into(), transitions: vec![] };
+    let bad = SealBuildInput {
+        root_input: vec![0x80].into(),
+        transitions: vec![],
+        pair_binding: Default::default(),
+    };
 
     let error =
         prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &bad).unwrap_err();
@@ -1137,15 +1183,21 @@ fn seal_build_rejects_non_canonical_root_input_as_invalid() {
 
 #[test]
 fn seal_build_rejects_malformed_attributes_as_invalid_before_inserting() {
-    let (client, _parent, root, mut attrs, context, validator) = seal_fixture();
+    let (client, parent, root, mut attrs, context, validator) = seal_fixture();
     // Cancun requires withdrawals in the attributes; ResolvedPayloadJob alone would tolerate a
     // missing list, so this exercises the validator parity.
     attrs.inner.withdrawals = None;
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
 
-    let error =
-        prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &seal_input(&root))
-            .unwrap_err();
+    let error = prepare_seal_build(
+        &client,
+        &context,
+        &validator,
+        &state,
+        Some(&attrs),
+        &seal_input(&parent, &root, &attrs),
+    )
+    .unwrap_err();
     assert!(matches!(error, SealBuildError::Attributes(_)));
     assert!(context.registry.is_empty(), "the refusal must happen before any job is inserted");
 
@@ -1156,7 +1208,7 @@ fn seal_build_rejects_malformed_attributes_as_invalid_before_inserting() {
 
 #[test]
 fn seal_build_reports_an_unknown_parent_as_syncing() {
-    let (client, _parent, root, attrs, context, validator) = seal_fixture();
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
     let unknown = ForkchoiceState::same_hash(B256::repeat_byte(0x99));
 
     let error = prepare_seal_build(
@@ -1165,7 +1217,7 @@ fn seal_build_reports_an_unknown_parent_as_syncing() {
         &validator,
         &unknown,
         Some(&attrs),
-        &seal_input(&root),
+        &seal_input(&parent, &root, &attrs),
     )
     .unwrap_err();
     assert_eq!(error, SealBuildError::UnknownParent);
@@ -1176,11 +1228,18 @@ fn seal_build_reports_an_unknown_parent_as_syncing() {
 
 #[test]
 fn seal_build_requires_payload_attributes() {
-    let (client, _parent, root, _attrs, context, validator) = seal_fixture();
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
 
-    let error = prepare_seal_build(&client, &context, &validator, &state, None, &seal_input(&root))
-        .unwrap_err();
+    let error = prepare_seal_build(
+        &client,
+        &context,
+        &validator,
+        &state,
+        None,
+        &seal_input(&parent, &root, &attrs),
+    )
+    .unwrap_err();
     assert_eq!(error, SealBuildError::AttributesMissing);
 
     let response = refusal_response(error).unwrap();
@@ -1193,9 +1252,9 @@ fn seal_build_requires_payload_attributes() {
 
 #[test]
 fn seal_build_reuses_an_identical_payload_id() {
-    let (client, _parent, root, attrs, context, validator) = seal_fixture();
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
-    let input = seal_input(&root);
+    let input = seal_input(&parent, &root, &attrs);
 
     prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input).unwrap();
     let repeated =
@@ -1209,9 +1268,15 @@ fn seal_build_job_resolves_with_the_published_builder_config() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
 
-    let returned =
-        prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &seal_input(&root))
-            .unwrap();
+    let returned = prepare_seal_build(
+        &client,
+        &context,
+        &validator,
+        &state,
+        Some(&attrs),
+        &seal_input(&parent, &root, &attrs),
+    )
+    .unwrap();
     assert_eq!(returned, attrs);
     assert_eq!(context.registry.len(), 1);
 
@@ -1242,12 +1307,14 @@ fn seal_build_job_resolves_with_the_published_builder_config() {
 
 #[test]
 fn get_payload_companion_reencodes_exactly_the_caller_bytes() {
-    let (_client, _parent, root, _attrs, _context, _validator) = seal_fixture();
-    let input = seal_input(&root);
+    let (_client, parent, root, attrs, _context, _validator) = seal_fixture();
+    let input = seal_input(&parent, &root, &attrs);
     // The decoder accepts only canonical encodings, so re-encoding the decoded value must equal the
     // bytes the caller supplied to forkchoiceUpdatedWithSealV1.
     let decoded = input.decode_root_input().unwrap();
-    let companion = build_seal_companion(&decoded).unwrap();
+    let companion =
+        build_seal_companion(&decoded, &pair_binding(&parent, &decoded, build_subject(&attrs)))
+            .unwrap();
     assert_eq!(companion.root_input, input.root_input);
     assert_eq!(companion.provenance, "build");
     assert!(companion.witnesses.is_empty(), "the build input carries no witnesses");
@@ -1297,8 +1364,15 @@ async fn get_payload_with_seal_names_an_evicted_companion() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
     let payload_id = attrs.payload_id(&parent.hash());
-    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &seal_input(&root))
-        .unwrap();
+    prepare_seal_build(
+        &client,
+        &context,
+        &validator,
+        &state,
+        Some(&attrs),
+        &seal_input(&parent, &root, &attrs),
+    )
+    .unwrap();
 
     // Build the payload, then drop its job from the registry so the payload exists but its
     // companion input is gone.
@@ -1350,7 +1424,7 @@ fn build_genesis_seal_payload(
         validator,
         &ForkchoiceState::same_hash(GENESIS_HASH),
         Some(attrs),
-        &seal_input(root),
+        &seal_input(parent, root, attrs),
     )
     .unwrap();
     let base = context.builder_config.get().unwrap().clone();
@@ -1376,6 +1450,7 @@ fn build_genesis_seal_payload(
 /// keep the payload's `blockHash` consistent with the tampered block.
 fn payload_for_import(
     payload: &EthBuiltPayload,
+    parent: &SealedHeader,
     root: &RootInputV2,
     mutate: impl FnOnce(&mut Header),
 ) -> (ExecutionPayloadV3, SealCompanion, B256) {
@@ -1384,7 +1459,7 @@ fn payload_for_import(
     let block_hash = block.header.hash_slow();
     let execution_payload = ExecutionPayloadV3::from_block_unchecked(block_hash, &block);
     let beacon_root = block.header.parent_beacon_block_root.unwrap();
-    let companion = build_seal_companion(root).unwrap();
+    let companion = import_companion(parent, root, block_hash);
     (execution_payload, companion, beacon_root)
 }
 
@@ -1453,6 +1528,7 @@ struct CapturedRouteBlock {
     payload: EthBuiltPayload,
     execution_payload: ExecutionPayloadV3,
     companion: SealCompanion,
+    import_companion: SealCompanion,
     beacon_root: B256,
     completed: CompletedParent,
 }
@@ -1533,7 +1609,7 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
             &validator,
             &forkchoice,
             Some(&attrs),
-            &seal_input(&root),
+            &seal_input(&parent, &root, &attrs),
         )
         .unwrap();
 
@@ -1599,7 +1675,12 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
             payload.clone(),
         )
         .await;
-        let companion = build_seal_companion(&root).unwrap();
+        let companion = build_seal_companion(
+            &root,
+            &pair_binding(&parent_for_block, &root, build_subject(&attrs)),
+        )
+        .unwrap();
+        let import_companion = import_companion(&parent_for_block, &root, payload.block().hash());
         assert_eq!(response.seal_companion, companion);
         assert_eq!(declared_block_hash(&response.execution_payload), payload.block().hash());
         match store.get(payload.block().hash()).unwrap() {
@@ -1619,6 +1700,7 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
             payload,
             execution_payload: response.execution_payload,
             companion,
+            import_companion,
             beacon_root,
             completed,
         });
@@ -2157,7 +2239,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
                 captured.execution_payload.clone(),
                 vec![],
                 captured.beacon_root,
-                &captured.companion,
+                &captured.import_companion,
             )
             .await
             .unwrap();
@@ -2175,7 +2257,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
             .get(&declared_block_hash(&captured.execution_payload))
             .is_some());
         match follower_store.get(declared_block_hash(&captured.execution_payload)).unwrap() {
-            Lookup::Found(found) => assert_eq!(found, captured.companion),
+            Lookup::Found(found) => assert_eq!(found, captured.import_companion),
             other => panic!(
                 "follower route did not retain round {}: {other:?}",
                 captured.root.authorized_round
@@ -2188,11 +2270,13 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     let mut wrong_root = first.root.clone();
     wrong_root.network_id = 99;
     wrong_root.origin.network_id = 99;
+    let attrs = attributes(&first.root, first.parent.timestamp);
+    // The binding names the original root input, so the substituted one cannot ride under it.
     let wrong_input = SealBuildInput {
         root_input: wrong_root.canonical_cbor().unwrap().into(),
         transitions: vec![],
+        pair_binding: seal_input(&first.parent, &first.root, &attrs).pair_binding,
     };
-    let attrs = attributes(&first.root, first.parent.timestamp);
     let (_, _, _, _, build_context, build_validator) = seal_fixture();
     let build_error = prepare_seal_build(
         &first.client,
@@ -2214,7 +2298,11 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         &missing_parent_validator,
         &ForkchoiceState::same_hash(second.parent.hash()),
         Some(&attributes(&second.root, second.parent.timestamp)),
-        &seal_input(&second.root),
+        &seal_input(
+            &second.parent,
+            &second.root,
+            &attributes(&second.root, second.parent.timestamp),
+        ),
     )
     .unwrap_err();
     assert!(matches!(missing_parent_error, SealBuildError::ParentAccountingUnavailable));
@@ -2222,7 +2310,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
 
     let wrong_context_companion = SealCompanion {
         root_input: wrong_root.canonical_cbor().unwrap().into(),
-        ..first.companion.clone()
+        ..first.import_companion.clone()
     };
     let (_, _, _, _, wrong_context, wrong_context_validator) = seal_fixture();
     let (engine, seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
@@ -2255,7 +2343,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
             second.execution_payload.clone(),
             vec![],
             second.beacon_root,
-            &second.companion,
+            &second.import_companion,
         )
         .await
         .unwrap();
@@ -2270,8 +2358,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         &provider,
         &history.store,
         &restored,
-        PROFILE,
-        FEE_COLLECTOR,
+        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
         3,
         3,
     )
@@ -2286,7 +2373,15 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     wrong_order_store.put(first.payload.block().hash(), 1, &first.companion).unwrap();
     let mut wrong_order_root = second.root.clone();
     wrong_order_root.parent_hash = GENESIS_HASH;
-    let wrong_order_companion = build_seal_companion(&wrong_order_root).unwrap();
+    let wrong_order_companion = build_seal_companion(
+        &wrong_order_root,
+        &pair_binding(
+            &second.parent,
+            &wrong_order_root,
+            build_subject(&attributes(&second.root, second.parent.timestamp)),
+        ),
+    )
+    .unwrap();
     wrong_order_store.put(second.payload.block().hash(), 2, &wrong_order_companion).unwrap();
     let boundary_tokens = UnicityParentAccountings::default();
     boundary_tokens.insert_for_chain(
@@ -2300,8 +2395,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         &wrong_order_provider,
         &wrong_order_store,
         &boundary_tokens,
-        PROFILE,
-        FEE_COLLECTOR,
+        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
         2,
         2,
     )
@@ -2322,8 +2416,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         &reorg_provider,
         &history.store,
         &reorg_tokens,
-        PROFILE,
-        FEE_COLLECTOR,
+        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
         2,
         2,
     )
@@ -2342,8 +2435,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         &boundary_reorg_provider,
         &history.store,
         &boundary_tokens,
-        PROFILE,
-        FEE_COLLECTOR,
+        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
         1,
         1,
     )
@@ -2371,7 +2463,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
             first.execution_payload.clone(),
             vec![],
             first.beacon_root,
-            &first.companion,
+            &first.import_companion,
         )
         .await
         .unwrap();
@@ -2390,22 +2482,15 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     .unwrap();
     assert!(restarted_precommit.get(&first.payload.block().hash()).is_none());
 
-    // Crash boundary B: Engine accepted the canonical block, but the companion write failed. The
-    // durable accounting record is enough to restore the current head; replay remains impossible
-    // without the companion and must not invent one.
+    // Crash boundary B: the companion write failed. The block is refused before the Engine sees
+    // it, so no canonical block can exist without the companion that replays it. The durable
+    // accounting record for the refused block is an orphan: nothing canonical names it.
     let (_postcommit_dir, postcommit_store) = temp_store();
     let postcommit_tokens = UnicityParentAccountings::new().require_durability();
     postcommit_tokens.attach_store(postcommit_store.clone());
     let (_, _, _, _, mut postcommit_context, postcommit_validator) = seal_fixture();
     postcommit_context.state.parent_accounting = postcommit_tokens;
     postcommit_context.store = Arc::new(FailingCompanionSink);
-    let write_log = CapturedLogWriter::default();
-    let subscriber = tracing_subscriber::fmt()
-        .with_ansi(false)
-        .without_time()
-        .with_writer(write_log.clone())
-        .finish();
-    let _subscriber_guard = tracing::subscriber::set_default(subscriber);
     let (engine, seen) = fake_engine(PayloadStatus::new(
         PayloadStatusEnum::Valid,
         Some(first.payload.block().hash()),
@@ -2413,24 +2498,19 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     .await;
     let handler =
         seal_import_handler(first.client.clone(), postcommit_context, postcommit_validator, engine);
-    let status = handler
+    let refusal = handler
         .new_payload_with_seal(
             first.execution_payload.clone(),
             vec![],
             first.beacon_root,
-            &first.companion,
+            &first.import_companion,
         )
         .await
-        .unwrap();
-    assert!(status.is_valid());
-    seen.await.unwrap();
-    assert!(postcommit_store.get_accounting(first.payload.block().hash()).unwrap().is_some());
+        .unwrap_err();
+    assert!(refusal.to_string().contains("companion is not durable"), "{refusal}");
+    drop(handler);
+    assert!(seen.await.is_err(), "a block without a durable companion must not reach the Engine");
     assert!(matches!(postcommit_store.get(first.payload.block().hash()).unwrap(), Lookup::Unknown));
-    let write_log_text = write_log.contents();
-    assert!(
-        write_log_text.contains("failed to retain the seal companion; the verdict is unchanged")
-    );
-    assert!(write_log_text.contains("forced store failure"));
     let restarted_postcommit = UnicityParentAccountings::new().require_durability();
     let postcommit_store_for_replay = postcommit_store.clone();
     restarted_postcommit.attach_store(postcommit_store);
@@ -2446,8 +2526,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         &canonical_first,
         &postcommit_store_for_replay,
         &UnicityParentAccountings::default(),
-        PROFILE,
-        FEE_COLLECTOR,
+        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
         1,
         1,
     )
@@ -2482,7 +2561,8 @@ async fn new_payload_with_seal_imports_a_built_block_and_records_its_token() {
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let block_hash = payload.block().hash();
     let commitment = B256::from_slice(&payload.block().header().extra_data);
-    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
 
     let (engine, seen) =
         fake_engine(PayloadStatus::new(PayloadStatusEnum::Valid, Some(block_hash))).await;
@@ -2513,7 +2593,8 @@ async fn new_payload_with_seal_stores_the_companion_of_an_accepted_import() {
     context.store = store.clone();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let block_hash = payload.block().hash();
-    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
     // The key a client knows, taken from the payload it sends rather than the pre-conversion block.
     let client_hash = declared_block_hash(&execution_payload);
 
@@ -2538,7 +2619,8 @@ async fn new_payload_with_seal_leaves_no_entry_for_a_rejected_import() {
     let (_dir, store) = temp_store();
     context.store = store.clone();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
-    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
     let client_hash = declared_block_hash(&execution_payload);
 
     // The handler resolves and forwards the block, and the engine rejects it. This is the case
@@ -2568,7 +2650,8 @@ async fn new_payload_with_seal_leaves_no_entry_for_a_syncing_import() {
     let (_dir, store) = temp_store();
     context.store = store.clone();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
-    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
     let client_hash = declared_block_hash(&execution_payload);
 
     // The handler forwards the block and the engine answers SYNCING. SYNCING is not VALID, so the
@@ -2591,22 +2674,25 @@ async fn new_payload_with_seal_leaves_no_entry_for_a_syncing_import() {
 }
 
 #[tokio::test]
-async fn a_failing_store_write_does_not_change_a_valid_verdict() {
+async fn a_failing_store_write_refuses_the_import_before_the_engine_sees_the_block() {
     let (client, parent, root, attrs, mut context, validator) = seal_fixture();
     context.store = Arc::new(FailingCompanionSink);
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let block_hash = payload.block().hash();
-    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
 
-    let (engine, _seen) =
+    let (engine, seen) =
         fake_engine(PayloadStatus::new(PayloadStatusEnum::Valid, Some(block_hash))).await;
     let handler = seal_import_handler(client, context, validator, engine);
-    let status = handler
+    let error = handler
         .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
         .await
-        .unwrap();
-    assert!(status.is_valid(), "a store failure must not change the engine's VALID verdict");
-    assert_eq!(status.latest_valid_hash, Some(block_hash));
+        .unwrap_err();
+    assert!(matches!(error, EngineApiError::Internal(_)), "{error:?}");
+    assert!(error.to_string().contains("companion is not durable"), "{error}");
+    drop(handler);
+    assert!(seen.await.is_err(), "the block must not be forwarded without a durable companion");
 }
 
 #[tokio::test]
@@ -2617,8 +2703,15 @@ async fn get_payload_with_seal_stores_the_companion_it_returns() {
 
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
     let payload_id = attrs.payload_id(&parent.hash());
-    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &seal_input(&root))
-        .unwrap();
+    prepare_seal_build(
+        &client,
+        &context,
+        &validator,
+        &state,
+        Some(&attrs),
+        &seal_input(&parent, &root, &attrs),
+    )
+    .unwrap();
     let base = context.builder_config.get().unwrap().clone();
     let builder = UnicityExecutionPayloadBuilder::new(
         client.clone(),
@@ -2626,9 +2719,11 @@ async fn get_payload_with_seal_stores_the_companion_it_returns() {
         context.registry.clone(),
         base,
     );
-    let payload =
-        builder.build_empty_payload(PayloadConfig::new(parent, attrs, payload_id)).unwrap();
-    let expected = build_seal_companion(&root).unwrap();
+    let payload = builder
+        .build_empty_payload(PayloadConfig::new(parent.clone(), attrs.clone(), payload_id))
+        .unwrap();
+    let expected =
+        build_seal_companion(&root, &pair_binding(&parent, &root, build_subject(&attrs))).unwrap();
 
     let (store_tx, store_rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(serve_resolved_payload(store_rx, payload));
@@ -2652,14 +2747,21 @@ async fn get_payload_with_seal_stores_the_companion_it_returns() {
 }
 
 #[tokio::test]
-async fn a_failing_store_write_does_not_change_the_get_payload_response() {
+async fn a_failing_store_write_fails_get_payload_instead_of_serving_an_unretained_companion() {
     let (client, parent, root, attrs, mut context, validator) = seal_fixture();
     context.store = Arc::new(FailingCompanionSink);
 
     let state = ForkchoiceState::same_hash(GENESIS_HASH);
     let payload_id = attrs.payload_id(&parent.hash());
-    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &seal_input(&root))
-        .unwrap();
+    prepare_seal_build(
+        &client,
+        &context,
+        &validator,
+        &state,
+        Some(&attrs),
+        &seal_input(&parent, &root, &attrs),
+    )
+    .unwrap();
     let base = context.builder_config.get().unwrap().clone();
     let builder = UnicityExecutionPayloadBuilder::new(
         client.clone(),
@@ -2681,15 +2783,17 @@ async fn a_failing_store_write_does_not_change_the_get_payload_response() {
         PayloadStore::new(PayloadBuilderHandle::new(store_tx)),
     );
 
-    let response = handler.get_payload_with_seal(payload_id).await.unwrap();
-    assert_eq!(response.seal_companion, build_seal_companion(&root).unwrap());
+    let error = handler.get_payload_with_seal(payload_id).await.unwrap_err();
+    assert!(matches!(error, EngineApiError::Internal(_)), "{error:?}");
+    assert!(error.to_string().contains("forced store failure"), "{error}");
 }
 
 #[tokio::test]
 async fn new_payload_with_seal_returns_the_engine_verdict() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
-    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
 
     let engine_status = PayloadStatus::from_status(PayloadStatusEnum::Invalid {
         validation_error: "engine verdict".into(),
@@ -2708,7 +2812,7 @@ async fn new_payload_with_seal_rejects_a_state_root_mismatch() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let (execution_payload, companion, beacon_root) =
-        payload_for_import(&payload, &root, |header| {
+        payload_for_import(&payload, &parent, &root, |header| {
             header.state_root = B256::repeat_byte(0x99);
         });
 
@@ -2729,7 +2833,7 @@ async fn new_payload_with_seal_reports_a_missing_parent_as_syncing() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let (execution_payload, companion, beacon_root) =
-        payload_for_import(&payload, &root, |header| {
+        payload_for_import(&payload, &parent, &root, |header| {
             header.parent_hash = B256::repeat_byte(0x99);
         });
 
@@ -2751,8 +2855,9 @@ async fn new_payload_with_seal_reports_a_parent_without_a_token_as_syncing() {
     let mut orphan_header = payload.block().header().clone();
     orphan_header.number = 7;
     let orphan_hash = orphan_header.hash_slow();
+    let orphan = SealedHeader::new(orphan_header.clone(), orphan_hash);
     let (execution_payload, companion, beacon_root) =
-        payload_for_import(&payload, &root, |header| {
+        payload_for_import(&payload, &orphan, &root, |header| {
             header.parent_hash = orphan_hash;
         });
 
@@ -2771,7 +2876,8 @@ async fn new_payload_with_seal_reports_a_parent_without_a_token_as_syncing() {
 async fn new_payload_with_seal_rejects_blob_versioned_hashes() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
-    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
 
     let handler = seal_import_handler(client, context.clone(), validator, closed_engine());
     let status = handler
@@ -2792,9 +2898,11 @@ async fn new_payload_with_seal_rejects_blob_versioned_hashes() {
 async fn new_payload_with_seal_rejects_a_malformed_root_input() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
-    let (execution_payload, _companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (execution_payload, _companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
     let malformed = SealCompanion {
         root_input: vec![0x80].into(),
+        pair_binding: Default::default(),
         witnesses: vec![],
         provenance: "newPayload".into(),
     };
@@ -2813,8 +2921,9 @@ async fn new_payload_with_seal_rejects_a_malformed_root_input() {
 async fn new_payload_with_seal_never_returns_accepted() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
-    let (good_payload, good_companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
-    let (bad_payload, bad_companion, _) = payload_for_import(&payload, &root, |header| {
+    let (good_payload, good_companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
+    let (bad_payload, bad_companion, _) = payload_for_import(&payload, &parent, &root, |header| {
         header.state_root = B256::repeat_byte(0x99);
     });
 
@@ -2936,7 +3045,8 @@ async fn the_parent_token_recorded_by_an_import_is_usable_by_a_later_build() {
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let imported_header = payload.block().header().clone();
     let imported_hash = payload.block().hash();
-    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
 
     let (engine, _seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
     let handler = seal_import_handler(client.clone(), context.clone(), validator.clone(), engine);
@@ -2963,7 +3073,11 @@ async fn the_parent_token_recorded_by_an_import_is_usable_by_a_later_build() {
         &validator,
         &ForkchoiceState::same_hash(imported_hash),
         Some(&child_attrs),
-        &seal_input(&child_root),
+        &seal_input(
+            &SealedHeader::new(imported_header.clone(), imported_hash),
+            &child_root,
+            &child_attrs,
+        ),
     )
     .unwrap();
     assert_eq!(returned, child_attrs);
@@ -2984,7 +3098,8 @@ async fn a_reopened_canonical_token_supports_the_next_build() {
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let header = payload.block().header().clone();
     let hash = payload.block().hash();
-    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
     let (engine, _seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
     let handler = seal_import_handler(client.clone(), context.clone(), validator.clone(), engine);
     assert!(handler
@@ -3020,7 +3135,7 @@ async fn a_reopened_canonical_token_supports_the_next_build() {
         &validator,
         &ForkchoiceState::same_hash(hash),
         Some(&child_attrs),
-        &seal_input(&child_root),
+        &seal_input(&SealedHeader::new(header.clone(), hash), &child_root, &child_attrs,),
     )
     .is_ok());
 }
@@ -3067,7 +3182,8 @@ async fn hydration_restores_persisted_head_when_memory_tip_is_ahead() {
 async fn accounting_persistence_failure_refuses_import_before_engine_forward() {
     let (client, parent, root, attrs, mut context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
-    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
     context.state.parent_accounting = UnicityParentAccountings::default().require_durability();
     let (engine, seen) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
     let handler = seal_import_handler(client, context.clone(), validator, engine);
@@ -3095,7 +3211,8 @@ async fn conflicting_durable_write_refuses_import_before_engine_forward() {
         .unwrap()
         .completed_parent_for(payload.block())
         .unwrap();
-    let (execution_payload, companion, beacon_root) = payload_for_import(&payload, &root, |_| {});
+    let (execution_payload, companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
     let (_dir, store) = temp_store();
     store
         .put_accounting(reth_unicity_store::StoredAccounting {
@@ -3163,9 +3280,10 @@ fn unicity_capabilities_withhold_stock_new_payload() {
 
 #[tokio::test]
 async fn get_seal_companion_returns_a_stored_companion() {
-    let (client, _parent, root, _attrs, _context, _validator) = seal_fixture();
+    let (client, parent, root, attrs, _context, _validator) = seal_fixture();
     let (_dir, store) = temp_store();
-    let companion = build_seal_companion(&root).unwrap();
+    let companion =
+        build_seal_companion(&root, &pair_binding(&parent, &root, build_subject(&attrs))).unwrap();
     store.put(GENESIS_HASH, 0, &companion).unwrap();
 
     let rpc = UnicityRpcModuleImpl::new(client, store);
@@ -3175,9 +3293,10 @@ async fn get_seal_companion_returns_a_stored_companion() {
 
 #[tokio::test]
 async fn get_seal_companion_reports_unavailable_below_the_horizon() {
-    let (client, _parent, root, _attrs, _context, _validator) = seal_fixture();
+    let (client, parent, root, attrs, _context, _validator) = seal_fixture();
     let (_dir, store) = temp_store();
-    let companion = build_seal_companion(&root).unwrap();
+    let companion =
+        build_seal_companion(&root, &pair_binding(&parent, &root, build_subject(&attrs))).unwrap();
     // A genuine prune: `prune_below` drops block 0 and raises the horizon to 5.
     store.put(GENESIS_HASH, 0, &companion).unwrap();
     store.prune_below(5).unwrap();
@@ -3250,7 +3369,7 @@ async fn seal_companion_horizon_is_null_before_pruning_even_with_a_retention_con
     let (client, _parent, _root, _attrs, _context, _validator) = seal_fixture();
     let node = UnicityNode::new(
         SealJobRegistry::new(),
-        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR },
+        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
     )
     .with_retention(UnicityRetentionConfig::retain_last(5));
     assert_eq!(node.retention().depth(), Some(5), "the retention policy is carried");
@@ -3282,8 +3401,9 @@ fn pruner_fixture(
     finalized: u64,
     numbers: &[u64],
 ) -> (Client, Arc<CompanionStore>, tempfile::TempDir, SealCompanion) {
-    let (client, _parent, root, _attrs, _context, _validator) = seal_fixture();
-    let companion = build_seal_companion(&root).unwrap();
+    let (client, parent, root, attrs, _context, _validator) = seal_fixture();
+    let companion =
+        build_seal_companion(&root, &pair_binding(&parent, &root, build_subject(&attrs))).unwrap();
     let extra_headers = numbers
         .iter()
         .map(|number| {
@@ -3523,7 +3643,11 @@ fn go_genesis_fixture(
         state: SealBuildState {
             registry: SealJobRegistry::new(),
             builder_config,
-            seal: UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR },
+            seal: UnicitySealConfig {
+                profile: PROFILE,
+                fee_collector: FEE_COLLECTOR,
+                pins: PAIR_PINS,
+            },
             parent_accounting: UnicityParentAccountings::default(),
             execution_inputs: UnicityBlockExecutionRegistry::default(),
             retention: UnicityRetentionConfig::default(),
@@ -3559,12 +3683,14 @@ async fn apply_go_subset(
         root_input = leaked.canonical_cbor().unwrap();
     }
     let beacon_root = B256::from_slice(&go_hex(&vector["parent_beacon_block_root"]));
-    let build_input = SealBuildInput {
+    let mut build_input = SealBuildInput {
         root_input: root_input.clone().into(),
         transitions: vec![go_hex(&vector["transition"]).into()],
+        pair_binding: Default::default(),
     };
-    let companion = SealCompanion {
+    let mut companion = SealCompanion {
         root_input: root_input.clone().into(),
+        pair_binding: Default::default(),
         witnesses: subset["witnesses"]
             .as_array()
             .unwrap()
@@ -3583,6 +3709,10 @@ async fn apply_go_subset(
     let (client, parent, mut context, validator) = go_genesis_fixture(genesis_hash);
     let (_dir, store) = temp_store();
     context.store = store;
+    // This pair's own verification names the build; the vector supplies the input it derived.
+    build_input.pair_binding = pair_binding_on(genesis_hash, &parent, &root, build_subject(&attrs))
+        .canonical_cbor()
+        .into();
     prepare_seal_build(
         &client,
         &context,
@@ -3634,7 +3764,15 @@ async fn apply_go_subset(
     assert_eq!(declared_block_hash(&response.execution_payload), payload.block().hash());
 
     // Follower route: a fresh node imports the same payload with the companion bft-core's follower
-    // forwarded for this subset.
+    // forwarded for this subset, bound by the follower pair's own verification of this block.
+    companion.pair_binding = pair_binding_on(
+        genesis_hash,
+        &parent,
+        &root,
+        ExpectedSubject::Import { block_hash: declared_block_hash(&response.execution_payload) },
+    )
+    .canonical_cbor()
+    .into();
     let (follower_client, _, mut follower_context, follower_validator) =
         go_genesis_fixture(genesis_hash);
     let (_follower_dir, follower_store) = temp_store();
@@ -3712,5 +3850,425 @@ async fn go_signer_subset_vectors_reach_identical_state_through_builder_follower
     assert_eq!(
         registry[&go_registry_slot("round.authorized")],
         U256::from(vector["authorized_round"].as_u64().unwrap())
+    );
+}
+
+// ---- the paired-execution binding gate ----
+
+fn flip(word: B256) -> B256 {
+    B256::from(word.0.map(|byte| byte ^ 0xff))
+}
+
+/// The bytes of a binding for `subject` with `change` applied to it.
+fn binding_bytes(
+    parent: &SealedHeader,
+    root: &RootInputV2,
+    subject: ExpectedSubject,
+    change: impl FnOnce(&mut PairBinding),
+) -> Vec<u8> {
+    let mut binding = pair_binding(parent, root, subject);
+    change(&mut binding);
+    binding.canonical_cbor()
+}
+
+/// Runs the build preparation with the binding bytes `make` returns and reports the outcome and
+/// the context, so a test can assert that nothing was installed.
+fn build_under(
+    context_change: impl FnOnce(&mut SealBuildContext),
+    make: impl FnOnce(&SealedHeader, &RootInputV2, &UnicityPayloadAttributes) -> Vec<u8>,
+) -> (Result<UnicityPayloadAttributes, SealBuildError>, SealBuildContext) {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    context_change(&mut context);
+    let mut input = seal_input(&parent, &root, &attrs);
+    input.pair_binding = make(&parent, &root, &attrs).into();
+    let outcome = prepare_seal_build(
+        &client,
+        &context,
+        &validator,
+        &ForkchoiceState::same_hash(GENESIS_HASH),
+        Some(&attrs),
+        &input,
+    );
+    (outcome, context)
+}
+
+fn assert_build_refused(
+    outcome: Result<UnicityPayloadAttributes, SealBuildError>,
+    context: &SealBuildContext,
+    expected: PairBindingError,
+) {
+    assert_eq!(outcome.unwrap_err(), SealBuildError::PairBinding(expected.clone()));
+    assert!(context.registry.is_empty(), "a refused binding must install no job");
+    let response = refusal_response(SealBuildError::PairBinding(expected)).unwrap();
+    assert!(response.payload_status.is_invalid());
+}
+
+#[test]
+fn a_build_names_its_pair_binding_and_retains_it_on_the_job() {
+    let (outcome, context) = build_under(
+        |_| {},
+        |parent, root, attrs| binding_bytes(parent, root, build_subject(attrs), |_| {}),
+    );
+    let attrs = outcome.unwrap();
+    assert_eq!(context.registry.len(), 1);
+    let retained = context.registry.pair_binding(&attrs.payload_id(&GENESIS_HASH)).unwrap();
+    assert_eq!(retained.network_id, PAIR_PINS.network_id);
+    assert_eq!(retained.parent_hash, GENESIS_HASH);
+}
+
+#[test]
+fn a_build_without_a_binding_installs_nothing() {
+    let (outcome, context) = build_under(|_| {}, |_, _, _| Vec::new());
+    assert_build_refused(outcome, &context, PairBindingError::Missing);
+}
+
+#[test]
+fn a_build_under_a_binding_for_another_parent_installs_nothing() {
+    let (outcome, context) = build_under(
+        |_| {},
+        |parent, root, attrs| {
+            binding_bytes(parent, root, build_subject(attrs), |b| {
+                b.parent_hash = flip(b.parent_hash)
+            })
+        },
+    );
+    assert_build_refused(outcome, &context, PairBindingError::ParentHashMismatch);
+}
+
+#[test]
+fn a_build_under_a_binding_for_another_job_installs_nothing() {
+    let (outcome, context) = build_under(
+        |_| {},
+        |parent, root, attrs| {
+            let mut other = attrs.clone();
+            other.inner.timestamp += 1;
+            binding_bytes(parent, root, build_subject(&other), |_| {})
+        },
+    );
+    assert_build_refused(outcome, &context, PairBindingError::JobMismatch);
+}
+
+#[test]
+fn a_build_under_an_import_binding_installs_nothing() {
+    let (outcome, context) = build_under(
+        |_| {},
+        |parent, root, _| {
+            binding_bytes(
+                parent,
+                root,
+                ExpectedSubject::Import { block_hash: B256::repeat_byte(5) },
+                |_| {},
+            )
+        },
+    );
+    assert_build_refused(
+        outcome,
+        &context,
+        PairBindingError::WrongSubjectKind { expected: SUBJECT_BUILD, found: SUBJECT_IMPORT },
+    );
+}
+
+#[test]
+fn a_build_under_a_binding_for_another_root_input_installs_nothing() {
+    let (outcome, context) = build_under(
+        |_| {},
+        |parent, root, attrs| {
+            binding_bytes(parent, root, build_subject(attrs), |b| {
+                b.root_input_hash = flip(b.root_input_hash)
+            })
+        },
+    );
+    assert_build_refused(outcome, &context, PairBindingError::RootInputMismatch);
+}
+
+#[test]
+fn a_build_under_another_pinned_network_installs_nothing() {
+    let (outcome, context) = build_under(
+        |context| context.state.seal.pins.network_id += 1,
+        |parent, root, attrs| binding_bytes(parent, root, build_subject(attrs), |_| {}),
+    );
+    assert_build_refused(outcome, &context, PairBindingError::NetworkMismatch);
+}
+
+#[test]
+fn a_build_under_another_pinned_root_genesis_installs_nothing() {
+    let (outcome, context) = build_under(
+        |context| {
+            context.state.seal.pins.root_genesis_id = flip(context.state.seal.pins.root_genesis_id)
+        },
+        |parent, root, attrs| binding_bytes(parent, root, build_subject(attrs), |_| {}),
+    );
+    assert_build_refused(outcome, &context, PairBindingError::RootGenesisMismatch);
+}
+
+#[test]
+fn a_repeated_build_must_carry_the_same_binding() {
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let first = seal_input(&parent, &root, &attrs);
+    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &first).unwrap();
+    // The activation is the one field with no local comparison when no transition is carried, so
+    // a second binding that differs only there is well formed and verifies. The registry must still
+    // tell it from the first.
+    let mut other = first;
+    other.pair_binding = binding_bytes(&parent, &root, build_subject(&attrs), |b| {
+        b.activation_id = flip(b.activation_id)
+    })
+    .into();
+    let error = prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &other)
+        .unwrap_err();
+    assert_eq!(error, SealBuildError::DuplicatePayloadId);
+    assert_eq!(context.registry.len(), 1);
+}
+
+#[tokio::test]
+async fn a_job_without_a_retained_binding_cannot_produce_a_companion() {
+    let (client, parent, root, _attrs, context, validator) = seal_fixture();
+    // Installed behind the gate's back, as a library caller could: no binding is retained.
+    let base = context.builder_config.get().unwrap().clone();
+    let (job, attrs) = resolved_job(&client.chain_spec, &parent, &Arc::new(root), &base);
+    context.registry.insert(job).unwrap();
+    let payload_id = attrs.payload_id(&parent.hash());
+    assert!(context.registry.pair_binding(&payload_id).is_none());
+    let builder = UnicityExecutionPayloadBuilder::new(
+        client.clone(),
+        test_pool(),
+        context.registry.clone(),
+        base,
+    );
+    let payload =
+        builder.build_empty_payload(PayloadConfig::new(parent, attrs, payload_id)).unwrap();
+
+    let (store_tx, store_rx) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(serve_resolved_payload(store_rx, payload));
+    let (beacon_tx, _beacon_rx) = tokio::sync::mpsc::unbounded_channel();
+    let handler = UnicityEngineApiImpl::new(
+        client,
+        ConsensusEngineHandle::new(beacon_tx),
+        context,
+        validator,
+        PayloadStore::new(PayloadBuilderHandle::new(store_tx)),
+    );
+    match handler.get_payload_with_seal(payload_id).await.unwrap_err() {
+        EngineApiError::Other(error) => assert_eq!(error.code(), COMPANION_NOT_RETAINED_CODE),
+        other => panic!("expected the unretained-companion error, got {other:?}"),
+    }
+}
+
+/// An import of the genesis-parent block under `make`'s companion edit; returns the status, whether
+/// the engine saw the block, and the context and store for the follow-up assertions.
+async fn import_under(
+    make: impl FnOnce(&SealedHeader, &RootInputV2, &UnicityPayloadAttributes, &mut SealCompanion),
+) -> (PayloadStatus, bool, SealBuildContext, Arc<CompanionStore>) {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    let (dir, store) = temp_store();
+    std::mem::forget(dir);
+    context.store = store.clone();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let block_hash = payload.block().hash();
+    let (execution_payload, mut companion, beacon_root) =
+        payload_for_import(&payload, &parent, &root, |_| {});
+    make(&parent, &root, &attrs, &mut companion);
+    let (engine, seen) =
+        fake_engine(PayloadStatus::new(PayloadStatusEnum::Valid, Some(block_hash))).await;
+    let probe = context.clone();
+    let handler = seal_import_handler(client, context, validator, engine);
+    let status = handler
+        .new_payload_with_seal(execution_payload, vec![], beacon_root, &companion)
+        .await
+        .unwrap();
+    drop(handler);
+    (status, seen.await.is_ok(), probe, store)
+}
+
+async fn assert_import_refused(
+    outcome: (PayloadStatus, bool, SealBuildContext, Arc<CompanionStore>),
+    expected: PairBindingError,
+) {
+    let (status, forwarded, context, store) = outcome;
+    assert!(status.is_invalid(), "{status:?}");
+    assert_eq!(
+        status.status.validation_error().unwrap(),
+        SealImportError::PairBinding(expected).to_string()
+    );
+    assert!(!forwarded, "a refused binding must not reach the Engine");
+    assert!(context.parent_accounting.is_empty(), "no accounting before the gate passes");
+    assert!(
+        store.entries_in_range(0, u64::MAX).unwrap().is_empty(),
+        "a refused binding must retain no companion"
+    );
+}
+
+#[tokio::test]
+async fn an_import_with_its_binding_is_retained_with_that_binding() {
+    let (status, forwarded, _context, store) = import_under(|_, _, _, _| {}).await;
+    assert!(status.is_valid(), "{status:?}");
+    assert!(forwarded);
+    let hash = status.latest_valid_hash.unwrap();
+    match store.get(hash).unwrap() {
+        Lookup::Found(found) => {
+            assert!(PairBinding::from_canonical_cbor(&found.pair_binding).is_ok());
+        }
+        other => panic!("the admitted companion must be retained with its binding: {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn an_import_without_a_binding_is_refused_whatever_its_provenance() {
+    // Live follow, fresh paired sync and re-execution all arrive through this one method, and the
+    // provenance label is not a way around the gate.
+    for provenance in ["newPayload", "devp2p", "reexec", "build"] {
+        let outcome = import_under(|_, _, _, companion| {
+            companion.pair_binding = Default::default();
+            companion.provenance = provenance.to_owned();
+        })
+        .await;
+        assert_import_refused(outcome, PairBindingError::Missing).await;
+    }
+}
+
+#[tokio::test]
+async fn an_import_under_a_binding_for_another_block_is_refused() {
+    let outcome = import_under(|parent, root, _, companion| {
+        companion.pair_binding = binding_bytes(
+            parent,
+            root,
+            ExpectedSubject::Import { block_hash: B256::repeat_byte(0x42) },
+            |_| {},
+        )
+        .into();
+    })
+    .await;
+    assert_import_refused(outcome, PairBindingError::BlockMismatch).await;
+}
+
+#[tokio::test]
+async fn an_import_under_a_build_binding_is_refused() {
+    let outcome = import_under(|parent, root, attrs, companion| {
+        companion.pair_binding = binding_bytes(parent, root, build_subject(attrs), |_| {}).into();
+    })
+    .await;
+    assert_import_refused(
+        outcome,
+        PairBindingError::WrongSubjectKind { expected: SUBJECT_IMPORT, found: SUBJECT_BUILD },
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn an_import_under_a_binding_for_another_parent_is_refused() {
+    let outcome = import_under(|parent, root, _, companion| {
+        let other_parent = SealedHeader::new(
+            alloy_consensus::Header { number: parent.number + 1, ..parent.header().clone() },
+            parent.hash(),
+        );
+        // The binding is internally consistent for a parent at another height.
+        let hash = companion_block_hash(companion, parent, root);
+        companion.pair_binding = binding_bytes(
+            &other_parent,
+            root,
+            ExpectedSubject::Import { block_hash: hash },
+            |_| {},
+        )
+        .into();
+    })
+    .await;
+    assert_import_refused(outcome, PairBindingError::ParentNumberMismatch).await;
+}
+
+/// The block hash `import_companion` named, read back from the companion's own binding.
+fn companion_block_hash(
+    companion: &SealCompanion,
+    _parent: &SealedHeader,
+    _root: &RootInputV2,
+) -> B256 {
+    match PairBinding::from_canonical_cbor(&companion.pair_binding).unwrap().subject {
+        PairSubject::Import { block_hash } => block_hash,
+        PairSubject::Build { .. } => panic!("an import companion names an import"),
+    }
+}
+
+#[tokio::test]
+async fn recovery_refuses_a_retained_binding_that_no_longer_names_the_canonical_block() {
+    let history = capture_paid_idle_transition_fixture().await;
+    let first = &history.blocks[0];
+    let hash = first.payload.block().hash();
+    let provider = history.recovery_provider(1);
+
+    let repair = |companion: &SealCompanion, pins: PairPins| {
+        let (_dir, store) = temp_store();
+        store.put(hash, 1, companion).unwrap();
+        reth_unicity_payload::recovery::repair_accounting(
+            &provider,
+            &store,
+            &UnicityParentAccountings::default(),
+            UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins },
+            1,
+            1,
+        )
+    };
+    let with_binding =
+        |bytes: Vec<u8>| SealCompanion { pair_binding: bytes.into(), ..first.companion.clone() };
+    let parent = &first.parent;
+    let root = &first.root;
+    let attrs = attributes(root, parent.timestamp);
+
+    // Both subject kinds the node itself retains replay.
+    repair(&first.companion, PAIR_PINS).unwrap();
+    repair(&first.import_companion, PAIR_PINS).unwrap();
+
+    let refused = |error: eyre::Report, needle: &str| {
+        let text = error.to_string();
+        assert!(text.contains(needle), "expected {needle:?} in {text:?}");
+    };
+    refused(
+        repair(&with_binding(Vec::new()), PAIR_PINS).unwrap_err(),
+        "retained binding unusable at 1: pair binding refused: Missing",
+    );
+    refused(
+        repair(
+            &with_binding(binding_bytes(parent, root, build_subject(&attrs), |b| {
+                b.parent_hash = flip(b.parent_hash)
+            })),
+            PAIR_PINS,
+        )
+        .unwrap_err(),
+        "ParentHashMismatch",
+    );
+    let mut other_job = attrs;
+    other_job.inner.timestamp += 1;
+    refused(
+        repair(
+            &with_binding(binding_bytes(parent, root, build_subject(&other_job), |_| {})),
+            PAIR_PINS,
+        )
+        .unwrap_err(),
+        "JobMismatch",
+    );
+    refused(
+        repair(
+            &with_binding(binding_bytes(
+                parent,
+                root,
+                ExpectedSubject::Import { block_hash: B256::repeat_byte(0x42) },
+                |_| {},
+            )),
+            PAIR_PINS,
+        )
+        .unwrap_err(),
+        "BlockMismatch",
+    );
+    refused(
+        repair(&first.companion, PairPins { network_id: PAIR_PINS.network_id + 1, ..PAIR_PINS })
+            .unwrap_err(),
+        "NetworkMismatch",
+    );
+    refused(
+        repair(
+            &first.companion,
+            PairPins { root_genesis_id: flip(PAIR_PINS.root_genesis_id), ..PAIR_PINS },
+        )
+        .unwrap_err(),
+        "RootGenesisMismatch",
     );
 }

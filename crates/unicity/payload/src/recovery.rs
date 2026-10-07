@@ -1,7 +1,7 @@
 //! Canonical-only hydration of durable parent accounting at node startup.
 
 use alloy_consensus::Header;
-use alloy_primitives::{Address, B256};
+use alloy_primitives::B256;
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
 use reth_ethereum_primitives::{Block, TransactionSigned};
 use reth_evm_ethereum::EthEvmConfig;
@@ -11,12 +11,19 @@ use reth_storage_api::{BlockNumReader, BlockReader, HeaderProvider, StateProvide
 use reth_unicity_execution::{
     block::BlockProfile,
     block_executor::{replay_complete, UnicityEvmConfig},
+    pairing::{
+        header_attributes_digest, verify_pair_binding, ExpectedSubject, PairBinding, PairContext,
+        PairSubject,
+    },
     wire::{bind_completed_parent, bind_validated_genesis},
 };
 use reth_unicity_store::{CompanionStore, Lookup};
 use std::sync::Arc;
 
-use crate::registry::{ParentAccountingResolver, UnicityParentAccountings};
+use crate::{
+    node::UnicitySealConfig,
+    registry::{ParentAccountingResolver, UnicityParentAccountings},
+};
 
 /// Number of nearby canonical tokens loaded around both the visible and persisted tips.
 pub const ACCOUNTING_WINDOW: u64 = 16;
@@ -58,8 +65,7 @@ pub fn repair_accounting<P>(
     provider: &P,
     store: &CompanionStore,
     tokens: &UnicityParentAccountings,
-    profile: BlockProfile,
-    fee_collector: Address,
+    seal: UnicitySealConfig,
     target: u64,
     limit: u64,
 ) -> eyre::Result<()>
@@ -71,6 +77,7 @@ where
     if target == 0 {
         return Ok(());
     }
+    let UnicitySealConfig { profile, fee_collector, pins } = seal;
     let chain = provider.chain_spec();
     let genesis = chain.genesis_hash();
     let target_hash = canonical_hash(provider, target)?;
@@ -96,15 +103,6 @@ where
             }
         };
         let root = companion.decode_root_input()?;
-        let bound = if number == 1 {
-            bind_validated_genesis(root, profile, &parent, genesis, fee_collector)
-        } else {
-            let token = tokens
-                .resolve(&parent, &chain, profile)
-                .map_err(|_| eyre::eyre!("missing predecessor token for block {number}"))?;
-            bind_completed_parent(root, profile, &parent, token.token(), fee_collector)
-        }
-        .map_err(|error| eyre::eyre!("parent accounting binding failed at {number}: {error:?}"))?;
         let block = provider
             .block_by_hash(hash)?
             .ok_or_else(|| {
@@ -117,6 +115,40 @@ where
                 "parent accounting unavailable: historical block identity mismatch at {number}"
             );
         }
+        // Recovery re-checks the binding retained with the companion against the canonical chain
+        // it now holds. A retained input that no longer names this block, parent or genesis is a
+        // refusal, never an input to replay. The local Go side re-authenticates independently.
+        let subject = match PairBinding::from_canonical_cbor(&companion.pair_binding)
+            .map_err(|error| eyre::eyre!("retained binding unusable at {number}: {error}"))?
+            .subject
+        {
+            PairSubject::Build { .. } => ExpectedSubject::Build {
+                attributes_digest: header_attributes_digest(block.header()).ok_or_else(|| {
+                    eyre::eyre!("retained build binding at {number}: header has no beacon root")
+                })?,
+            },
+            PairSubject::Import { .. } => ExpectedSubject::Import { block_hash: hash },
+        };
+        verify_pair_binding(
+            &companion.pair_binding,
+            &PairContext {
+                pins,
+                execution_genesis_hash: genesis,
+                parent: &parent,
+                root: &root,
+                subject,
+            },
+        )
+        .map_err(|error| eyre::eyre!("retained binding refused at {number}: {error}"))?;
+        let bound = if number == 1 {
+            bind_validated_genesis(root, profile, &parent, genesis, fee_collector)
+        } else {
+            let token = tokens
+                .resolve(&parent, &chain, profile)
+                .map_err(|_| eyre::eyre!("missing predecessor token for block {number}"))?;
+            bind_completed_parent(root, profile, &parent, token.token(), fee_collector)
+        }
+        .map_err(|error| eyre::eyre!("parent accounting binding failed at {number}: {error:?}"))?;
         let state = provider.state_by_block_hash(parent_hash)?;
         let config = UnicityEvmConfig::new(EthEvmConfig::new(chain.clone()), Arc::new(bound));
         let replay =
@@ -189,8 +221,12 @@ fn canonical_header<P: HeaderProvider<Header = Header>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloy_primitives::Address;
     use reth_provider::test_utils::MockEthProvider;
-    use reth_unicity_execution::block_executor::{CompletedParent, LocalParentAccounting};
+    use reth_unicity_execution::{
+        block_executor::{CompletedParent, LocalParentAccounting},
+        pairing::PairPins,
+    };
 
     const PROFILE: BlockProfile = BlockProfile {
         max_gas: 30_000_001,
@@ -199,6 +235,8 @@ mod tests {
         elasticity: 2,
         change_denominator: 8,
     };
+
+    const PINS: PairPins = PairPins { network_id: 1, root_genesis_id: B256::repeat_byte(1) };
 
     fn header(number: u64, marker: u8) -> Header {
         Header {
@@ -254,9 +292,15 @@ mod tests {
         .unwrap();
         tokens.publish(canonical_one.hash(), 1, 1, genesis, canonical_token).unwrap();
         assert_eq!(select_repair_anchor(&provider, &tokens, PROFILE, 1, genesis, 2, 1).unwrap(), 1);
-        let missing_companion =
-            repair_accounting(&provider, &store, &tokens, PROFILE, Address::ZERO, 2, 1)
-                .unwrap_err();
+        let missing_companion = repair_accounting(
+            &provider,
+            &store,
+            &tokens,
+            UnicitySealConfig { profile: PROFILE, fee_collector: Address::ZERO, pins: PINS },
+            2,
+            1,
+        )
+        .unwrap_err();
         assert!(missing_companion.to_string().contains("companion missing for block 2"));
         let error =
             select_repair_anchor(&provider, &tokens, PROFILE, 1, genesis, 3, 1).unwrap_err();
