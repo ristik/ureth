@@ -354,13 +354,45 @@ siblings stay as reachable as before and the Go caller that supplies bindings is
 One layout and one encoding exist; the store record gained the binding frame in place with no
 migration. No upstream source file is edited.
 
+## B1 #62 (4a/4): committed update admission and gross system accounting, inactive
+
+B1 stores the full authenticated root members in deterministically pruned ordinary EVM state, so
+the native certificate kernel of PR2 reads authority from the selected block's own journal. PR4a is
+the execution half of its integration; the node-level precompile factories, RPC/trace routes and
+the acceptance and benchmark work follow in 4b.
+
+- **One layout.** The pinned registry is unicity-pos-contracts PR 6 (`71eb6325`):
+  `crates/unicity/execution/testdata/seal-registry.json`, code hash
+  `0x28ebc47d5beeb45307cb92ff1521be6a5623d4e4fa1721bc13a6f755cdf0781c`. The v1/v2 artifacts, their
+  fixtures and the old `open` ABI are gone: no layout version, negotiation or migration exists, and
+  a genesis without the B1 allocation is refused.
+- **Committed update.** The canonical root input gains a twelfth field, `SHA-256(Update)`. The
+  exact `Update` bytes travel as `b1Update` in the build envelope and the seal companion, are stored
+  in the companion record and are re-executed on build, import, replay and recovery. Rust checks
+  canonical bounds, the pinned bindings and the interval and member invariants of the new entries
+  (`crates/unicity/execution/src/update.rs`); it does not repeat root-history authentication, which
+  the paired Go node performs.
+- **Staged, gross accounting.** `G_admit = 2000 + 16*C + 1000*T` is debited before `open`, in two
+  stages: the byte cap and scan charge before the bytes are read, the member charge before any
+  member is allocated or any key point parsed. `open` and `finalize` receive the remainder, the
+  outcome commitment covers admission plus open, and refunds never lower the total.
+- **Profile.** `--unicity.chain-id`, `--unicity.profile-hash` and `--unicity.w-cert` pin the B1
+  bindings; `--unicity.max-gas` and `--unicity.system-gas` have no default, and a reservation below
+  `155936 + 15626944*K + G_rest(K)` or a ring above the measured cap of 16 is refused at startup and
+  at job binding.
+
+The Go vector generator (`crates/unicity/execution/testdata/generate-b1-vectors_test.go`) emits the
+funded B1 genesis, a K=2 scenario with every changed registry word from bft-core's own `b1state`
+model, and the twelve-field re-encoding of the executable root-input vectors; the Rust tests execute
+the real registry runtime against them. `tools/mutate_b1_guards.py` disables each guard once.
+
 ## Current total fork inventory
 
 Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface1bd72cceb4`:
 
 | Change | Kind |
 | --- | --- |
-| `Cargo.toml`: three workspace member lines and two local dependency entries for `reth-unicity-execution` and `reth-unicity-store` | makes the inactive crates workspace-visible and lets payload reuse execution |
+| `Cargo.toml`: three workspace member lines and three local dependency entries for `reth-unicity-b1`, `reth-unicity-execution` and `reth-unicity-store` | makes the inactive crates workspace-visible and lets payload and execution reuse them |
 | `Cargo.lock`: three added Unicity package entries; dependency edges added to the `reth-unicity-payload` entry for the U3b node wiring, the U3c to U3e seal methods, the U3f node executor and the U3g capability set, and to the `reth-unicity-execution` entry for U3f; the `reth-unicity-store` entry for U3h; security updates to `h2` 0.4.16 and `rustls` 0.23.45 with their compatible transitive lock updates | fixes RUSTSEC-2026-0258 and RUSTSEC-2026-0285 without changing dependency requirements |
 | `crates/unicity/payload/` | per-payload commitment provision, execution builder, bounded seal-job registry, Unicity node wiring, the `engine_forkchoiceUpdatedWithSealV1`, `engine_getPayloadWithSealV1` and `engine_newPayloadWithSealV1` siblings, the node executor component and the seal capability advertisement |
 | `crates/unicity/execution/` | bounded registry kernel, shared build/replay adapter, fixtures, the completed-parent token mint, the job root-input accessor and the node EVM dispatch (`node_evm`) |

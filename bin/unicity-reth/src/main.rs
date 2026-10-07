@@ -21,7 +21,7 @@ use alloy_primitives::{Address, B256};
 use clap::{Args, Parser};
 use reth_config::Config as RethConfig;
 use reth_ethereum_cli::{chainspec::EthereumChainSpecParser, interface::Cli};
-use reth_unicity_execution::{block::BlockProfile, pairing::PairPins};
+use reth_unicity_execution::{block::BlockProfile, pairing::PairPins, update::B1Context};
 use reth_unicity_payload::{
     recovery::ACCOUNTING_WINDOW, SealJobRegistry, UnicityNode, UnicityRetentionConfig,
     UnicitySealConfig,
@@ -30,9 +30,9 @@ use tracing::{info, warn};
 
 /// Operator configuration for the Unicity node.
 ///
-/// Every value the node pins comes from here; the defaults are the profile the bounded execution
-/// kernel pins, not a binary-local choice. The fee collector has no sensible default — a zero
-/// address would silently burn fees — so it is required.
+/// Every value the node pins comes from here. The gas reservation has no binary-local default
+/// because it must cover the B1 profile envelope for the chosen `W_cert`. The fee collector has no
+/// sensible default — a zero address would silently burn fees — so it is required.
 #[derive(Debug, Clone, Args)]
 struct UnicityArgs {
     /// Beneficiary every Unicity payload attributes must name.
@@ -52,12 +52,24 @@ struct UnicityArgs {
     #[arg(long = "unicity.root-genesis-id", value_name = "HASH")]
     root_genesis_id: B256,
 
+    /// Execution chain identifier every update must name.
+    #[arg(long = "unicity.chain-id", value_name = "ID")]
+    chain_id: u64,
+
+    /// `SHA-256` of the complete execution profile, equal to the registry's `b1.profileHash`.
+    #[arg(long = "unicity.profile-hash", value_name = "HASH")]
+    profile_hash: B256,
+
+    /// Certificate window `W_cert`; the registry keeps `W_cert + 1` authority intervals.
+    #[arg(long = "unicity.w-cert", value_name = "ROUNDS")]
+    w_cert: u64,
+
     /// Header gas limit (`g_max`), retained as the real EVM block gas limit.
-    #[arg(long = "unicity.max-gas", default_value_t = 30_000_000)]
+    #[arg(long = "unicity.max-gas")]
     max_gas: u64,
 
     /// Combined gross open/finalize reservation (`g_sys`).
-    #[arg(long = "unicity.system-gas", default_value_t = 2_000_000)]
+    #[arg(long = "unicity.system-gas")]
     system_gas: u64,
 
     /// Positive base-fee floor.
@@ -103,6 +115,28 @@ impl UnicityArgs {
             change_denominator: self.base_fee_change_denominator,
         };
         profile.validate().map_err(|err| eyre::eyre!("invalid --unicity profile: {err:?}"))
+    }
+
+    /// Validates the pinned B1 bindings and that `g_sys` covers the profile envelope.
+    fn b1(&self, profile: &BlockProfile) -> eyre::Result<B1Context> {
+        let context = B1Context {
+            network: u16::try_from(self.network_id)
+                .map_err(|_| eyre::eyre!("--unicity.network-id must fit 16 bits"))?,
+            root_genesis_id: self.root_genesis_id,
+            execution_chain_id: self.chain_id,
+            profile_hash: self.profile_hash,
+            w_cert: self.w_cert,
+        };
+        let required = context
+            .required_system_gas()
+            .map_err(|err| eyre::eyre!("invalid --unicity B1 profile: {err:?}"))?;
+        if profile.system_gas < required {
+            eyre::bail!(
+                "--unicity.system-gas {} is below the {required} the B1 profile envelope needs",
+                profile.system_gas
+            );
+        }
+        Ok(context)
     }
 
     /// The companion retention policy this configuration selects.
@@ -170,6 +204,7 @@ fn main() {
     if let Err(err) = Cli::<EthereumChainSpecParser, UnicityArgs>::parse().run(
         async move |builder, args: UnicityArgs| {
             let profile = args.profile()?;
+            let b1 = args.b1(&profile)?;
             args.validate_retention()?;
             if args.proof_source_enabled() {
                 // Validate before launch starts payload-building and other node services.
@@ -194,6 +229,7 @@ fn main() {
                     network_id: args.network_id,
                     root_genesis_id: args.root_genesis_id,
                 },
+                b1,
             };
 
             info!(target: "reth::cli", "Launching Unicity node");
@@ -230,6 +266,11 @@ mod tests {
             "node",
             "--unicity.fee-collector=0x000000000000000000000000000000000000dead",
             ROOT_GENESIS,
+            "--unicity.chain-id=1337",
+            "--unicity.profile-hash=0x0202020202020202020202020202020202020202020202020202020202020202",
+            "--unicity.w-cert=1",
+            "--unicity.max-gas=50000000",
+            "--unicity.system-gas=43000000",
         ];
         args.extend_from_slice(extra);
         Cli::<EthereumChainSpecParser, UnicityArgs>::try_parse_from(args).map(|_| ())
@@ -258,8 +299,11 @@ mod tests {
             fee_collector: Address::ZERO,
             network_id: 1,
             root_genesis_id: B256::repeat_byte(1),
-            max_gas: 30_000_000,
-            system_gas: 2_000_000,
+            chain_id: 1337,
+            profile_hash: B256::repeat_byte(2),
+            w_cert: 1,
+            max_gas: 50_000_000,
+            system_gas: 43_000_000,
             base_fee_floor: 1_000_000,
             elasticity: 2,
             base_fee_change_denominator: 8,
@@ -277,8 +321,11 @@ mod tests {
             fee_collector: Address::ZERO,
             network_id: 1,
             root_genesis_id: B256::repeat_byte(1),
-            max_gas: 30_000_000,
-            system_gas: 2_000_000,
+            chain_id: 1337,
+            profile_hash: B256::repeat_byte(2),
+            w_cert: 1,
+            max_gas: 50_000_000,
+            system_gas: 43_000_000,
             base_fee_floor: 1_000_000,
             elasticity: 2,
             base_fee_change_denominator: 8,
@@ -364,6 +411,19 @@ mod tests {
     }
 
     #[test]
+    fn system_gas_must_cover_the_b1_profile_envelope() {
+        let args = proof_args(true, None);
+        let profile = args.profile().unwrap();
+        // W_cert = 1 needs 155936 + 1096500 + 2 * (15626944 + 1141500) = 34_789_324.
+        let exact = BlockProfile { system_gas: 34_789_324, max_gas: 41_789_324, ..profile };
+        assert_eq!(args.b1(&exact).unwrap().w_cert, 1);
+        let short = BlockProfile { system_gas: 34_789_323, max_gas: 41_789_324, ..profile };
+        assert!(args.b1(&short).is_err());
+        let unmeasured = UnicityArgs { w_cert: 16, ..args };
+        assert!(unmeasured.b1(&profile).is_err());
+    }
+
+    #[test]
     fn proof_source_is_on_by_default_and_explicitly_opt_out() {
         use clap::FromArgMatches;
 
@@ -375,6 +435,11 @@ mod tests {
                 "--unicity.fee-collector=0x0000000000000000000000000000000000000000",
                 "--unicity.network-id=1",
                 "--unicity.root-genesis-id=0x0101010101010101010101010101010101010101010101010101010101010101",
+                "--unicity.chain-id=1337",
+                "--unicity.profile-hash=0x0202020202020202020202020202020202020202020202020202020202020202",
+                "--unicity.w-cert=1",
+                "--unicity.max-gas=50000000",
+                "--unicity.system-gas=43000000",
             ])
             .unwrap();
         let defaults = UnicityArgs::from_arg_matches(&matches).unwrap();
@@ -386,6 +451,11 @@ mod tests {
                 "--unicity.fee-collector=0x0000000000000000000000000000000000000000",
                 "--unicity.network-id=1",
                 "--unicity.root-genesis-id=0x0101010101010101010101010101010101010101010101010101010101010101",
+                "--unicity.chain-id=1337",
+                "--unicity.profile-hash=0x0202020202020202020202020202020202020202020202020202020202020202",
+                "--unicity.w-cert=1",
+                "--unicity.max-gas=50000000",
+                "--unicity.system-gas=43000000",
                 "--unicity.no-proof-source",
             ])
             .unwrap();
@@ -404,6 +474,11 @@ mod tests {
                 "--unicity.fee-collector=0x0000000000000000000000000000000000000000",
                 "--unicity.network-id=1",
                 "--unicity.root-genesis-id=0x0101010101010101010101010101010101010101010101010101010101010101",
+                "--unicity.chain-id=1337",
+                "--unicity.profile-hash=0x0202020202020202020202020202020202020202020202020202020202020202",
+                "--unicity.w-cert=1",
+                "--unicity.max-gas=50000000",
+                "--unicity.system-gas=43000000",
             ])
             .unwrap();
         let args = UnicityArgs::from_arg_matches(&matches).unwrap();

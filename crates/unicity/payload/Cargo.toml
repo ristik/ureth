@@ -61,6 +61,7 @@ thiserror.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
+reth-unicity-execution = { workspace = true, features = ["test-utils"] }
 alloy-genesis.workspace = true
 alloy-trie = { workspace = true, features = ["std"] }
 reth-db-api.workspace = true

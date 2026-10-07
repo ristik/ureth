@@ -6,7 +6,7 @@ use alloy_consensus::{transaction::Recovered, SignableTransaction, TxEip4844, Tx
 use alloy_eips::eip4788::BEACON_ROOTS_ADDRESS;
 use alloy_evm::block::BlockExecutor;
 use alloy_genesis::Genesis;
-use alloy_primitives::{b256, Address, Bytes, Signature, TxKind, B256, B64, U256};
+use alloy_primitives::{Address, Bytes, Signature, TxKind, B256, B64, U256};
 use reth_chainspec::ChainSpec;
 use reth_ethereum_primitives::{Block, Transaction, TransactionSigned};
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
@@ -20,28 +20,25 @@ use reth_unicity_execution::{
     block_executor::{
         build_complete, replay_complete, BoundExecutionInput, CompletedParent, UnicityEvmConfig,
     },
-    derive_beacon_root, derive_prev_randao, derive_timestamp, technical_record_hash,
+    derive_beacon_root, derive_prev_randao, derive_timestamp,
+    testing::{Tail, GENESIS_TAIL},
     wire::bind_completed_parent,
-    InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY, SYSTEM_CALLER,
+    RootInputV2, SEAL_REGISTRY, SYSTEM_CALLER,
 };
 use revm::database::State;
 use std::sync::{Arc, Mutex};
-use support::provider::FixtureProvider;
-
-const GENESIS_HASH: B256 =
-    b256!("efbe99d08e86d7e06034bfcb0d48f0f40a92b321fb3f96ca82a58e83d0c62363");
-const GENESIS_ROOT: B256 =
-    b256!("868d8ac89ecb4bd0ab588ab97aba438a51898b0eaf18860a054b224897100f4a");
-const INITIAL_ACTIVE_CONF_HASH: B256 =
-    b256!("002a719ed27ff7b185660ac29fe1f32269b0e3ab3f126716a52c47ec2b8a92dd");
-const FEE_COLLECTOR: Address = Address::new([0x77; 20]);
-const PROFILE: BlockProfile = BlockProfile {
-    max_gas: 30_000_001,
-    system_gas: 500_001,
-    base_fee_floor: 7,
-    elasticity: 2,
-    change_denominator: 8,
+use support::{
+    b1::{ack_input, genesis_hash, input, profile, sealed},
+    provider::FixtureProvider,
 };
+
+const FEE_COLLECTOR: Address = Address::new([0x77; 20]);
+fn genesis_root() -> B256 {
+    let oracle: serde_json::Value =
+        serde_json::from_str(include_str!("../testdata/signed-beacon-genesis-oracle.json"))
+            .unwrap();
+    oracle["stateRoot"].as_str().unwrap().parse().unwrap()
+}
 
 fn signed_call(
     chain_id: u64,
@@ -66,54 +63,14 @@ fn signed_call(
 }
 
 fn expected_next_base_fee(parent_base: u64, ordinary_used: u64) -> u64 {
-    let target = (PROFILE.max_gas - PROFILE.system_gas) / PROFILE.elasticity;
+    let target = (profile().max_gas - profile().system_gas) / profile().elasticity;
     let delta = u128::from(parent_base) * u128::from(ordinary_used.abs_diff(target)) /
         u128::from(target) /
-        u128::from(PROFILE.change_denominator);
+        u128::from(profile().change_denominator);
     if ordinary_used > target {
         parent_base + u64::try_from(delta).unwrap().max(1)
     } else {
-        parent_base.saturating_sub(u64::try_from(delta).unwrap()).max(PROFILE.base_fee_floor)
-    }
-}
-
-fn input(round: u64, root_round: u64, parent_hash: B256) -> RootInputV2 {
-    let technical = TechnicalRecordV2 {
-        round,
-        epoch: 0,
-        leader: "evm-node".into(),
-        stat_hash: B256::repeat_byte(0xe0),
-        fee_hash: B256::repeat_byte(0xf0),
-    };
-    RootInputV2 {
-        version: 2,
-        network_id: 3,
-        partition_id: 8,
-        shard_id: vec![],
-        authorized_round: round,
-        certified_epoch: 0,
-        authorized_epoch: 0,
-        parent_hash,
-        origin: RootOriginV2 {
-            network_id: 3,
-            root_round,
-            root_epoch: 1,
-            reference_time: 1,
-            tree_root: B256::repeat_byte(0xc0),
-            input_record_version: 1,
-            input_record: InputRecordV2 {
-                round: round.saturating_sub(1),
-                epoch: 0,
-                previous_hash: (round > 1).then(|| B256::repeat_byte(0x31)),
-                state_hash: (round > 1).then(|| B256::repeat_byte(0x31)),
-                timestamp: u64::from(round > 1),
-                block_hash: None,
-            },
-            tr_hash: technical_record_hash(&technical),
-            shard_conf_hash: INITIAL_ACTIVE_CONF_HASH,
-        },
-        technical,
-        transitions: vec![],
+        parent_base.saturating_sub(u64::try_from(delta).unwrap()).max(profile().base_fee_floor)
     }
 }
 
@@ -122,7 +79,7 @@ fn attributes(input: &RootInputV2, parent_timestamp: u64) -> NextBlockEnvAttribu
         timestamp: derive_timestamp(input.origin.reference_time, parent_timestamp).unwrap(),
         suggested_fee_recipient: FEE_COLLECTOR,
         prev_randao: derive_prev_randao(input.origin.root_round, input.authorized_round),
-        gas_limit: PROFILE.max_gas,
+        gas_limit: profile().max_gas,
         parent_beacon_block_root: Some(derive_beacon_root(
             input.origin.root_round,
             input.authorized_round,
@@ -133,72 +90,28 @@ fn attributes(input: &RootInputV2, parent_timestamp: u64) -> NextBlockEnvAttribu
     }
 }
 
-fn acknowledgement_bytes(parent: B256) -> Vec<u8> {
-    fn bytes(out: &mut Vec<u8>, value: &[u8]) {
-        out.extend_from_slice(&[0x58, value.len() as u8]);
-        out.extend_from_slice(value);
-    }
-    fn text(out: &mut Vec<u8>, value: &str) {
-        if value.len() < 24 {
-            out.push(0x60 + value.len() as u8);
-        } else {
-            out.extend_from_slice(&[0x78, value.len() as u8]);
-        }
-        out.extend_from_slice(value.as_bytes());
-    }
-    let mut ack = vec![0x88];
-    text(&mut ack, "UNICITY_HANDOFF_ACK");
-    ack.push(2);
-    for word in
-        [B256::repeat_byte(0x41), B256::repeat_byte(0x42), parent, parent, B256::repeat_byte(0x43)]
-    {
-        bytes(&mut ack, word.as_slice());
-    }
-    ack.push(1);
-    let new_conf = B256::repeat_byte(0x56);
-    let mut transition = vec![0x8d];
-    text(&mut transition, "UNICITY_HANDOFF_EVM_TRANSITION");
-    transition.extend_from_slice(&[3, 1, 2, 0, 1]);
-    bytes(&mut transition, INITIAL_ACTIVE_CONF_HASH.as_slice());
-    bytes(&mut transition, new_conf.as_slice());
-    transition.push(0);
-    bytes(&mut transition, B256::ZERO.as_slice());
-    bytes(&mut transition, B256::repeat_byte(0x44).as_slice());
-    bytes(&mut transition, B256::repeat_byte(0x45).as_slice());
-    bytes(&mut transition, &ack);
-    transition
-}
-
 #[test]
 fn acknowledgement_replays_before_a_paid_successor_transaction() {
     let genesis: Genesis =
         serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
-    let parent = SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH);
+    let parent = SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash());
     let mut provider = FixtureProvider::signed_genesis();
-    provider.set_block_hash(0, GENESIS_HASH);
-    let mut ack_input = input(1, 1, GENESIS_HASH);
-    ack_input.origin.root_epoch = 2;
-    ack_input.certified_epoch = 0;
-    ack_input.authorized_epoch = 1;
-    ack_input.technical.epoch = 1;
-    ack_input.origin.input_record.epoch = 0;
-    ack_input.origin.shard_conf_hash = B256::repeat_byte(0x56);
-    ack_input.origin.tr_hash = technical_record_hash(&ack_input.technical);
-    ack_input.transitions = vec![acknowledgement_bytes(GENESIS_HASH)];
-    let ack_input = Arc::new(ack_input);
+    provider.set_block_hash(0, genesis_hash());
+    let (ack_input, ack_job) = sealed(ack_input(genesis_hash()), 0, GENESIS_TAIL);
     // A same-height uncertified fork is not the frozen parent named by this acknowledgement.
     let mut fork_header = chain_spec.genesis_header().clone();
     fork_header.extra_data = vec![0x99].into();
     let fork_hash = fork_header.hash_slow();
     let fork_parent = SealedHeader::new(fork_header, fork_hash);
-    assert_ne!(fork_hash, GENESIS_HASH);
+    assert_ne!(fork_hash, genesis_hash());
     assert!(
         BoundExecutionInput::from_validated_genesis(
             ack_input.clone(),
-            PROFILE,
+            ack_job.clone(),
+            profile(),
             &fork_parent,
-            GENESIS_HASH,
+            genesis_hash(),
             FEE_COLLECTOR,
         )
         .is_err(),
@@ -207,9 +120,10 @@ fn acknowledgement_replays_before_a_paid_successor_transaction() {
     let bound = Arc::new(
         BoundExecutionInput::from_validated_genesis(
             ack_input.clone(),
-            PROFILE,
+            ack_job,
+            profile(),
             &parent,
-            GENESIS_HASH,
+            genesis_hash(),
             FEE_COLLECTOR,
         )
         .unwrap(),
@@ -278,12 +192,14 @@ fn acknowledgement_replays_before_a_paid_successor_transaction() {
     next_input.technical.epoch = 1;
     next_input.origin.input_record.epoch = 1;
     next_input.origin.shard_conf_hash = B256::repeat_byte(0x56);
-    next_input.origin.tr_hash = technical_record_hash(&next_input.technical);
-    let next_input = Arc::new(next_input);
+    next_input.origin.tr_hash =
+        reth_unicity_execution::technical_record_hash(&next_input.technical);
+    let (next_input, next_job) = sealed(next_input, 1, Tail { epoch: 2, start: 1 });
     let next_bound = Arc::new(
         BoundExecutionInput::from_completed_parent(
             next_input.clone(),
-            PROFILE,
+            next_job,
+            profile(),
             &ack_header,
             ack.parent,
             FEE_COLLECTOR,
@@ -314,14 +230,15 @@ fn payload_job_binding_names_gas_and_fee_mismatches() {
     let genesis: Genesis =
         serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
-    let parent = SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH);
-    let root = Arc::new(input(1, 1, GENESIS_HASH));
+    let parent = SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash());
+    let (root, job) = sealed(input(1, 1, genesis_hash()), 0, GENESIS_TAIL);
     let bound = Arc::new(
         BoundExecutionInput::from_validated_genesis(
             root.clone(),
-            PROFILE,
+            job,
+            profile(),
             &parent,
-            GENESIS_HASH,
+            genesis_hash(),
             FEE_COLLECTOR,
         )
         .unwrap(),
@@ -334,7 +251,7 @@ fn payload_job_binding_names_gas_and_fee_mismatches() {
         config.validate_payload_job(&parent, &attrs).unwrap_err().message(),
         "next-block gas_limit mismatch"
     );
-    attrs.gas_limit = PROFILE.max_gas;
+    attrs.gas_limit = profile().max_gas;
     attrs.suggested_fee_recipient = Address::ZERO;
     assert_eq!(
         config.validate_payload_job(&parent, &attrs).unwrap_err().message(),
@@ -348,23 +265,24 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     let genesis: Genesis = serde_json::from_str(genesis_json).unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
     let genesis_header = chain_spec.genesis_header().clone();
-    assert_eq!(genesis_header.hash_slow(), GENESIS_HASH);
-    assert_eq!(genesis_header.state_root, GENESIS_ROOT);
-    let parent = SealedHeader::new(genesis_header.clone(), GENESIS_HASH);
+    assert_eq!(genesis_header.hash_slow(), genesis_hash());
+    assert_eq!(genesis_header.state_root, genesis_root());
+    let parent = SealedHeader::new(genesis_header.clone(), genesis_hash());
     let mut provider = FixtureProvider::signed_genesis();
-    provider.set_block_hash(0, GENESIS_HASH);
-    assert_eq!(provider.root(), GENESIS_ROOT);
+    provider.set_block_hash(0, genesis_hash());
+    assert_eq!(provider.root(), genesis_root());
     let signer =
         Address::parse_checksummed("0x7E5F4552091A69125d5DfCb7b8C2659029395Bdf", None).unwrap();
     let initial_signer = provider.basic_account(&signer).unwrap().unwrap();
 
-    let first_input = Arc::new(input(1, 1, GENESIS_HASH));
+    let (first_input, first_job) = sealed(input(1, 1, genesis_hash()), 0, GENESIS_TAIL);
     let bound = Arc::new(
         BoundExecutionInput::from_validated_genesis(
             first_input.clone(),
-            PROFILE,
+            first_job,
+            profile(),
             &parent,
-            GENESIS_HASH,
+            genesis_hash(),
             FEE_COLLECTOR,
         )
         .unwrap(),
@@ -376,7 +294,7 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
         u128::from(genesis_header.base_fee_per_gas.unwrap()) + 100,
         Address::repeat_byte(0x42),
         U256::ZERO,
-        PROFILE.ordinary_capacity().unwrap() + 1,
+        profile().ordinary_capacity().unwrap() + 1,
     )
     .try_into_recovered()
     .unwrap();
@@ -459,28 +377,31 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
 
     let first_header = first_block.into_sealed_block().into_sealed_header();
     let stored = built.parent.for_local_storage();
-    assert!(CompletedParent::from_local_storage(stored, &first_header, PROFILE).is_ok());
+    assert!(CompletedParent::from_local_storage(stored, &first_header, profile()).is_ok());
     let mut wrong_accounting = stored;
     wrong_accounting.ordinary_gas += 1;
-    assert!(CompletedParent::from_local_storage(wrong_accounting, &first_header, PROFILE).is_err());
+    assert!(
+        CompletedParent::from_local_storage(wrong_accounting, &first_header, profile()).is_err()
+    );
     let mut wrong_hash = stored;
     wrong_hash.block_hash = B256::ZERO;
-    assert!(CompletedParent::from_local_storage(wrong_hash, &first_header, PROFILE).is_err());
+    assert!(CompletedParent::from_local_storage(wrong_hash, &first_header, profile()).is_err());
     assert!(CompletedParent::from_local_storage(
         stored,
         &first_header,
-        BlockProfile { base_fee_floor: 8, ..PROFILE },
+        BlockProfile { base_fee_floor: 8, ..profile() },
     )
     .is_err());
     assert_eq!(
         first_header.base_fee_per_gas.unwrap(),
         expected_next_base_fee(genesis_header.base_fee_per_gas.unwrap(), 0),
     );
-    let second_input = Arc::new(input(2, 2, first_header.hash()));
-    let wrong_parent_input = Arc::new(input(2, 2, B256::ZERO));
+    let (second_input, second_job) = sealed(input(2, 2, first_header.hash()), 1, GENESIS_TAIL);
+    let (wrong_parent_input, wrong_parent_job) = sealed(input(2, 2, B256::ZERO), 1, GENESIS_TAIL);
     assert!(BoundExecutionInput::from_completed_parent(
         wrong_parent_input,
-        PROFILE,
+        wrong_parent_job,
+        profile(),
         &first_header,
         built.parent,
         FEE_COLLECTOR,
@@ -488,7 +409,8 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     .is_err());
     assert!(BoundExecutionInput::from_completed_parent(
         second_input.clone(),
-        BlockProfile { base_fee_floor: 8, ..PROFILE },
+        second_job.clone(),
+        BlockProfile { base_fee_floor: 8, ..profile() },
         &first_header,
         built.parent,
         FEE_COLLECTOR,
@@ -499,7 +421,8 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     let forged_parent = SealedHeader::new(forged_parent_header, first_header.hash());
     assert!(BoundExecutionInput::from_completed_parent(
         second_input.clone(),
-        PROFILE,
+        second_job.clone(),
+        profile(),
         &forged_parent,
         built.parent,
         FEE_COLLECTOR,
@@ -508,7 +431,8 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     let build_bound = Arc::new(
         bind_completed_parent(
             (*second_input).clone(),
-            PROFILE,
+            second_job.clone(),
+            profile(),
             &first_header,
             built.parent,
             FEE_COLLECTOR,
@@ -518,7 +442,8 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     let replay_bound = Arc::new(
         BoundExecutionInput::from_completed_parent(
             second_input.clone(),
-            PROFILE,
+            second_job,
+            profile(),
             &first_header,
             replayed.parent,
             FEE_COLLECTOR,
@@ -642,16 +567,17 @@ fn import_fixture() -> ImportFixture {
     let genesis: Genesis = serde_json::from_str(genesis_json).unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
     let genesis_header = chain_spec.genesis_header().clone();
-    let parent = SealedHeader::new(genesis_header.clone(), GENESIS_HASH);
+    let parent = SealedHeader::new(genesis_header.clone(), genesis_hash());
     let mut provider = FixtureProvider::signed_genesis();
-    provider.set_block_hash(0, GENESIS_HASH);
-    let first_input = Arc::new(input(1, 1, GENESIS_HASH));
+    provider.set_block_hash(0, genesis_hash());
+    let (first_input, first_job) = sealed(input(1, 1, genesis_hash()), 0, GENESIS_TAIL);
     let bound = Arc::new(
         BoundExecutionInput::from_validated_genesis(
             first_input.clone(),
-            PROFILE,
+            first_job,
+            profile(),
             &parent,
-            GENESIS_HASH,
+            genesis_hash(),
             FEE_COLLECTOR,
         )
         .unwrap(),

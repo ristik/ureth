@@ -76,6 +76,7 @@ use reth_unicity_execution::{
         attributes_digest, verify_pair_binding, ExpectedSubject, PairBinding, PairBindingError,
         PairContext,
     },
+    update::B1Job,
     wire::{
         bind_completed_parent, bind_validated_genesis, CanonicalCborError, SealBuildInput,
         SealCompanion,
@@ -423,9 +424,11 @@ where
         },
     )
     .map_err(SealBuildError::PairBinding)?;
+    let b1 = B1Job { context: context.seal.b1, update: seal_build_input.b1_update.clone() };
     let bound = if parent.number == 0 && parent.hash() == genesis_hash {
         bind_validated_genesis(
             root,
+            b1,
             context.seal.profile,
             &parent,
             genesis_hash,
@@ -439,6 +442,7 @@ where
             .map_err(|_| SealBuildError::ParentAccountingUnavailable)?;
         bind_completed_parent(
             root,
+            b1,
             context.seal.profile,
             &parent,
             lease.token(),
@@ -510,12 +514,14 @@ pub fn companion_not_retained_error(payload_id: PayloadId) -> EngineApiError {
 /// is the party that can populate them before dissemination. See the crate README.
 pub fn build_seal_companion(
     root_input: &RootInputV2,
+    b1_update: &[u8],
     pair_binding: &PairBinding,
 ) -> Result<SealCompanion, SealCompanionError> {
     let root_input =
         root_input.canonical_cbor().map_err(|error| SealCompanionError(format!("{error:?}")))?;
     Ok(SealCompanion {
         root_input: root_input.into(),
+        b1_update: Bytes::copy_from_slice(b1_update),
         pair_binding: pair_binding.canonical_cbor().into(),
         witnesses: Vec::new(),
         provenance: BUILD_PROVENANCE.to_owned(),
@@ -713,12 +719,17 @@ where
             .registry
             .root_input(&payload_id)
             .ok_or_else(|| companion_not_retained_error(payload_id))?;
+        let b1_update = self
+            .context
+            .registry
+            .b1_update(&payload_id)
+            .ok_or_else(|| companion_not_retained_error(payload_id))?;
         let pair_binding = self
             .context
             .registry
             .pair_binding(&payload_id)
             .ok_or_else(|| companion_not_retained_error(payload_id))?;
-        let seal_companion = build_seal_companion(&root_input, &pair_binding)
+        let seal_companion = build_seal_companion(&root_input, &b1_update, &pair_binding)
             .map_err(|error| EngineApiError::Internal(Box::new(error)))?;
 
         // Capture the key before the payload is consumed by the conversion. The store key is the
@@ -895,9 +906,11 @@ where
 
         // 5b. Bind through the U3a entry points. The token is the genesis bootstrap or the token
         //    the build path or a previous import published, never a value derived from the header.
+        let b1 = B1Job { context: self.context.seal.b1, update: seal_companion.b1_update.clone() };
         let (bound, parent_lease) = if parent.number == 0 && parent.hash() == genesis_hash {
             bind_validated_genesis(
                 root,
+                b1,
                 self.context.seal.profile,
                 &parent,
                 genesis_hash,
@@ -913,6 +926,7 @@ where
                 .map_err(|_| SealImportError::ParentAccountingMissing)?;
             bind_completed_parent(
                 root,
+                b1,
                 self.context.seal.profile,
                 &parent,
                 lease.token(),
@@ -1429,6 +1443,7 @@ mod tests {
     use reth_unicity_execution::{
         block::BlockProfile,
         pairing::PairPins,
+        update::B1Context,
         wire::{SealBuildInput, SealCompanion},
     };
     use std::path::Path;
@@ -1496,6 +1511,13 @@ mod tests {
             },
             fee_collector: Address::repeat_byte(0x12),
             pins: PairPins { network_id: 9, root_genesis_id: B256::repeat_byte(0x44) },
+            b1: B1Context {
+                network: 9,
+                root_genesis_id: B256::repeat_byte(0x44),
+                execution_chain_id: 1337,
+                profile_hash: B256::repeat_byte(2),
+                w_cert: 1,
+            },
         };
         let reported = SealConfigV1::from(seal);
         assert_eq!(reported.version, 1);

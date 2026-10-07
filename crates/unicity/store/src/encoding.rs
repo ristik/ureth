@@ -11,10 +11,11 @@
 //!
 //! 1. one version byte, currently [`RECORD_VERSION`];
 //! 2. `root_input`, one length-prefixed frame;
-//! 3. `pair_binding`, one length-prefixed frame, retained so recovery re-checks the same binding;
-//! 4. the witness count as a four-byte big-endian integer, followed by that many length-prefixed
+//! 3. `b1_update`, one length-prefixed frame, the exact update bytes the root input commits to;
+//! 4. `pair_binding`, one length-prefixed frame, retained so recovery re-checks the same binding;
+//! 5. the witness count as a four-byte big-endian integer, followed by that many length-prefixed
 //!    frames;
-//! 5. `provenance`, one length-prefixed UTF-8 frame.
+//! 6. `provenance`, one length-prefixed UTF-8 frame.
 //!
 //! There is no compression and no field is optional, so there is exactly one encoding per value.
 //! An unknown version byte is refused with [`StoreError::UnknownVersion`] rather than skipped,
@@ -50,6 +51,7 @@ pub(crate) fn encode(companion: &SealCompanion) -> Result<Vec<u8>, StoreError> {
     let mut out = Vec::new();
     out.push(RECORD_VERSION);
     put_frame(&mut out, &companion.root_input)?;
+    put_frame(&mut out, &companion.b1_update)?;
     put_frame(&mut out, &companion.pair_binding)?;
     put_count(&mut out, companion.witnesses.len())?;
     for witness in &companion.witnesses {
@@ -73,6 +75,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<SealCompanion, StoreError> {
     }
 
     let root_input = Bytes::copy_from_slice(reader.read_frame()?);
+    let b1_update = Bytes::copy_from_slice(reader.read_frame()?);
     let pair_binding = Bytes::copy_from_slice(reader.read_frame()?);
 
     let witness_count = reader.read_u32()? as usize;
@@ -89,7 +92,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<SealCompanion, StoreError> {
         return Err(StoreError::MalformedRecord("trailing bytes after record"));
     }
 
-    Ok(SealCompanion { root_input, pair_binding, witnesses, provenance })
+    Ok(SealCompanion { root_input, b1_update, pair_binding, witnesses, provenance })
 }
 
 /// Appends one length-prefixed frame.
@@ -171,6 +174,7 @@ mod tests {
     fn companion(root_input: &[u8], witnesses: &[&[u8]], provenance: &str) -> SealCompanion {
         SealCompanion {
             root_input: Bytes::copy_from_slice(root_input),
+            b1_update: Bytes::copy_from_slice(b"opaque-b1-update"),
             pair_binding: Bytes::copy_from_slice(b"opaque-pair-binding"),
             witnesses: witnesses.iter().map(|w| Bytes::copy_from_slice(w)).collect(),
             provenance: provenance.to_owned(),
@@ -258,6 +262,7 @@ mod tests {
         // rather than documentation.
         let mut record = Vec::new();
         record.push(RECORD_VERSION);
+        record.extend_from_slice(&0u32.to_be_bytes());
         record.extend_from_slice(&0u32.to_be_bytes());
         record.extend_from_slice(&0u32.to_be_bytes());
         record.extend_from_slice(&u32::MAX.to_be_bytes());

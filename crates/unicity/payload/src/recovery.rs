@@ -15,6 +15,7 @@ use reth_unicity_execution::{
         header_attributes_digest, verify_pair_binding, ExpectedSubject, PairBinding,
         PairBindingError, PairContext, PairSubject,
     },
+    update::B1Job,
     wire::{bind_completed_parent, bind_validated_genesis, SealCompanion},
     RootInputV2,
 };
@@ -262,7 +263,7 @@ where
     if target == 0 {
         return Ok(());
     }
-    let UnicitySealConfig { profile, fee_collector, .. } = seal;
+    let UnicitySealConfig { profile, fee_collector, b1, .. } = seal;
     let chain = provider.chain_spec();
     let genesis = chain.genesis_hash();
     let target_hash = canonical_hash(provider, target)?;
@@ -281,8 +282,9 @@ where
         tokens.admit(&held.hash);
     }
     for number in anchor + 1..=target {
-        let RetainedBlock { hash, root, parent, .. } =
+        let RetainedBlock { hash, root, parent, companion, .. } =
             check_retained(provider, store, seal, genesis, number)?;
+        let b1 = B1Job { context: b1, update: companion.b1_update };
         let parent_hash = parent.hash();
         let block = provider
             .block_by_hash(hash)?
@@ -297,12 +299,12 @@ where
             );
         }
         let bound = if number == 1 {
-            bind_validated_genesis(root, profile, &parent, genesis, fee_collector)
+            bind_validated_genesis(root, b1, profile, &parent, genesis, fee_collector)
         } else {
             let token = tokens
                 .resolve(&parent, &chain, profile)
                 .map_err(|_| eyre::eyre!("missing predecessor token for block {number}"))?;
-            bind_completed_parent(root, profile, &parent, token.token(), fee_collector)
+            bind_completed_parent(root, b1, profile, &parent, token.token(), fee_collector)
         }
         .map_err(|error| eyre::eyre!("parent accounting binding failed at {number}: {error:?}"))?;
         let state = provider.state_by_block_hash(parent_hash)?;
@@ -382,6 +384,7 @@ mod tests {
     use reth_unicity_execution::{
         block_executor::{CompletedParent, LocalParentAccounting},
         pairing::PairPins,
+        update::B1Context,
     };
 
     const PROFILE: BlockProfile = BlockProfile {
@@ -452,7 +455,18 @@ mod tests {
             &provider,
             &store,
             &tokens,
-            UnicitySealConfig { profile: PROFILE, fee_collector: Address::ZERO, pins: PINS },
+            UnicitySealConfig {
+                profile: PROFILE,
+                fee_collector: Address::ZERO,
+                pins: PINS,
+                b1: B1Context {
+                    network: 1,
+                    root_genesis_id: B256::repeat_byte(1),
+                    execution_chain_id: 1337,
+                    profile_hash: B256::repeat_byte(2),
+                    w_cert: 1,
+                },
+            },
             2,
             1,
         )
