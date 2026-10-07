@@ -4,12 +4,12 @@
 //! create their EVM through the node's `ConfigureEvm`, whose block-executor factory owns an
 //! [`EvmFactory`]. Giving that factory the B1 precompiles is therefore what makes every route see
 //! the same native certificate and membership kernels, with the same journal-aware registry reads:
-//! there is no second construction path to forget. `0x0103` (S1) stays unregistered until its
-//! authority source is accepted.
+//! there is no second construction path to forget. The stateless B2 relation is installed the same
+//! way at `0x0104`. `0x0103` (S1) stays unregistered until its authority source is accepted.
 //!
 //! The UC and shared-seal providers are stateful (their verdict depends on the registry words in
 //! the selected block's journal), so they are never result-cached; only the stateless RSMT
-//! membership check may be.
+//! membership check and the stateless B2 relation may be.
 
 use alloy_evm::{
     eth::EthEvmFactory,
@@ -20,6 +20,7 @@ use alloy_primitives::Address;
 use reth_chainspec::ChainSpec;
 use reth_evm_ethereum::EthEvmConfig;
 use reth_unicity_b1::{provider::B1Precompile, Operation};
+use reth_unicity_b2::provider::B2Precompile;
 use revm::{inspector::NoOpInspector, Inspector};
 use std::sync::Arc;
 
@@ -29,7 +30,12 @@ pub fn b1_precompiles() -> [(Address, DynPrecompile); 3] {
         .map(|op| (op.address(), B1Precompile::new(op).into_dyn()))
 }
 
-/// [`EthEvmFactory`] with the B1 precompiles installed in every EVM it creates.
+/// The B2 (SDK 3.0.1 native bridge relation) precompile, keyed by its reserved address.
+pub fn b2_precompile() -> (Address, DynPrecompile) {
+    (reth_unicity_b2::ADDRESS, B2Precompile::default().into_dyn())
+}
+
+/// [`EthEvmFactory`] with the B1 and B2 precompiles installed in every EVM it creates.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct UnicityEvmFactory(EthEvmFactory);
 
@@ -52,6 +58,7 @@ impl EvmFactory for UnicityEvmFactory {
     ) -> Self::Evm<DB, NoOpInspector> {
         let mut evm = self.0.create_evm(db, input);
         evm.precompiles_mut().extend_precompiles(b1_precompiles());
+        evm.precompiles_mut().extend_precompiles([b2_precompile()]);
         evm
     }
 
@@ -63,6 +70,7 @@ impl EvmFactory for UnicityEvmFactory {
     ) -> Self::Evm<DB, I> {
         let mut evm = self.0.create_evm_with_inspector(db, input, inspector);
         evm.precompiles_mut().extend_precompiles(b1_precompiles());
+        evm.precompiles_mut().extend_precompiles([b2_precompile()]);
         evm
     }
 }

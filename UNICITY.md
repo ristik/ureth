@@ -420,6 +420,19 @@ the real registry runtime against them. `tools/mutate_b1_guards.py` disables eac
   0.296 gas/ns against a 0.101 requirement), measured on a loaded host. **arm64 has not been
   measured**: no arm64 host was available, and activation needs that run.
 
+## B2 0x0104 registration, inactive
+
+`UnicityEvmFactory` also installs the stateless B2 relation (`reth-unicity-b2`, SDK 3.0.1 native bridge
+semantics) at `0x0104`, in the same single construction path as B1, so build, import, replay, recovery,
+`eth_call`, `eth_estimateGas` and tracing all see it. It is inactive in the same sense B1 is: only the
+Unicity node's `ConfigureEvm` builds this factory, and nothing in a stock reth path does. B1 is not gated
+by a genesis flag either (its state-dependence is the funded registry, which a genesis without the B1
+allocation is refused for); B2 is stateless and has no state to gate on, so there is no separate switch.
+`tests/b2_static_callers.rs` sends the sealed corpus's raw kernel requests through a contract executing
+`STATICCALL`: same verdict, returndata and exact-gas / gas-1 behaviour as the library, malformed requests
+burn the forwarded gas, and the provider may be result-cached. B2's charges remain the provisional
+library schedule, not measured activation budgets.
+
 ## Current total fork inventory
 
 Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface1bd72cceb4`:

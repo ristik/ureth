@@ -1,7 +1,7 @@
 # Inactive native token kernel
 
 `reth-unicity-b2` implements the pure SDK 3.0.1 native bridge relation at reserved
-address `0x0104`. No production crate imports it and no node factory registers it.
+address `0x0104`. Only the Unicity EVM factory in `reth-unicity-execution` imports and registers it, next to B1.
 `0x0103` remains reserved. This does not enable bridging or change B1.
 
 The byte contract is native-bridge-plugins PR1 revision

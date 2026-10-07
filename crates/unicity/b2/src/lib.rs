@@ -1,4 +1,5 @@
-//! Inactive, stateless 0x0104 SDK 3.0.1 semantics. No node factory registers it.
+//! Stateless 0x0104 SDK 3.0.1 semantics. Only the Unicity node EVM factory registers it
+//! (`reth-unicity-execution`, alongside B1); no stock reth path does.
 //!
 //! Successful semantics exports untrusted leaf obligations, not certified issuance.
 //! Composition must authenticate the anchor and its `InputRecord` opening with B1,
@@ -12,7 +13,7 @@ use sha2::{Digest, Sha256};
 
 /// Exact protocol snapshot and sealed corpus pinned to merged upstream revisions.
 pub const PROTOCOL_REVISION: &str = "f35edc2652567e579a5940479039043e82a67f77";
-/// This address remains inactive in all production node factories.
+/// Reserved address, registered by the Unicity EVM factory only.
 pub const ADDRESS: alloy_primitives::Address =
     alloy_primitives::address!("0000000000000000000000000000000000000104");
 /// Maximum direct ABI request size.
