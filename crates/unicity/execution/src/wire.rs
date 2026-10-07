@@ -37,9 +37,9 @@ use serde::{Deserialize, Serialize};
 
 /// Maximum encoded size of one compact EVM transition body in `D[]`.
 pub const MAX_EPOCH_TRANSITION_BYTES: usize = 16 * 1024;
-/// Maximum number of committed handoffs summarized by a folded acknowledgement: the primary assignment
-/// and its one recovery (bft-core `handoff.MaxSupersessionSpan`). A longer chain is never admitted by the
-/// root, so it is refused here rather than folded.
+/// Maximum number of committed handoffs summarized by a folded acknowledgement: the primary
+/// assignment and its one recovery (bft-core `handoff.MaxSupersessionSpan`). A longer chain is
+/// never admitted by the root, so it is refused here rather than folded.
 pub const MAX_SUPERSESSION_SPAN: u64 = 2;
 /// Maximum number of transition bodies one root input carries; the profile supports one.
 pub const MAX_ROOT_TRANSITIONS: usize = 1;
