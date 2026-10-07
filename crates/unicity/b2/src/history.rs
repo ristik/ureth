@@ -231,7 +231,7 @@ fn nonzero_digest(digest: &[u8; 32]) -> Result<()> {
     Ok(())
 }
 
-fn amount_ok(a: &[u8]) -> bool {
+const fn amount_ok(a: &[u8]) -> bool {
     !a.is_empty() && a.len() <= MAX_AMOUNT_BYTES && a[0] != 0
 }
 

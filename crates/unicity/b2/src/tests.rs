@@ -716,7 +716,13 @@ fn borrowed_schema_views_assert_exact_errors() {
 
 #[test]
 fn cfg_domain_widths_and_integer_bounds() {
-    let cfg = hx(manifest()["fixtures"][0]["cfg"].as_str().unwrap());
+    let m = manifest();
+    let cfg = hx(m["fixtures"][0]["cfg"].as_str().unwrap());
+    let vector =
+        m["vectors"].as_array().unwrap().iter().find(|v| v["id"] == "prepare-valid").unwrap();
+    let predicate = hx(vector["input"].as_str().unwrap());
+    let payload = a(&[&u(1), &b(&[1]), &predicate]);
+    assert_eq!(run(&abi(0, &cfg, &payload), u64::MAX).unwrap().reason, None);
     let items = scan::scan_one(&cfg).unwrap().array::<16>().unwrap();
     for (index, value, expected) in [
         (0, b(b"OTHER"), BridgeError::Shape),
@@ -728,10 +734,7 @@ fn cfg_domain_widths_and_integer_bounds() {
     ] {
         let mut fields: Vec<&[u8]> = items.iter().map(|i| i.raw(&cfg)).collect();
         fields[index] = &value;
-        assert_eq!(
-            run(&abi(0, &a(&fields), &[0x83, 1, 0x41, 1, 0]), u64::MAX),
-            Err(Error::Malformed(expected))
-        );
+        assert_eq!(run(&abi(0, &a(&fields), &payload), u64::MAX), Err(Error::Malformed(expected)));
     }
 }
 
