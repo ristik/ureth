@@ -70,9 +70,11 @@ fn apply(
     let build = SealBuildInput {
         root_input: root_input.to_vec().into(),
         transitions: transitions.iter().cloned().map(Into::into).collect(),
+        pair_binding: Default::default(),
     };
     let companion = SealCompanion {
         root_input: root_input.to_vec().into(),
+        pair_binding: Default::default(),
         witnesses: witnesses.into_iter().map(Into::into).collect(),
         provenance: "newPayload".into(),
     };
@@ -170,6 +172,7 @@ fn distinct_signer_subsets_of_a_nonempty_assignment_transition_reach_identical_s
     let decoded = SealBuildInput {
         root_input: root_input.clone().into(),
         transitions: vec![transition.clone().into()],
+        pair_binding: Default::default(),
     }
     .decode_root_input()
     .unwrap();

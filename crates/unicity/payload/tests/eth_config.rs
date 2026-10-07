@@ -14,7 +14,7 @@
 
 use alloy_eips::eip7910::EthConfig;
 use alloy_genesis::Genesis;
-use alloy_primitives::Address;
+use alloy_primitives::{Address, B256};
 use jsonrpsee::core::client::ClientT;
 use reth_chainspec::{ChainSpecBuilder, MAINNET};
 use reth_node_builder::{NodeBuilder, NodeHandle};
@@ -23,7 +23,7 @@ use reth_node_core::{
     node_config::NodeConfig,
 };
 use reth_tasks::Runtime;
-use reth_unicity_execution::block::BlockProfile;
+use reth_unicity_execution::{block::BlockProfile, pairing::PairPins};
 use reth_unicity_payload::{SealJobRegistry, UnicityNode, UnicitySealConfig};
 use std::sync::Arc;
 
@@ -65,6 +65,7 @@ async fn unicity_node_serves_eth_config() -> eyre::Result<()> {
                     change_denominator: 8,
                 },
                 fee_collector: Address::ZERO,
+                pins: PairPins { network_id: 3, root_genesis_id: B256::repeat_byte(0x5a) },
             },
         ))
         .launch()

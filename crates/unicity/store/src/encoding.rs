@@ -11,9 +11,10 @@
 //!
 //! 1. one version byte, currently [`RECORD_VERSION`];
 //! 2. `root_input`, one length-prefixed frame;
-//! 3. the witness count as a four-byte big-endian integer, followed by that many length-prefixed
+//! 3. `pair_binding`, one length-prefixed frame, retained so recovery re-checks the same binding;
+//! 4. the witness count as a four-byte big-endian integer, followed by that many length-prefixed
 //!    frames;
-//! 4. `provenance`, one length-prefixed UTF-8 frame.
+//! 5. `provenance`, one length-prefixed UTF-8 frame.
 //!
 //! There is no compression and no field is optional, so there is exactly one encoding per value.
 //! An unknown version byte is refused with [`StoreError::UnknownVersion`] rather than skipped,
@@ -49,6 +50,7 @@ pub(crate) fn encode(companion: &SealCompanion) -> Result<Vec<u8>, StoreError> {
     let mut out = Vec::new();
     out.push(RECORD_VERSION);
     put_frame(&mut out, &companion.root_input)?;
+    put_frame(&mut out, &companion.pair_binding)?;
     put_count(&mut out, companion.witnesses.len())?;
     for witness in &companion.witnesses {
         put_frame(&mut out, witness)?;
@@ -71,6 +73,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<SealCompanion, StoreError> {
     }
 
     let root_input = Bytes::copy_from_slice(reader.read_frame()?);
+    let pair_binding = Bytes::copy_from_slice(reader.read_frame()?);
 
     let witness_count = reader.read_u32()? as usize;
     let mut witnesses = Vec::with_capacity(witness_count.min(MAX_WITNESS_PREALLOC));
@@ -86,7 +89,7 @@ pub(crate) fn decode(bytes: &[u8]) -> Result<SealCompanion, StoreError> {
         return Err(StoreError::MalformedRecord("trailing bytes after record"));
     }
 
-    Ok(SealCompanion { root_input, witnesses, provenance })
+    Ok(SealCompanion { root_input, pair_binding, witnesses, provenance })
 }
 
 /// Appends one length-prefixed frame.
@@ -168,6 +171,7 @@ mod tests {
     fn companion(root_input: &[u8], witnesses: &[&[u8]], provenance: &str) -> SealCompanion {
         SealCompanion {
             root_input: Bytes::copy_from_slice(root_input),
+            pair_binding: Bytes::copy_from_slice(b"opaque-pair-binding"),
             witnesses: witnesses.iter().map(|w| Bytes::copy_from_slice(w)).collect(),
             provenance: provenance.to_owned(),
         }
@@ -246,13 +250,15 @@ mod tests {
 
     #[test]
     fn a_forged_witness_count_is_refused_without_a_large_reservation() {
-        // The record is well formed up to the count: version, an empty root-input frame, then a
-        // witness count of `u32::MAX` and one real witness frame. Decoding must refuse it rather
-        // than reserve room for the count. Removing the `MAX_WITNESS_PREALLOC` cap in `decode`
-        // would make this test attempt an allocation of roughly `u32::MAX * size_of::<Bytes>()`,
-        // so the assertion is load-bearing rather than documentation.
+        // The record is well formed up to the count: version, empty root-input and binding frames,
+        // then a witness count of `u32::MAX` and one real witness frame. Decoding must
+        // refuse it rather than reserve room for the count. Removing the
+        // `MAX_WITNESS_PREALLOC` cap in `decode` would make this test attempt an allocation
+        // of roughly `u32::MAX * size_of::<Bytes>()`, so the assertion is load-bearing
+        // rather than documentation.
         let mut record = Vec::new();
         record.push(RECORD_VERSION);
+        record.extend_from_slice(&0u32.to_be_bytes());
         record.extend_from_slice(&0u32.to_be_bytes());
         record.extend_from_slice(&u32::MAX.to_be_bytes());
         record.extend_from_slice(&1u32.to_be_bytes());

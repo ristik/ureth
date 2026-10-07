@@ -315,6 +315,45 @@ in both directions, and an unknown version byte is a typed error.
 This unit is not wired into any node. Writing on both seal paths, pruning against the canonical
 chain, publishing the horizon and the `unicity_` RPC read surface are U3i, which is not started.
 
+## Q3 #50 (bft-core #50): paired-execution companion, inactive until #413 E
+
+Each co-hosted BFT/EVM pair trusts its own authenticated Go verification, and another pair
+independently reconstructs it. The Rust side therefore verifies no certificate and keeps no lineage
+state; it checks that what it is about to install or execute is exactly what its own Go pair
+authenticated. The Go pair hands the execution client a canonical `PairBinding`
+(`crates/unicity/execution/src/pairing.rs`) naming the network, root genesis, execution genesis,
+parent hash and height, origin epoch and round, configuration, activation, the root-input and
+transition commitments, and the exact build job or imported block.
+
+`sealBuildInput` and `sealCompanion` both carry it as a required `pairBinding` byte string, and it
+is stored with the companion. The gate, `verify_pair_binding`, runs before any state change on every
+path:
+
+- **build**: `forkchoiceUpdatedWithSealV1` checks it against the node's pins, the genesis, the
+  resolved parent, the decoded input and the digest of the exact attributes, and only then installs
+  a job; the job keeps the verified binding;
+- **import**: `newPayloadWithSealV1` checks it against the payload's own block hash, whatever the
+  companion's provenance. Live follow, fresh paired sync and re-execution all arrive here, and no
+  other route executes a seal block (the stock `newPayload` methods stay withheld);
+- **recovery**: `repair_accounting` re-checks the binding retained with each companion against the
+  canonical chain it now holds, for either subject kind, before replaying.
+
+A missing, malformed, oversized or non-canonical binding is a typed refusal, never a pass. The
+canonical root-input decoder now also bounds its input size, shard id, leader, transition count and
+transition size before copying, and the envelopes refuse a duplicate or unknown field.
+
+Durability is ordered. The companion is written before `getPayloadWithSealV1` returns it and before
+`newPayloadWithSealV1` forwards a block, and a failed write is an error rather than a log line, so
+no certified block can exist whose input cannot be re-verified after a restart. A block the engine
+does not accept has its companion removed. `sealConfigV1` now also reports the pinned `networkId`
+and `rootGenesisId`, and the node takes them as `--unicity.network-id` and
+`--unicity.root-genesis-id`.
+
+No lineage verifier, history store or Rust proof parsing is added, and nothing is activated: the
+siblings stay as reachable as before and the Go caller that supplies bindings is bft-core D2b/E.
+One layout and one encoding exist; the store record gained the binding frame in place with no
+migration. No upstream source file is edited.
+
 ## Current total fork inventory
 
 Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface1bd72cceb4`:

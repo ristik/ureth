@@ -19,6 +19,7 @@ use reth_primitives_traits::SealedHeader;
 use reth_unicity_execution::{
     block::BlockProfile,
     block_executor::{CompletedParent, UnicityEvmConfig},
+    pairing::PairBinding,
     RootInputV2,
 };
 
@@ -120,6 +121,15 @@ impl SealJobRegistry {
             .map(|job| job.evm_config.root_input().clone())
     }
 
+    /// Returns the verified pair binding the job with `payload_id` was admitted under.
+    pub fn pair_binding(&self, payload_id: &PayloadId) -> Option<PairBinding> {
+        self.lock()
+            .jobs
+            .iter()
+            .find(|job| job.payload_id == *payload_id)
+            .and_then(|job| job.pair_binding)
+    }
+
     /// Installs `job`, accepting an identical retry without replacing the existing job.
     ///
     /// If the registry is full, the oldest insertion is evicted first. Eviction happens only when
@@ -196,6 +206,11 @@ struct ParentAccountingEntry {
     token: CompletedParent,
     identity: Option<(u64, B256)>,
     pins: usize,
+    /// A token minted or replay-checked by this process is admitted. A token read back from the
+    /// local sidecar is a cached projection, not an authority: it resolves only after recovery
+    /// admission (`recovery::admit_recovered_head`) re-checked the retained binding and the local
+    /// Go side presented the named parent context.
+    admitted: bool,
 }
 
 /// A token lookup that can become available after a local build, import, or restore.
@@ -270,6 +285,8 @@ pub struct UnicityParentAccountings {
     inner: Arc<Mutex<ParentAccountingInner>>,
     durable: Arc<std::sync::OnceLock<Arc<reth_unicity_store::CompanionStore>>>,
     durability_required: bool,
+    /// Historical blocks recovery admission may replay from a cached anchor.
+    repair_limit: Arc<std::sync::atomic::AtomicU64>,
 }
 
 impl UnicityParentAccountings {
@@ -292,7 +309,20 @@ impl UnicityParentAccountings {
             })),
             durable: Arc::new(std::sync::OnceLock::new()),
             durability_required: false,
+            repair_limit: Arc::new(std::sync::atomic::AtomicU64::new(
+                crate::recovery::DEFAULT_REPAIR_LIMIT,
+            )),
         }
+    }
+
+    /// Sets how many blocks recovery admission may replay from a cached anchor.
+    pub fn set_repair_limit(&self, limit: u64) {
+        self.repair_limit.store(limit, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    /// How many blocks recovery admission may replay from a cached anchor.
+    pub fn repair_limit(&self) -> u64 {
+        self.repair_limit.load(std::sync::atomic::Ordering::Relaxed)
     }
 
     /// Requires a durable write before publishing a token; used by the launched node.
@@ -374,7 +404,7 @@ impl UnicityParentAccountings {
         token
             .checked_next_base_fee(header, profile)
             .map_err(|_| reth_unicity_store::StoreError::Corrupt("accounting fee mismatch"))?;
-        self.insert_for_chain(header.hash(), token, chain_id, genesis_hash);
+        self.insert_inner(header.hash(), token, Some((chain_id, genesis_hash)), false);
         Ok(Some(token))
     }
 
@@ -383,7 +413,7 @@ impl UnicityParentAccountings {
     /// A repeated hash replaces the existing entry rather than adding a second one. If the store is
     /// full, the oldest insertion is evicted first.
     pub fn insert(&self, block_hash: B256, token: CompletedParent) {
-        self.insert_inner(block_hash, token, None);
+        self.insert_inner(block_hash, token, None, true);
     }
 
     /// Publishes a token bound to the node's chain identity.
@@ -394,7 +424,21 @@ impl UnicityParentAccountings {
         chain_id: u64,
         genesis_hash: B256,
     ) {
-        self.insert_inner(block_hash, token, Some((chain_id, genesis_hash)));
+        self.insert_inner(block_hash, token, Some((chain_id, genesis_hash)), true);
+    }
+
+    /// Admits the cached token of `block_hash` for resolution. Only recovery admission calls this,
+    /// after the retained binding was re-checked and the local Go side presented its own.
+    pub(crate) fn admit(&self, block_hash: &B256) -> bool {
+        self.lock().tokens.iter_mut().find(|entry| entry.hash == *block_hash).is_some_and(|entry| {
+            entry.admitted = true;
+            true
+        })
+    }
+
+    /// Whether the cached token of `block_hash` is admitted.
+    pub fn is_admitted(&self, block_hash: &B256) -> bool {
+        self.lock().tokens.iter().any(|entry| entry.hash == *block_hash && entry.admitted)
     }
 
     fn insert_inner(
@@ -402,6 +446,7 @@ impl UnicityParentAccountings {
         block_hash: B256,
         token: CompletedParent,
         identity: Option<(u64, B256)>,
+        admitted: bool,
     ) {
         let mut inner = self.lock();
         if let Some(entry) = inner.tokens.iter_mut().find(|entry| entry.hash == block_hash) {
@@ -412,6 +457,8 @@ impl UnicityParentAccountings {
             }
             entry.token = token;
             entry.identity = identity;
+            // A restored read never lowers an admitted entry, and a live publication admits.
+            entry.admitted = entry.admitted || admitted;
             return;
         }
         if inner.tokens.len() >= inner.capacity &&
@@ -424,6 +471,7 @@ impl UnicityParentAccountings {
             token,
             identity,
             pins: 0,
+            admitted,
         });
     }
 
@@ -468,7 +516,9 @@ impl ParentAccountingResolver for UnicityParentAccountings {
             .iter_mut()
             .find(|entry| entry.hash == parent.hash())
             .ok_or_else(|| ParentAccountingUnavailable(parent.hash()))?;
-        if entry.identity != Some((chain_spec.chain().id(), chain_spec.genesis_hash())) {
+        if !entry.admitted ||
+            entry.identity != Some((chain_spec.chain().id(), chain_spec.genesis_hash()))
+        {
             return Err(ParentAccountingUnavailable(parent.hash()));
         }
         let next_fee = entry

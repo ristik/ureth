@@ -12,7 +12,7 @@ use reth_node_core::{
     node_config::NodeConfig,
 };
 use reth_tasks::Runtime;
-use reth_unicity_execution::block::BlockProfile;
+use reth_unicity_execution::{block::BlockProfile, pairing::PairPins};
 use reth_unicity_payload::{SealJobRegistry, UnicityNode, UnicitySealConfig};
 use std::{net::SocketAddr, sync::Arc};
 
@@ -47,6 +47,7 @@ async fn launch_unicity_network() -> eyre::Result<NoopNetwork> {
                     change_denominator: 8,
                 },
                 fee_collector: Address::ZERO,
+                pins: PairPins { network_id: 3, root_genesis_id: B256::repeat_byte(0x5a) },
             },
         ))
         .launch()

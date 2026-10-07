@@ -25,6 +25,7 @@ use sha2::{Digest, Sha256};
 pub mod block;
 pub mod block_executor;
 pub mod node_evm;
+pub mod pairing;
 pub mod wire;
 
 sol! {

@@ -42,13 +42,13 @@ use reth_provider::{CanonStateSubscriptions, EthStorage};
 use reth_rpc_eth_api::helpers::config::{EthConfigApiServer, EthConfigHandler};
 use reth_rpc_server_types::RethRpcModule;
 use reth_storage_api::{
-    BlockHashReader, BlockIdReader, BlockNumReader, BlockReader, HeaderProvider,
-    StateProviderFactory,
+    BlockIdReader, BlockNumReader, BlockReader, HeaderProvider, StateProviderFactory,
 };
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use reth_unicity_execution::{
     block::BlockProfile,
     node_evm::{UnicityBlockExecutionRegistry, UnicityNodeEvmConfig},
+    pairing::PairPins,
 };
 use reth_unicity_store::CompanionStore;
 
@@ -67,6 +67,8 @@ pub struct UnicitySealConfig {
     pub profile: BlockProfile,
     /// Beneficiary the payload attributes must name.
     pub fee_collector: Address,
+    /// Network and root genesis this pair is pinned to. Every pair binding is compared with it.
+    pub pins: PairPins,
 }
 
 /// Retention policy for the node's companion store.
@@ -373,10 +375,7 @@ where
     type Consensus = Arc<UnicityConsensus>;
 
     async fn build_consensus(self, ctx: &BuilderContext<N>) -> eyre::Result<Self::Consensus> {
-        use crate::{
-            recovery::{hydrate_accounting, repair_accounting},
-            ParentAccountingResolver,
-        };
+        use crate::recovery::hydrate_accounting;
 
         if let Some(retention) = self.proof_source {
             // Match LaunchContext::prune_config: CLI segments override TOML segments.
@@ -385,32 +384,13 @@ where
             crate::prune::validate_proof_retention(&prune.segments, retention.depth())?;
         }
         let store = companion_store(&self.store, ctx.config().datadir().data_dir())?;
-        self.parent_accounting.attach_store(store.clone());
+        self.parent_accounting.attach_store(store);
+        self.parent_accounting.set_repair_limit(self.repair_limit);
         hydrate_accounting(ctx.provider(), &self.parent_accounting, self.seal.profile)?;
-        let head = ctx.provider().best_block_number()?;
-        if head > 0 {
-            let hash = ctx.provider().block_hash(head)?.ok_or_else(|| {
-                eyre::eyre!("parent accounting unavailable: canonical head hash missing")
-            })?;
-            let header = ctx.provider().sealed_header_by_hash(hash)?.ok_or_else(|| {
-                eyre::eyre!("parent accounting unavailable: canonical head header missing")
-            })?;
-            if self
-                .parent_accounting
-                .resolve(&header, &ctx.chain_spec(), self.seal.profile)
-                .is_err()
-            {
-                repair_accounting(
-                    ctx.provider(),
-                    &store,
-                    &self.parent_accounting,
-                    self.seal.profile,
-                    self.seal.fee_collector,
-                    head,
-                    self.repair_limit,
-                )?;
-            }
-        }
+        // Hydrated tokens are cached projections: none resolves until the local Go side presents
+        // its reauthenticated parent context for the head (`engine_admitParentV1`), which runs the
+        // full recovery admission, replaying any missing head accounting under it. Startup never
+        // exposes retained accounting by itself.
         Ok(Arc::new(UnicityConsensus::new(
             ctx.chain_spec(),
             self.seal.profile,
@@ -642,8 +622,8 @@ pub type UnicityNodeAddOns<N> =
 mod tests {
     use super::{registry_capacity, UnicityNode, UnicitySealConfig};
     use crate::{SealJobRegistry, DEFAULT_SEAL_JOB_CAPACITY};
-    use alloy_primitives::Address;
-    use reth_unicity_execution::block::BlockProfile;
+    use alloy_primitives::{Address, B256};
+    use reth_unicity_execution::{block::BlockProfile, pairing::PairPins};
 
     #[test]
     fn registry_capacity_tracks_max_payload_tasks_with_a_floor() {
@@ -667,6 +647,7 @@ mod tests {
                     change_denominator: 8,
                 },
                 fee_collector: Address::ZERO,
+                pins: PairPins { network_id: 1, root_genesis_id: B256::repeat_byte(1) },
             },
         );
         assert!(node.proof_source);
