@@ -5,7 +5,7 @@ address `0x0104`. No production crate imports it and no node factory registers i
 `0x0103` remains reserved. This does not enable bridging or change B1.
 
 The byte contract is native-bridge-plugins PR1 revision
-`85a8e507eabe6aaaf5a117b0d435b0e0a9aec802`; exact source artifacts and their digests
+`4ccb290b44a373f4a5a8f997b05300231dd9bc00`; exact source artifacts and their digests
 are under `protocol/`. The sealed candidate corpus has manifest digest
 `d890912549947d1ade346002206ebe306d6937c3e43b7fe3ea1d338eb6827820` and Go oracle
 revision `2b6d9494cca8033b495ea97ff33d660ee84f9760`. All 336 sealed cases replay
