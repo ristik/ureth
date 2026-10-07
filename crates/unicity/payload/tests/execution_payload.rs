@@ -61,11 +61,12 @@ use reth_unicity_execution::{
     InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY,
 };
 use reth_unicity_payload::{
-    build_seal_companion, prepare_seal_build, refusal_response, unicity_engine_capabilities,
-    CompanionPruner, CompanionSink, ExecutionPayloadJobResolver, FixedPayloadJobResolver,
-    GetPayloadWithSealV1Response, PayloadJobResolutionError, ResolvedPayloadJob, SealBuildContext,
-    SealBuildError, SealBuildState, SealCompanionLookup, SealImportError, SealJobRegistry,
-    UnicityConsensus, UnicityEngineApiImpl, UnicityEngineTypes, UnicityEngineValidator,
+    build_seal_companion, prepare_seal_build, recovery::RecoveryError, refusal_response,
+    unicity_engine_capabilities, CompanionPruner, CompanionSink, ExecutionPayloadJobResolver,
+    FixedPayloadJobResolver, GetPayloadWithSealV1Response, ParentAccountingResolver,
+    PayloadJobResolutionError, ResolvedPayloadJob, SealBuildContext, SealBuildError,
+    SealBuildState, SealCompanionLookup, SealImportError, SealJobRegistry, UnicityConsensus,
+    UnicityEngineApiImpl, UnicityEngineTypes, UnicityEngineValidator,
     UnicityExecutionPayloadBuilder, UnicityNode, UnicityParentAccountings,
     UnicityPayloadAttributes, UnicityRetentionConfig, UnicityRpcModuleImpl, UnicityRpcServer,
     UnicitySealConfig, COMPANION_NOT_RETAINED_CODE, DEFAULT_SEAL_JOB_CAPACITY, SEAL_CAPABILITIES,
@@ -709,6 +710,14 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     let cold = UnicityParentAccountings::with_capacity(2).require_durability();
     cold.attach_store(store);
     for header in [&*second_parent, &alternate_parent] {
+        // Cold accounting is found by exact hash, checked against chain, genesis and profile,
+        // and held back: it resolves only after recovery admission.
+        assert!(
+            cold.restore_exact(header, chain_spec.chain().id(), chain_spec.genesis_hash(), PROFILE)
+                .unwrap()
+                .is_some(),
+            "cold exact-hash branch accounting"
+        );
         assert!(
             reth_unicity_payload::ParentAccountingResolver::resolve(
                 &cold,
@@ -716,8 +725,8 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
                 &chain_spec,
                 PROFILE,
             )
-            .is_ok(),
-            "cold exact-hash branch accounting"
+            .is_err(),
+            "an unadmitted cold token must not resolve"
         );
     }
     let resolve_calls = Arc::new(AtomicUsize::new(0));
@@ -2354,12 +2363,12 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     // Restore replays this exact captured chain from the configured genesis anchor.
     let provider = history.recovery_provider(history.blocks.len());
     let restored = UnicityParentAccountings::default();
-    reth_unicity_payload::recovery::repair_accounting(
+    reth_unicity_payload::recovery::admit_recovered_head(
         &provider,
         &history.store,
         &restored,
         UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
-        3,
+        &history.blocks[2].import_companion.pair_binding,
         3,
     )
     .unwrap();
@@ -2391,16 +2400,34 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         history.chain_spec.genesis_hash(),
     );
     let wrong_order_provider = history.recovery_provider(2);
-    let wrong_order_error = reth_unicity_payload::recovery::repair_accounting(
+    // Presenting the tampered retained binding itself reaches the replay's own bind check.
+    let wrong_order_error = reth_unicity_payload::recovery::admit_recovered_head(
         &wrong_order_provider,
         &wrong_order_store,
         &boundary_tokens,
         UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
-        2,
+        &wrong_order_companion.pair_binding,
         2,
     )
     .unwrap_err();
     assert!(wrong_order_error.to_string().contains("parent accounting binding failed at 2"));
+    // The honest binding Go would present names the real root input, so it is refused first.
+    let honest_presented = reth_unicity_payload::recovery::admit_recovered_head(
+        &wrong_order_provider,
+        &wrong_order_store,
+        &boundary_tokens,
+        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
+        &second.import_companion.pair_binding,
+        2,
+    )
+    .unwrap_err();
+    assert!(matches!(
+        honest_presented.downcast_ref::<RecoveryError>(),
+        Some(RecoveryError::PresentedRefused {
+            number: 2,
+            source: PairBindingError::RootInputMismatch
+        })
+    ));
 
     // A reorg above the certified boundary cannot reuse the old height-2 companion or drop the
     // boundary token. The canonical hash is changed while height 1 remains certified.
@@ -2412,16 +2439,19 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         history.chain_spec.chain().id(),
         history.chain_spec.genesis_hash(),
     );
-    let reorg_error = reth_unicity_payload::recovery::repair_accounting(
+    let reorg_error = reth_unicity_payload::recovery::admit_recovered_head(
         &reorg_provider,
         &history.store,
         &reorg_tokens,
         UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
-        2,
+        &second.import_companion.pair_binding,
         2,
     )
     .unwrap_err();
-    assert!(reorg_error.to_string().contains("companion missing for block 2"));
+    assert!(matches!(
+        reorg_error.downcast_ref::<RecoveryError>(),
+        Some(RecoveryError::CompanionMissing(2))
+    ));
     assert!(reorg_tokens.get(&first.payload.block().hash()).is_some());
     assert!(reorg_tokens.get(&alternate_hash).is_none());
 
@@ -2431,16 +2461,19 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         history.reorg_at_first_certified_block();
     assert!(boundary_reorg_provider.client.finalized >= 1);
     assert_ne!(boundary_alternate_hash, first.payload.block().hash());
-    let boundary_reorg_error = reth_unicity_payload::recovery::repair_accounting(
+    let boundary_reorg_error = reth_unicity_payload::recovery::admit_recovered_head(
         &boundary_reorg_provider,
         &history.store,
         &boundary_tokens,
         UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
-        1,
+        &first.import_companion.pair_binding,
         1,
     )
     .unwrap_err();
-    assert!(boundary_reorg_error.to_string().contains("companion missing for block 1"));
+    assert!(matches!(
+        boundary_reorg_error.downcast_ref::<RecoveryError>(),
+        Some(RecoveryError::CompanionMissing(1))
+    ));
     assert!(boundary_tokens.get(&first.payload.block().hash()).is_some());
     assert!(boundary_tokens.get(&boundary_alternate_hash).is_none());
 
@@ -2522,16 +2555,19 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     )
     .unwrap();
     assert!(restarted_postcommit.get(&first.payload.block().hash()).is_some());
-    let missing_companion_replay = reth_unicity_payload::recovery::repair_accounting(
+    let missing_companion_replay = reth_unicity_payload::recovery::admit_recovered_head(
         &canonical_first,
         &postcommit_store_for_replay,
         &UnicityParentAccountings::default(),
         UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
-        1,
+        &first.import_companion.pair_binding,
         1,
     )
     .unwrap_err();
-    assert!(missing_companion_replay.to_string().contains("companion missing for block 1"));
+    assert!(matches!(
+        missing_companion_replay.downcast_ref::<RecoveryError>(),
+        Some(RecoveryError::CompanionMissing(1))
+    ));
 }
 
 /// Builds the genesis-bound execution input for `root`.
@@ -3129,15 +3165,19 @@ async fn a_reopened_canonical_token_supports_the_next_build() {
     let leader_client = Client { parent_hash: hash, extra_headers: vec![header.clone()], ..client };
     let child_root = input(2, 2, hash);
     let child_attrs = attributes(&child_root, header.timestamp);
-    assert!(prepare_seal_build(
-        &leader_client,
-        &context,
-        &validator,
-        &ForkchoiceState::same_hash(hash),
-        Some(&child_attrs),
-        &seal_input(&SealedHeader::new(header.clone(), hash), &child_root, &child_attrs,),
-    )
-    .is_ok());
+    // A token read back from the sidecar is a cached projection: it supports no build until
+    // recovery admission (see `restored_accounting_resolves_only_after_recovery_admission`).
+    assert!(matches!(
+        prepare_seal_build(
+            &leader_client,
+            &context,
+            &validator,
+            &ForkchoiceState::same_hash(hash),
+            Some(&child_attrs),
+            &seal_input(&SealedHeader::new(header.clone(), hash), &child_root, &child_attrs),
+        ),
+        Err(SealBuildError::ParentAccountingUnavailable)
+    ));
 }
 
 #[tokio::test]
@@ -4194,16 +4234,18 @@ async fn recovery_refuses_a_retained_binding_that_no_longer_names_the_canonical_
     let first = &history.blocks[0];
     let hash = first.payload.block().hash();
     let provider = history.recovery_provider(1);
+    // What the local Go side presents for the head: its own import binding of the exact block.
+    let presented = first.import_companion.pair_binding.clone();
 
     let repair = |companion: &SealCompanion, pins: PairPins| {
         let (_dir, store) = temp_store();
         store.put(hash, 1, companion).unwrap();
-        reth_unicity_payload::recovery::repair_accounting(
+        reth_unicity_payload::recovery::admit_recovered_head(
             &provider,
             &store,
             &UnicityParentAccountings::default(),
             UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins },
-            1,
+            &presented,
             1,
         )
     };
@@ -4217,15 +4259,22 @@ async fn recovery_refuses_a_retained_binding_that_no_longer_names_the_canonical_
     repair(&first.companion, PAIR_PINS).unwrap();
     repair(&first.import_companion, PAIR_PINS).unwrap();
 
-    let refused = |error: eyre::Report, needle: &str| {
-        let text = error.to_string();
-        assert!(text.contains(needle), "expected {needle:?} in {text:?}");
+    let retained_refused = |error: eyre::Report, expected: PairBindingError| match error
+        .downcast_ref::<RecoveryError>(
+    ) {
+        Some(RecoveryError::RetainedRefused { number: 1, source }) => {
+            assert_eq!(*source, expected)
+        }
+        other => panic!("expected RetainedRefused({expected:?}), got {other:?}"),
     };
-    refused(
-        repair(&with_binding(Vec::new()), PAIR_PINS).unwrap_err(),
-        "retained binding unusable at 1: pair binding refused: Missing",
-    );
-    refused(
+    match repair(&with_binding(Vec::new()), PAIR_PINS).unwrap_err().downcast_ref::<RecoveryError>()
+    {
+        Some(RecoveryError::RetainedUnusable { number: 1, source: PairBindingError::Missing }) => {}
+        other => {
+            panic!("an empty retained binding must be RetainedUnusable(Missing), got {other:?}")
+        }
+    }
+    retained_refused(
         repair(
             &with_binding(binding_bytes(parent, root, build_subject(&attrs), |b| {
                 b.parent_hash = flip(b.parent_hash)
@@ -4233,19 +4282,19 @@ async fn recovery_refuses_a_retained_binding_that_no_longer_names_the_canonical_
             PAIR_PINS,
         )
         .unwrap_err(),
-        "ParentHashMismatch",
+        PairBindingError::ParentHashMismatch,
     );
     let mut other_job = attrs;
     other_job.inner.timestamp += 1;
-    refused(
+    retained_refused(
         repair(
             &with_binding(binding_bytes(parent, root, build_subject(&other_job), |_| {})),
             PAIR_PINS,
         )
         .unwrap_err(),
-        "JobMismatch",
+        PairBindingError::JobMismatch,
     );
-    refused(
+    retained_refused(
         repair(
             &with_binding(binding_bytes(
                 parent,
@@ -4256,19 +4305,127 @@ async fn recovery_refuses_a_retained_binding_that_no_longer_names_the_canonical_
             PAIR_PINS,
         )
         .unwrap_err(),
-        "BlockMismatch",
+        PairBindingError::BlockMismatch,
     );
-    refused(
+    retained_refused(
         repair(&first.companion, PairPins { network_id: PAIR_PINS.network_id + 1, ..PAIR_PINS })
             .unwrap_err(),
-        "NetworkMismatch",
+        PairBindingError::NetworkMismatch,
     );
-    refused(
+    retained_refused(
         repair(
             &first.companion,
             PairPins { root_genesis_id: flip(PAIR_PINS.root_genesis_id), ..PAIR_PINS },
         )
         .unwrap_err(),
-        "RootGenesisMismatch",
+        PairBindingError::RootGenesisMismatch,
     );
+}
+
+/// The restart review control: accounting a previous process persisted, read back into a fresh
+/// cache, must not stand in for admission. Each negative changes one thing from the control.
+#[tokio::test]
+async fn restored_accounting_resolves_only_after_recovery_admission() {
+    let history = capture_paid_idle_transition_fixture().await;
+    let first = &history.blocks[0];
+    let hash = first.payload.block().hash();
+    let head = SealedHeader::new(first.payload.block().header().clone(), hash);
+    let provider = history.recovery_provider(1);
+    let chain = history.chain_spec.clone();
+    let presented = first.import_companion.pair_binding.clone();
+    let seal =
+        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS };
+
+    // A previous process persisted the head's accounting; this one starts with an empty cache,
+    // hydrates it from disk, and has the companion `companion` retained.
+    let restart = |companion: Option<&SealCompanion>| {
+        let (dir, store) = temp_store();
+        let previous = UnicityParentAccountings::new().require_durability();
+        previous.attach_store(store.clone());
+        previous
+            .publish(hash, 1, chain.chain().id(), chain.genesis_hash(), first.completed)
+            .unwrap();
+        if let Some(companion) = companion {
+            store.put(hash, 1, companion).unwrap();
+        }
+        let fresh = UnicityParentAccountings::new().require_durability();
+        fresh.attach_store(store.clone());
+        reth_unicity_payload::recovery::hydrate_accounting(&provider, &fresh, PROFILE).unwrap();
+        (dir, store, fresh)
+    };
+    let resolves =
+        |tokens: &UnicityParentAccountings| tokens.resolve(&head, &chain, PROFILE).is_ok();
+    let admit =
+        |store: &CompanionStore, tokens: &UnicityParentAccountings, seal, presented: &[u8]| {
+            reth_unicity_payload::recovery::admit_recovered_head(
+                &provider, store, tokens, seal, presented, 1,
+            )
+        };
+
+    // Control: hydrated, cached, and still unusable; admission with the right context admits it.
+    let (_dir, store, tokens) = restart(Some(&first.companion));
+    assert!(tokens.get(&hash).is_some(), "the cache holds the token");
+    assert!(!resolves(&tokens), "a cached token must not resolve before admission");
+    admit(&store, &tokens, seal, &presented).unwrap();
+    assert!(resolves(&tokens), "admission makes the cached token usable");
+
+    let refused = |error: eyre::Report| -> RecoveryError {
+        match error.downcast::<RecoveryError>() {
+            Ok(typed) => typed,
+            Err(other) => panic!("expected a typed recovery refusal, got {other:#}"),
+        }
+    };
+    // No companion retained.
+    let (_dir, store, tokens) = restart(None);
+    assert!(matches!(
+        refused(admit(&store, &tokens, seal, &presented).unwrap_err()),
+        RecoveryError::CompanionMissing(1)
+    ));
+    assert!(!resolves(&tokens));
+    // An empty retained binding.
+    let empty = SealCompanion { pair_binding: Vec::new().into(), ..first.companion.clone() };
+    let (_dir, store, tokens) = restart(Some(&empty));
+    assert!(matches!(
+        refused(admit(&store, &tokens, seal, &presented).unwrap_err()),
+        RecoveryError::RetainedUnusable { number: 1, source: PairBindingError::Missing }
+    ));
+    assert!(!resolves(&tokens));
+    // Another pair: a changed root-genesis pin.
+    let other_pair = UnicitySealConfig {
+        pins: PairPins { root_genesis_id: flip(PAIR_PINS.root_genesis_id), ..PAIR_PINS },
+        ..seal
+    };
+    let (_dir, store, tokens) = restart(Some(&first.companion));
+    assert!(matches!(
+        refused(admit(&store, &tokens, other_pair, &presented).unwrap_err()),
+        RecoveryError::RetainedRefused { number: 1, source: PairBindingError::RootGenesisMismatch }
+    ));
+    assert!(!resolves(&tokens));
+    // Go presents nothing, or a binding for another parent, or another activation.
+    let (_dir, store, tokens) = restart(Some(&first.companion));
+    assert!(matches!(
+        refused(admit(&store, &tokens, seal, &[]).unwrap_err()),
+        RecoveryError::PresentedRefused { number: 1, source: PairBindingError::Missing }
+    ));
+    let wrong_parent = binding_bytes(
+        &first.parent,
+        &first.root,
+        ExpectedSubject::Import { block_hash: hash },
+        |b| b.parent_hash = flip(b.parent_hash),
+    );
+    assert!(matches!(
+        refused(admit(&store, &tokens, seal, &wrong_parent).unwrap_err()),
+        RecoveryError::PresentedRefused { number: 1, source: PairBindingError::ParentHashMismatch }
+    ));
+    let other_activation = binding_bytes(
+        &first.parent,
+        &first.root,
+        ExpectedSubject::Import { block_hash: hash },
+        |b| b.activation_id = flip(b.activation_id),
+    );
+    assert!(matches!(
+        refused(admit(&store, &tokens, seal, &other_activation).unwrap_err()),
+        RecoveryError::PresentedDiffers(1)
+    ));
+    assert!(!resolves(&tokens), "no refused admission leaves a usable token behind");
 }

@@ -36,7 +36,7 @@ use std::{
 };
 
 use alloy_consensus::Header;
-use alloy_primitives::{Address, B256, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use alloy_rpc_types_engine::{
     CancunPayloadFields, ClientVersionV1, ExecutionData, ExecutionPayload,
     ExecutionPayloadEnvelopeV3, ExecutionPayloadSidecar, ExecutionPayloadV3, ForkchoiceState,
@@ -149,7 +149,23 @@ pub trait UnicityEngineApi {
         parent_beacon_block_root: B256,
         seal_companion: SealCompanion,
     ) -> RpcResult<PayloadStatus>;
+
+    /// `engine_admitParentV1`: recovery admission of the canonical head.
+    ///
+    /// After a restart the node holds only cached accounting, which is an optimization and
+    /// resolves nothing. The local Go side reauthenticates the head's named parent context from
+    /// its own verified history and presents it here as a canonical pair binding. The node
+    /// re-checks the binding retained with the head's companion against the canonical chain and
+    /// its pins, requires the presented binding to verify for the head and to equal the retained
+    /// one in everything but its subject, then takes or replays the head's accounting and admits
+    /// it. Until this succeeds no restored token resolves, so a build or import on the restarted
+    /// head answers SYNCING. A refusal is [`ADMISSION_REFUSED_CODE`] with the typed cause.
+    #[method(name = "admitParentV1")]
+    async fn admit_parent_v1(&self, pair_binding: Bytes) -> RpcResult<()>;
 }
+
+/// JSON-RPC error code of a refused recovery admission.
+pub const ADMISSION_REFUSED_CODE: i32 = -39002;
 
 /// The exact consensus fee settings the running companion uses. The bft-core
 /// identity binder reads this over the JWT-authenticated Engine connection.
@@ -951,7 +967,11 @@ where
 #[async_trait::async_trait]
 impl<Provider> UnicityEngineApiServer for UnicityEngineApiImpl<Provider>
 where
-    Provider: HeaderProvider<Header = Header>
+    Provider: BlockReader<
+            Block = reth_ethereum_primitives::Block,
+            Header = Header,
+            Transaction = reth_ethereum_primitives::TransactionSigned,
+        > + HeaderProvider<Header = Header>
         + BlockNumReader
         + ChainSpecProvider<ChainSpec = ChainSpec>
         + StateProviderFactory
@@ -1012,6 +1032,33 @@ where
                 &seal_companion,
             )
             .await?)
+    }
+
+    async fn admit_parent_v1(&self, pair_binding: Bytes) -> RpcResult<()> {
+        let accounting = &self.context.parent_accounting;
+        let store = accounting.durable_store().ok_or_else(|| {
+            EngineApiError::other(ErrorObject::owned(
+                ADMISSION_REFUSED_CODE,
+                "recovery admission: the companion store is not open",
+                None::<()>,
+            ))
+        })?;
+        crate::recovery::admit_recovered_head(
+            &self.provider,
+            store,
+            accounting,
+            self.context.seal,
+            &pair_binding,
+            accounting.repair_limit(),
+        )
+        .map_err(|error| {
+            EngineApiError::other(ErrorObject::owned(
+                ADMISSION_REFUSED_CODE,
+                format!("recovery admission refused: {error:#}"),
+                None::<()>,
+            ))
+        })?;
+        Ok(())
     }
 }
 
@@ -1429,6 +1476,10 @@ mod tests {
             _parent_beacon_block_root: B256,
             _seal_companion: SealCompanion,
         ) -> RpcResult<PayloadStatus> {
+            Err(unused_rpc_error())
+        }
+
+        async fn admit_parent_v1(&self, _pair_binding: alloy_primitives::Bytes) -> RpcResult<()> {
             Err(unused_rpc_error())
         }
     }

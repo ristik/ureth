@@ -38,7 +38,12 @@
 //! - `configurationId` is the root origin's `shardConfHash`.
 //! - `activationId` is the acknowledged transition's `commitId` when the root input carries a
 //!   transition; with no transition the epoch's activation is not derivable from the input and the
-//!   field is carried and retained unchecked, except that it may not be all zero.
+//!   field is carried and retained unchecked, except that it may not be all zero. It is inert
+//!   metadata from this pair's trusted Go side, not an independently checked activation binding,
+//!   and it never substitutes for restart reauthentication (`engine_admitParentV1`). Go's rule: the
+//!   verified activation commit id of the origin's root epoch when its history holds one, otherwise
+//!   a fixed non-zero identity derived from the configuration (Go's genesis entry has no activation
+//!   commit id).
 //! - `rootInputHash` is `SHA-256` of the canonical root input, the header `extraData` commitment.
 //! - `transitionsHash` is `SHA-256` of the canonical CBOR array of the transition byte strings,
 //!   exactly the `D[]` encoding inside the root input.

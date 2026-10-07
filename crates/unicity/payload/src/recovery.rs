@@ -5,17 +5,18 @@ use alloy_primitives::B256;
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
 use reth_ethereum_primitives::{Block, TransactionSigned};
 use reth_evm_ethereum::EthEvmConfig;
-use reth_primitives_traits::Block as _;
+use reth_primitives_traits::{Block as _, SealedHeader};
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{BlockNumReader, BlockReader, HeaderProvider, StateProviderFactory};
 use reth_unicity_execution::{
     block::BlockProfile,
     block_executor::{replay_complete, UnicityEvmConfig},
     pairing::{
-        header_attributes_digest, verify_pair_binding, ExpectedSubject, PairBinding, PairContext,
-        PairSubject,
+        header_attributes_digest, verify_pair_binding, ExpectedSubject, PairBinding,
+        PairBindingError, PairContext, PairSubject,
     },
-    wire::{bind_completed_parent, bind_validated_genesis},
+    wire::{bind_completed_parent, bind_validated_genesis, SealCompanion},
+    RootInputV2,
 };
 use reth_unicity_store::{CompanionStore, Lookup};
 use std::sync::Arc;
@@ -59,9 +60,193 @@ where
     Ok(())
 }
 
-/// Repairs a missing canonical head from the nearest verified token within `limit` blocks.
-/// Missing historical bodies, companions, state, or an anchor are explicit refusals.
-pub fn repair_accounting<P>(
+/// Typed causes of a refused recovery admission. They travel inside the `eyre::Report` the entry
+/// points return, so a caller or a test recovers the exact cause with `downcast_ref` rather than
+/// matching text.
+#[derive(Debug, thiserror::Error)]
+pub enum RecoveryError {
+    /// No companion is retained for the block, so its binding cannot be re-checked.
+    #[error("parent accounting unavailable: companion missing for block {0}")]
+    CompanionMissing(u64),
+    /// The retained binding of the block is not a decodable binding (including an empty one).
+    #[error("retained binding unusable at {number}: {source}")]
+    RetainedUnusable {
+        /// Block whose companion holds the binding.
+        number: u64,
+        /// Why it cannot be used.
+        #[source]
+        source: PairBindingError,
+    },
+    /// The retained binding no longer names the canonical block, parent, genesis or this pair.
+    #[error("retained binding refused at {number}: {source}")]
+    RetainedRefused {
+        /// Block whose companion holds the binding.
+        number: u64,
+        /// The single comparison that failed.
+        #[source]
+        source: PairBindingError,
+    },
+    /// The binding the local Go side presented for the head is missing, malformed, or names
+    /// something other than this node's canonical head.
+    #[error("presented binding refused at {number}: {source}")]
+    PresentedRefused {
+        /// The head the Go side was asked to admit.
+        number: u64,
+        /// The single comparison that failed.
+        #[source]
+        source: PairBindingError,
+    },
+    /// The presented binding is valid for the head but differs from the retained one in something
+    /// other than its subject: Go re-derived another parent context than the one that was stored.
+    #[error("presented binding is not the retained one for block {0}")]
+    PresentedDiffers(u64),
+    /// A retained build binding needs the header's beacon root to recompute its job digest.
+    #[error("retained build binding at {0}: header has no beacon root")]
+    NoBeaconRoot(u64),
+}
+
+/// The block's retained companion, its decoded root input and the canonical headers, after the
+/// retained binding was re-checked against the canonical chain, this node's pins and genesis.
+struct RetainedBlock {
+    hash: B256,
+    companion: SealCompanion,
+    root: RootInputV2,
+    header: SealedHeader<Header>,
+    parent: SealedHeader<Header>,
+}
+
+fn subject_for(
+    number: u64,
+    subject: PairSubject,
+    hash: B256,
+    header: &Header,
+) -> Result<ExpectedSubject, RecoveryError> {
+    Ok(match subject {
+        PairSubject::Build { .. } => ExpectedSubject::Build {
+            attributes_digest: header_attributes_digest(header)
+                .ok_or(RecoveryError::NoBeaconRoot(number))?,
+        },
+        PairSubject::Import { .. } => ExpectedSubject::Import { block_hash: hash },
+    })
+}
+
+/// Re-checks the binding retained with a canonical block's companion. A retained input that no
+/// longer names this block, its parent, the genesis or this pair's pins is a refusal.
+fn check_retained<P>(
+    provider: &P,
+    store: &CompanionStore,
+    seal: UnicitySealConfig,
+    genesis: B256,
+    number: u64,
+) -> eyre::Result<RetainedBlock>
+where
+    P: BlockNumReader + HeaderProvider<Header = Header>,
+{
+    let hash = canonical_hash(provider, number)?;
+    let header = canonical_header(provider, hash)?;
+    let parent = canonical_header(provider, canonical_hash(provider, number - 1)?)?;
+    let Lookup::Found(companion) = store.get(hash)? else {
+        return Err(RecoveryError::CompanionMissing(number).into());
+    };
+    let root = companion.decode_root_input()?;
+    let retained = PairBinding::from_canonical_cbor(&companion.pair_binding)
+        .map_err(|source| RecoveryError::RetainedUnusable { number, source })?;
+    let subject = subject_for(number, retained.subject, hash, header.header())?;
+    verify_pair_binding(
+        &companion.pair_binding,
+        &PairContext {
+            pins: seal.pins,
+            execution_genesis_hash: genesis,
+            parent: &parent,
+            root: &root,
+            subject,
+        },
+    )
+    .map_err(|source| RecoveryError::RetainedRefused { number, source })?;
+    Ok(RetainedBlock { hash, companion, root, header, parent })
+}
+
+/// Recovery admission of the canonical head, the only way a token read back from the sidecar
+/// becomes usable.
+///
+/// A cached accounting token is an optimization, never the authority. Whatever the sidecar holds,
+/// this runs in full: the head's retained binding is re-checked against the canonical chain and
+/// this node's pins; the binding the local Go side presents for the head, from its own
+/// reauthentication of the named parent context, must itself verify for that head and must equal
+/// the retained one in everything but its subject; only then is the head's token taken from the
+/// cache or replayed, and admitted. Tokens of the recent window whose own retained binding still
+/// checks are admitted with it; the rest stay unusable.
+///
+/// Missing companion, an empty or changed retained binding, another pair's pins and a presented
+/// binding that names another parent context are each a distinct [`RecoveryError`].
+pub fn admit_recovered_head<P>(
+    provider: &P,
+    store: &CompanionStore,
+    tokens: &UnicityParentAccountings,
+    seal: UnicitySealConfig,
+    presented: &[u8],
+    limit: u64,
+) -> eyre::Result<()>
+where
+    P: BlockReader<Block = Block, Header = Header, Transaction = TransactionSigned>
+        + ChainSpecProvider<ChainSpec = ChainSpec>
+        + StateProviderFactory,
+{
+    let head = provider.best_block_number()?;
+    if head == 0 {
+        return Ok(());
+    }
+    let chain = provider.chain_spec();
+    let genesis = chain.genesis_hash();
+    let retained = check_retained(provider, store, seal, genesis, head)?;
+    let presented_binding = PairBinding::from_canonical_cbor(presented)
+        .map_err(|source| RecoveryError::PresentedRefused { number: head, source })?;
+    let subject =
+        subject_for(head, presented_binding.subject, retained.hash, retained.header.header())?;
+    verify_pair_binding(
+        presented,
+        &PairContext {
+            pins: seal.pins,
+            execution_genesis_hash: genesis,
+            parent: &retained.parent,
+            root: &retained.root,
+            subject,
+        },
+    )
+    .map_err(|source| RecoveryError::PresentedRefused { number: head, source })?;
+    let mut same_context = presented_binding;
+    same_context.subject =
+        PairBinding::from_canonical_cbor(&retained.companion.pair_binding)?.subject;
+    if same_context != PairBinding::from_canonical_cbor(&retained.companion.pair_binding)? {
+        return Err(RecoveryError::PresentedDiffers(head).into());
+    }
+    // Only now is any cached or replayed accounting consulted.
+    let cached =
+        tokens.restore_exact(&retained.header, chain.chain().id(), genesis, seal.profile)?;
+    if cached.is_none() {
+        repair_accounting(provider, store, tokens, seal, head, limit)?;
+    }
+    for number in head.saturating_sub(ACCOUNTING_WINDOW.saturating_sub(1)).max(1)..head {
+        let hash = canonical_hash(provider, number)?;
+        let header = canonical_header(provider, hash)?;
+        if tokens.restore_exact(&header, chain.chain().id(), genesis, seal.profile)?.is_some() &&
+            check_retained(provider, store, seal, genesis, number).is_ok()
+        {
+            tokens.admit(&hash);
+        }
+    }
+    if !tokens.admit(&retained.hash) {
+        eyre::bail!("parent accounting unavailable: no token for the admitted head {head}");
+    }
+    Ok(())
+}
+
+/// Replays a missing canonical head from the nearest cached token within `limit` blocks. The
+/// anchor's own retained binding is re-checked first, and every replayed block's binding is
+/// re-checked before its input is replayed. Missing historical bodies, companions, state, or an
+/// anchor are explicit refusals. Reached only from [`admit_recovered_head`], after the presented
+/// binding verified.
+fn repair_accounting<P>(
     provider: &P,
     store: &CompanionStore,
     tokens: &UnicityParentAccountings,
@@ -77,7 +262,7 @@ where
     if target == 0 {
         return Ok(());
     }
-    let UnicitySealConfig { profile, fee_collector, pins } = seal;
+    let UnicitySealConfig { profile, fee_collector, .. } = seal;
     let chain = provider.chain_spec();
     let genesis = chain.genesis_hash();
     let target_hash = canonical_hash(provider, target)?;
@@ -90,19 +275,15 @@ where
         target,
         limit,
     )?;
+    if anchor >= 1 {
+        // A cached anchor is usable for the replay only once its own retained binding checks.
+        let held = check_retained(provider, store, seal, genesis, anchor)?;
+        tokens.admit(&held.hash);
+    }
     for number in anchor + 1..=target {
-        let hash = canonical_hash(provider, number)?;
-        let parent_hash = canonical_hash(provider, number - 1)?;
-        let parent = canonical_header(provider, parent_hash)?;
-        let companion = match store.get(hash)? {
-            Lookup::Found(companion) => companion,
-            _ => {
-                return Err(eyre::eyre!(
-                    "parent accounting unavailable: companion missing for block {number}"
-                ))
-            }
-        };
-        let root = companion.decode_root_input()?;
+        let RetainedBlock { hash, root, parent, .. } =
+            check_retained(provider, store, seal, genesis, number)?;
+        let parent_hash = parent.hash();
         let block = provider
             .block_by_hash(hash)?
             .ok_or_else(|| {
@@ -115,31 +296,6 @@ where
                 "parent accounting unavailable: historical block identity mismatch at {number}"
             );
         }
-        // Recovery re-checks the binding retained with the companion against the canonical chain
-        // it now holds. A retained input that no longer names this block, parent or genesis is a
-        // refusal, never an input to replay. The local Go side re-authenticates independently.
-        let subject = match PairBinding::from_canonical_cbor(&companion.pair_binding)
-            .map_err(|error| eyre::eyre!("retained binding unusable at {number}: {error}"))?
-            .subject
-        {
-            PairSubject::Build { .. } => ExpectedSubject::Build {
-                attributes_digest: header_attributes_digest(block.header()).ok_or_else(|| {
-                    eyre::eyre!("retained build binding at {number}: header has no beacon root")
-                })?,
-            },
-            PairSubject::Import { .. } => ExpectedSubject::Import { block_hash: hash },
-        };
-        verify_pair_binding(
-            &companion.pair_binding,
-            &PairContext {
-                pins,
-                execution_genesis_hash: genesis,
-                parent: &parent,
-                root: &root,
-                subject,
-            },
-        )
-        .map_err(|error| eyre::eyre!("retained binding refused at {number}: {error}"))?;
         let bound = if number == 1 {
             bind_validated_genesis(root, profile, &parent, genesis, fee_collector)
         } else {
@@ -301,7 +457,11 @@ mod tests {
             1,
         )
         .unwrap_err();
-        assert!(missing_companion.to_string().contains("companion missing for block 2"));
+        // The cached anchor's own retained binding is re-checked before anything replays.
+        assert!(matches!(
+            missing_companion.downcast_ref::<RecoveryError>(),
+            Some(RecoveryError::CompanionMissing(1))
+        ));
         let error =
             select_repair_anchor(&provider, &tokens, PROFILE, 1, genesis, 3, 1).unwrap_err();
         assert!(error.to_string().contains("no verified token within 1 blocks of 3"));
