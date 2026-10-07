@@ -68,7 +68,7 @@ for expr,test in [
     ("hash(&[c.ir.raw]) != c.ir_hash","vector_cert_neg_expected_ir"),
     ("c.shard_cert[2].children().count() != depth","vector_paths_shard_extra_sibling"),
     ("s[1].arg != common.network","vector_cert_neg_network"),
-    ("s[3].arg > common.origin","vector_time_seal_epoch_after_origin"),
+    ("s[3].arg > common.origin","ordered_source_reads_and_phase_unknown_epoch"),
     ("r < e.start","vector_time_start_before"),
     ("e.end.is_some_and(|end| r >= end)","vector_time_end_eq"),
     ("(e.end.is_none() && s[3].arg != common.origin)","vector_time_open_not_origin"),
@@ -121,6 +121,9 @@ guard("registry.rs", "u64::try_from(v).map_err(|_| Error::Registry)",
       "registry_invariant_errors_are_exact_and_isolated", "Ok(v.as_limbs()[0])")
 guard("registry.rs", "core::str::from_utf8(&id_bytes[..len]).map_err(|_| Error::Registry)?.to_owned()",
       "registry_invariant_errors_are_exact_and_isolated", "String::from_utf8_lossy(&id_bytes[..len]).into_owned()")
+
+guard("provider.rs", "if self.op == Operation::Member {",
+      "journal_values_warmth_revert_and_provider_status", "if true {")
 
 originals = {file: (SRC / file).read_text() for file, *_ in CASES}
 for file, before, *_ in CASES:

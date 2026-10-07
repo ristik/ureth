@@ -181,7 +181,8 @@ fn registry_invariant_errors_are_exact_and_isolated() {
     cases.push((member_slot(7, 0, 0), U256::ZERO));
     cases.push((member_slot(7, 0, 0), U256::from(129)));
     cases.push((member_slot(7, 0, 0), U256::MAX));
-    cases.push((member_slot(7, 0, 6), U256::from(1)));
+    // Preserve the compressed key's final byte while corrupting only padding.
+    cases.push((member_slot(7, 0, 6), base.words[&member_slot(7, 0, 6)] | U256::from(1)));
     cases.push((member_slot(7, 0, 7), U256::ZERO));
     cases.push((member_slot(7, 0, 7), U256::MAX));
     cases.push((member_slot(7, 0, 5), U256::ZERO));
@@ -282,6 +283,16 @@ fn ordered_source_reads_and_phase_unknown_epoch() {
         expected.extend((0..8).map(|f| member_slot(7, j, f)));
     }
     assert_eq!(s.reads, expected);
+    // A closed interval isolates the future-epoch check from the independent
+    // requirement that an open entry name the current origin epoch.
+    let mut future = state(&v["preState"]);
+    future.words.insert(fixed_slot("origin.rootEpoch"), U256::from(6));
+    future.words.insert(entry_slot(7, 6), U256::from(1));
+    future.words.insert(entry_slot(7, 5), U256::from(1001));
+    let out = run(Operation::Uc, &input, u64::MAX, &mut future).unwrap();
+    assert_eq!(out.bytes[63], 0);
+    assert_eq!(out.gas, true_out.gas);
+    assert_eq!(future.reads, expected);
     s.words.insert(fixed_slot("phase"), U256::from(1));
     s.reads.clear();
     let out = run(Operation::Uc, &input, u64::MAX, &mut s).unwrap();
