@@ -8,9 +8,9 @@ import sys
 root = Path(__file__).resolve().parents[1] / 'protocol'
 pin = json.loads((root / 'pin.json').read_text())
 assert pin['repository'] == 'ristik/native-bridge-plugins'
-assert pin['revision'] == 'db9617ff10dd9f3699649fee644519d9e50d3091'
+assert pin['revision'] == '4256bb42b993e5ec0793ddfdf4832c417668e124'
 assert pin['corpusRevision'] == pin['revision']
-assert pin['oracleRevision'] == '89d63455ba3db2a3ba2b04dfe033354669f65650'
+assert pin['oracleRevision'] == '0a57e73ccc06d0bb0767ab02e6b5e1389f9d78b3'
 for name, expected in pin['sha256'].items():
     actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
     assert actual == expected, (name, actual, expected)
@@ -39,9 +39,9 @@ for file in sorted(vectors.glob('*/cases.json')):
         if case['op'] in {'kernel', 'prepareLock', 'mint', 'return'}:
             kernel_ids.add(case['id'])
 expected = json.loads((root / 'kernel-expectations.json').read_text())
-assert len(ids) == 278
-assert len(expected) == len(kernel_ids) == 106
+assert len(ids) == 296
+assert len(expected) == len(kernel_ids) == 116
 assert {case['id'] for case in expected} == kernel_ids
 if '--require-release' in sys.argv:
     assert pin['upstreamStatus'] == 'merged-release', 'Sealed candidate is pinned, but upstream PR1/#422 are not merged'
-print('Verified exact protocol snapshot, 278 sealed cases and 106 Go Kernel expectations; upstream status: ' + pin['upstreamStatus'])
+print('Verified exact protocol snapshot, 296 sealed cases and 116 Go Kernel expectations; upstream status: ' + pin['upstreamStatus'])

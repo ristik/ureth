@@ -21,7 +21,8 @@ objects, indefinite lengths and trailing data. Hashes/salts/IDs are 32 bytes,
 addresses 20 bytes, compressed secp256k1 keys 33 bytes.
 Amount is minimal positive unsigned big-endian bstr, 1..32 bytes (no leading
 zero). Arithmetic is uint256; chain ID and nonzero nonce are u64, network
-uint16, partitions uint32. JS uses bigint or decimal strings, never lossy number
+is in 1..65535 (SDK 3.0.1 NetworkId), partitions uint32. Cfg and mint wire
+decoders reject network zero and values above 65535 with IntRange. JS uses bigint or decimal strings, never lossy number
 conversion. `e` is null or uint64 in [1,2^64-1]; `t` is uint64 Unix seconds.
 
 ## Identity and immutable configuration

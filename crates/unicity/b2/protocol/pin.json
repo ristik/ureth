@@ -1,16 +1,16 @@
 {
   "repository": "ristik/native-bridge-plugins",
-  "revision": "db9617ff10dd9f3699649fee644519d9e50d3091",
+  "revision": "4256bb42b993e5ec0793ddfdf4832c417668e124",
   "sha256": {
-    "interop.md": "01d5f099d95cc3d69da76685cd5ff59ad912b559624e5592066f655f9d9d0535",
+    "interop.md": "07c8ee9602037d86caf0b0fa4d66832abfba0cbd0a793cb02dda7d6ed002080e",
     "abi.json": "73714a4a6e143049e96c01997436b9316707f4fe45e43f536d82cf2dc5d6a654",
-    "profile-v2.json": "9d5c794afb4eaeb83866cef6397efbe7bb556c9c99c8d6dec09090014da38edc",
-    "manifest.schema.json": "6f2f36986e8fb649e4da27170c82c56187a3c1cede2232f8345fdb6d35bcdb63",
+    "profile-v2.json": "597402765870ef4e09eec0014cedb33c0062c6f28438fcd5913a2dc609110f98",
+    "manifest.schema.json": "7bd3919e0492634912dbdfd21891665d1da7a00c207a1f2f63d5888ba23be8b0",
     "sdk-trust-base.md": "4240485c09d0d5c2e86e3e5d88e79b08314d37a309229cf8970d5a21f3fc8b2e",
-    "kernel-expectations.json": "89455462e0338e8de4291b3e470a11435dd6f9bd38b32f6aed2688fe91db9a75"
+    "kernel-expectations.json": "f1d55e7ff94c68194f45afc5e9f98cd7bcdc4610ed38378649d5366b3dc98282"
   },
-  "corpusRevision": "db9617ff10dd9f3699649fee644519d9e50d3091",
-  "corpusManifestSha256": "d20ed939b97297c05156bcdeee686f2ba70b38c3fa99fd933ed2e26df13b483d",
-  "oracleRevision": "89d63455ba3db2a3ba2b04dfe033354669f65650",
+  "corpusRevision": "4256bb42b993e5ec0793ddfdf4832c417668e124",
+  "corpusManifestSha256": "99c0a3c222af572013d38f1d53c7019213c256e64c012e497c8d32bf3014dfb7",
+  "oracleRevision": "0a57e73ccc06d0bb0767ab02e6b5e1389f9d78b3",
   "upstreamStatus": "sealed-candidate-unmerged"
 }

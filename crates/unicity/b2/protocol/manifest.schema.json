@@ -286,7 +286,7 @@
         },
         "networkId": {
           "type": "integer",
-          "minimum": 0,
+          "minimum": 1,
           "maximum": 65535
         },
         "rootGenesisHash": {
@@ -321,7 +321,7 @@
           "properties": {
             "networkId": {
               "type": "integer",
-              "minimum": 0,
+              "minimum": 1,
               "maximum": 65535
             },
             "rootGenesisHash": {

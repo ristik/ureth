@@ -67,6 +67,16 @@ fn network(it: Item<'_>) -> Result<u64> {
     }
     Ok(n)
 }
+// Match the oracle's Cfg range diagnostic before inspecting payload shape.
+// This bounded check performs no allocation, hashing or point parsing; complete
+// Cfg identity validation still follows the full leaf-dependent gas debit.
+pub(crate) fn check_cfg_network(it: Item<'_>) -> Result<()> {
+    let Ok(a) = it.array::<16>() else { return Ok(()) };
+    if a[0].blob(32).is_ok_and(|domain| domain == b"UNICITY_BR_CFG") {
+        network(a[1])?;
+    }
+    Ok(())
+}
 fn amount(it: Item<'_>) -> Result<&[u8]> {
     let b = it.blob(crate::MAX_HISTORY)?;
     if b.is_empty() || b.len() > 32 || b[0] == 0 {

@@ -5,11 +5,11 @@ address `0x0104`. No production crate imports it and no node factory registers i
 `0x0103` remains reserved. This does not enable bridging or change B1.
 
 The byte contract is native-bridge-plugins PR1 revision
-`db9617ff10dd9f3699649fee644519d9e50d3091`; exact source artifacts and their digests
+`4256bb42b993e5ec0793ddfdf4832c417668e124`; exact source artifacts and their digests
 are under `protocol/`. The sealed candidate corpus has manifest digest
-`d20ed939b97297c05156bcdeee686f2ba70b38c3fa99fd933ed2e26df13b483d` and Go oracle
-revision `89d63455ba3db2a3ba2b04dfe033354669f65650`. All 278 sealed cases replay
-against that oracle. The ordinary Rust test suite enforces all 106 B2 kernel calls
+`99c0a3c222af572013d38f1d53c7019213c256e64c012e497c8d32bf3014dfb7` and Go oracle
+revision `0a57e73ccc06d0bb0767ab02e6b5e1389f9d78b3`. All 296 sealed cases replay
+against that oracle. The ordinary Rust test suite enforces all 116 B2 kernel calls
 with exact ABI output or exact halt diagnostics, plus corpus/artifact integrity.
 The remaining operations concern SDK codecs, policy, offline backing, composition
 and vault behavior outside this pure kernel. Local signed constructors are tests,
@@ -23,13 +23,16 @@ corresponding pin update (`verify_protocol.py --require-release`). No merge or
 activation is claimed. The SDK-extension pure core remains a constants-only
 skeleton, so this crate implements the narrow relation itself.
 
-Both SDK 3.0.1 NetworkId codecs require `1..=65535`. Cfg and mint wire decoding
-therefore halt with `IntRange` for zero or values above 65535. The pinned upstream
-manifest schema and Go oracle still allow zero; the sealed corpus contains no
-zero-network case. This SDK intersection rule is an explicit stricter boundary,
-covered by fully reconstructed and re-signed mint regressions at 0, 1, 65535 and
-65536. The shared upstream profile/schema/oracle must adopt this range before
-release; the vendored upstream artifacts retain their exact pinned bytes.
+Both SDK 3.0.1 NetworkId codecs require `1..=65535`. The shared profile,
+manifest schema, Go oracle and Rust Cfg/mint wire decoders enforce that range;
+zero and values above 65535 halt with `IntRange`. The sealed corpus includes
+14 shared boundary cases at 0, 1, 65535 and 65536, including fully reconstructed,
+cfg-bound and signed mints, prepare calls and independent mint wire checks.
+Local constructors independently cover the same boundary.
+
+CI verifies the checked-in sealed digest and replays all 116 pure Kernel calls
+without fetching bft-core. Full exact Go replay of all 296 cases runs locally
+and in bft-core CI; ureth CI has no private-repository token dependency.
 
 ## Boundary
 

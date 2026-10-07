@@ -1,5 +1,5 @@
 {
-  "artifactVersion": 1,
+  "artifactVersion": 2,
   "nativeBridgeProtocolVersion": 2,
   "sdkVersion": "3.0.1",
   "status": "development-provisional-unactivated",
@@ -73,9 +73,13 @@
     "full-B1-SDK-seal-acceptance-parity"
   ],
   "normativeArtifactSha256": {
-    "protocol/interop.md": "01d5f099d95cc3d69da76685cd5ff59ad912b559624e5592066f655f9d9d0535",
+    "protocol/interop.md": "07c8ee9602037d86caf0b0fa4d66832abfba0cbd0a793cb02dda7d6ed002080e",
     "protocol/abi.json": "73714a4a6e143049e96c01997436b9316707f4fe45e43f536d82cf2dc5d6a654",
-    "protocol/manifest.schema.json": "6f2f36986e8fb649e4da27170c82c56187a3c1cede2232f8345fdb6d35bcdb63",
+    "protocol/manifest.schema.json": "7bd3919e0492634912dbdfd21891665d1da7a00c207a1f2f63d5888ba23be8b0",
     "protocol/sdk-trust-base.md": "4240485c09d0d5c2e86e3e5d88e79b08314d37a309229cf8970d5a21f3fc8b2e"
+  },
+  "networkId": {
+    "minimum": 1,
+    "maximum": 65535
   }
 }

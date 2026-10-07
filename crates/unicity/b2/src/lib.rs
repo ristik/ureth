@@ -11,7 +11,7 @@ mod semantics;
 use sha2::{Digest, Sha256};
 
 /// Exact protocol snapshot with sealed candidate corpus; upstream merge is pending.
-pub const PROTOCOL_REVISION: &str = "db9617ff10dd9f3699649fee644519d9e50d3091";
+pub const PROTOCOL_REVISION: &str = "4256bb42b993e5ec0793ddfdf4832c417668e124";
 /// This address remains inactive in all production node factories.
 pub const ADDRESS: alloy_primitives::Address =
     alloy_primitives::address!("0000000000000000000000000000000000000104");
@@ -181,6 +181,7 @@ pub fn run(input: &[u8], gas: u64) -> Result<Output> {
     let call = abi::decode(input)?;
     let mut tokens = 0;
     let cfg = cbor::one(call.cfg, &mut tokens)?;
+    semantics::check_cfg_network(cfg)?;
     let payload = cbor::one(call.payload, &mut tokens)?;
     // Count before any point parsing, public-key derivation, hash or recovery.
     let m = if call.op == 0 {
