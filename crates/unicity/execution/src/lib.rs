@@ -1803,6 +1803,24 @@ mod tests {
     }
 
     #[test]
+    fn supersession_span_is_exactly_the_primary_and_recovery_pair() {
+        // Pinned to bft-core's handoff.MaxSupersessionSpan: raising either side alone would admit
+        // a chain the other side can never acknowledge.
+        assert_eq!(wire::MAX_SUPERSESSION_SPAN, 2);
+        let parent = executable_input(1, 1).parent_hash;
+        let old_conf = B256::repeat_byte(0x11);
+        let new_conf = B256::repeat_byte(0x22);
+        let commitment = B256::repeat_byte(0x33);
+        let two = transition_bytes(1, 3, 1, 3, old_conf, new_conf, 2, commitment, 1, parent);
+        assert!(wire::decode_epoch_transition(&two).is_ok());
+        let three = transition_bytes(1, 4, 1, 4, old_conf, new_conf, 3, commitment, 1, parent);
+        assert_eq!(
+            wire::decode_epoch_transition(&three).unwrap_err(),
+            wire::CanonicalCborError::InvalidRootInput("supersession span exceeds bound")
+        );
+    }
+
+    #[test]
     fn assignment_projection_hash_matches_the_contract_vector() {
         let transition = EpochTransition {
             old_root_epoch: 4,

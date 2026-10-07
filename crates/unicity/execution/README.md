@@ -10,7 +10,7 @@ Root-input v2 keeps its existing tuple. Its transition list now accepts one cano
 `UNICITY_HANDOFF_EVM_TRANSITION/v3` body with the assignment's old/new root and shard epochs,
 active configuration hashes, and bounded supersession span. A root jump larger than one is accepted
 only with `span == rootDelta`, matching shard delta, a nonzero span commitment, and a span no larger
-than 64. The paired BFT verifier authenticates the ordered handoff history before this input reaches
+than 2 (a committed primary and its one recovery). The paired BFT verifier authenticates the ordered handoff history before this input reaches
 Ureth; this crate does not verify root or shard signatures. Build envelopes must repeat exactly the
 same transition bytes as root-input `D[]`, and the decoder refuses any mismatch.
 
@@ -55,3 +55,6 @@ adds the stock beacon-roots code and funds the public secp256k1 scalar-1 test si
 is a deployment default. Its independent geth 1.14.11 oracle pins genesis hash
 `0xefbe99d08e86d7e06034bfcb0d48f0f40a92b321fb3f96ca82a58e83d0c62363` and state root
 `0x868d8ac89ecb4bd0ab588ab97aba438a51898b0eaf18860a054b224897100f4a`.
+
+UC time: the seal timestamp is quorum-approved wall-clock time, bounded by root consensus (monotonic against the parent, 30 s voter
+clock skew: ristik/bft-core#445). Importers also keep it monotonic on one lineage.
