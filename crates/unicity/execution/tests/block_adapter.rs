@@ -16,12 +16,13 @@ use reth_primitives_traits::{
 };
 use reth_storage_api::{AccountReader, StateProvider};
 use reth_unicity_execution::{
-    block::BlockProfile,
+    block::{BlockAccountingError, BlockProfile},
     block_executor::{
         build_complete, replay_complete, BoundExecutionInput, CompletedParent, UnicityEvmConfig,
     },
     derive_beacon_root, derive_prev_randao, derive_timestamp,
     testing::{Tail, GENESIS_TAIL},
+    update::{B1Context, B1Job},
     wire::bind_completed_parent,
     RootInputV2, SEAL_REGISTRY, SYSTEM_CALLER,
 };
@@ -428,6 +429,35 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
         FEE_COLLECTOR,
     )
     .is_err());
+    // The completed-parent path refuses an update or a context the root input does not commit to,
+    // as the genesis path does: every non-genesis build, import and recovery binds here.
+    let swapped = B1Job { update: Bytes::from_static(b"another update"), ..second_job };
+    assert_eq!(
+        bind_completed_parent(
+            (*second_input).clone(),
+            swapped,
+            profile(),
+            &first_header,
+            built.parent,
+            FEE_COLLECTOR,
+        )
+        .unwrap_err(),
+        BlockAccountingError::UpdateHashMismatch
+    );
+    let unmeasured =
+        B1Job { context: B1Context { w_cert: 16, ..second_job.context }, ..second_job.clone() };
+    assert_eq!(
+        bind_completed_parent(
+            (*second_input).clone(),
+            unmeasured,
+            profile(),
+            &first_header,
+            built.parent,
+            FEE_COLLECTOR,
+        )
+        .unwrap_err(),
+        BlockAccountingError::B1Profile
+    );
     let build_bound = Arc::new(
         bind_completed_parent(
             (*second_input).clone(),

@@ -39,14 +39,14 @@ sha2.workspace = true
 [features]
 # Shared B1 world fixtures for dependents' tests; never part of a node build.
 test-utils = [
-	"dep:serde_json",
-	"reth-chainspec/test-utils",
-	"reth-consensus/test-utils",
-	"reth-ethereum-primitives/test-utils",
-	"reth-evm/test-utils",
-	"reth-evm-ethereum/test-utils",
-	"reth-primitives-traits/test-utils",
-	"reth-trie-common/test-utils"
+    "dep:serde_json",
+    "reth-chainspec/test-utils",
+    "reth-consensus/test-utils",
+    "reth-ethereum-primitives/test-utils",
+    "reth-evm/test-utils",
+    "reth-evm-ethereum/test-utils",
+    "reth-primitives-traits/test-utils",
+    "reth-trie-common/test-utils",
 ]
 
 [dev-dependencies]
