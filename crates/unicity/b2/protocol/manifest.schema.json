@@ -1,0 +1,384 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://github.com/ristik/native-bridge-plugins/protocol/manifest.schema.json",
+  "title": "Native bridge deployment registry v1",
+  "description": "Structural validation is not authorization. Installation MUST recompute identifiers, Cfg, policies and runtime/trust pins per interop.md. Hex has no 0x. Trust input is one pinned SDK RootTrustBase JSON document and its exact-file SHA-256; locations are installation-only. Fixed unit-weight committee/epoch only; trust evolution is deferred.",
+  "type": "object",
+  "minProperties": 1,
+  "propertyNames": {
+    "type": "string",
+    "pattern": "^[0-9a-f]{64}$"
+  },
+  "additionalProperties": {
+    "$ref": "#/$defs/entry"
+  },
+  "$defs": {
+    "hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "address": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$"
+    },
+    "u64": {
+      "type": "string",
+      "pattern": "^[1-9][0-9]{0,19}$",
+      "description": "Canonical uint64 decimal; installation checks <=18446744073709551615."
+    },
+    "artifact": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "location": {
+          "type": "string",
+          "minLength": 1
+        }
+      },
+      "required": [
+        "sha256"
+      ]
+    },
+    "policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "bodyHex": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{2}){1,128}$"
+        },
+        "sha256": {
+          "$ref": "#/$defs/hash"
+        },
+        "partition": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "shardHex": {
+          "const": "80"
+        },
+        "configurationHash": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "bodyHex",
+        "sha256",
+        "partition",
+        "shardHex",
+        "configurationHash"
+      ]
+    },
+    "backing": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "partition": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 4294967295
+        },
+        "shardHex": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{2}){1,33}$"
+        },
+        "configurationHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "pdr": {
+          "$ref": "#/$defs/artifact"
+        },
+        "executionProfile": {
+          "$ref": "#/$defs/artifact"
+        }
+      },
+      "required": [
+        "partition",
+        "shardHex",
+        "configurationHash",
+        "pdr",
+        "executionProfile"
+      ]
+    },
+    "b1": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "profile": {
+          "$ref": "#/$defs/artifact"
+        },
+        "registryAddress": {
+          "$ref": "#/$defs/address"
+        },
+        "registryRuntimeHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "registryLayout": {
+          "$ref": "#/$defs/artifact"
+        },
+        "genesis": {
+          "$ref": "#/$defs/artifact"
+        }
+      },
+      "required": [
+        "profile",
+        "registryAddress",
+        "registryRuntimeHash",
+        "registryLayout",
+        "genesis"
+      ]
+    },
+    "deployment": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "vaultAddress": {
+          "$ref": "#/$defs/address"
+        },
+        "vaultRuntimeHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "cfgHex": {
+          "type": "string",
+          "pattern": "^(?:[0-9a-f]{2})+$",
+          "maxLength": 4096
+        },
+        "cfgHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "tokenVerifierAddress": {
+          "$ref": "#/$defs/address"
+        },
+        "tokenVerifierRuntimeHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "semanticProfile": {
+          "$ref": "#/$defs/artifact"
+        },
+        "b1": {
+          "$ref": "#/$defs/b1"
+        },
+        "lockLayoutVersion": {
+          "const": 1
+        },
+        "aggregatorPolicy": {
+          "$ref": "#/$defs/policy"
+        },
+        "evmBackingPolicy": {
+          "$ref": "#/$defs/backing"
+        }
+      },
+      "required": [
+        "vaultAddress",
+        "vaultRuntimeHash",
+        "cfgHex",
+        "cfgHash",
+        "tokenVerifierAddress",
+        "tokenVerifierRuntimeHash",
+        "semanticProfile",
+        "b1",
+        "lockLayoutVersion",
+        "aggregatorPolicy",
+        "evmBackingPolicy"
+      ]
+    },
+    "plugin": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "npm": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "name": {
+              "const": "@unicitylabs/native-bridge-plugin"
+            },
+            "version": {
+              "const": "0.1.0"
+            },
+            "integrity": {
+              "type": "string",
+              "pattern": "^sha512-[A-Za-z0-9+/]{86}==$"
+            }
+          },
+          "required": [
+            "name",
+            "version",
+            "integrity"
+          ]
+        },
+        "rust": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "crate": {
+              "const": "native-bridge-sdk-ext"
+            },
+            "version": {
+              "const": "0.1.0"
+            },
+            "revision": {
+              "$ref": "#/$defs/commit"
+            }
+          },
+          "required": [
+            "crate",
+            "version",
+            "revision"
+          ]
+        },
+        "protocolCommit": {
+          "$ref": "#/$defs/commit"
+        },
+        "vectorManifestSha256": {
+          "$ref": "#/$defs/hash"
+        }
+      },
+      "required": [
+        "npm",
+        "rust",
+        "protocolCommit",
+        "vectorManifestSha256"
+      ]
+    },
+    "entry": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "schemaVersion": {
+          "const": 1
+        },
+        "protocolVersion": {
+          "const": 2
+        },
+        "family": {
+          "const": "unicity-native"
+        },
+        "sdkVersion": {
+          "const": "3.0.1"
+        },
+        "tokenTypeHex": {
+          "$ref": "#/$defs/hash"
+        },
+        "coinIdHex": {
+          "$ref": "#/$defs/hash"
+        },
+        "symbol": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 16
+        },
+        "decimals": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 255
+        },
+        "plugin": {
+          "$ref": "#/$defs/plugin"
+        },
+        "networkId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 65535
+        },
+        "rootGenesisHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "executionGenesisHash": {
+          "$ref": "#/$defs/hash"
+        },
+        "evmChainId": {
+          "$ref": "#/$defs/u64"
+        },
+        "chainRef": {
+          "type": "string",
+          "pattern": "^eip155:[1-9][0-9]{0,19}$"
+        },
+        "asset": {
+          "const": "0000000000000000000000000000000000000000"
+        },
+        "activeDeployment": {
+          "$ref": "#/$defs/deployment"
+        },
+        "replacedDeployments": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/deployment"
+          },
+          "uniqueItems": true
+        },
+        "trustBase": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "networkId": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535
+            },
+            "rootGenesisHash": {
+              "$ref": "#/$defs/hash"
+            },
+            "format": {
+              "const": "sdk-root-trust-base-json-v1"
+            },
+            "document": {
+              "$ref": "#/$defs/artifact"
+            }
+          },
+          "required": [
+            "networkId",
+            "rootGenesisHash",
+            "document",
+            "format"
+          ],
+          "description": "One installed SDK 3.0.1 RootTrustBase document B, whose exact-file SHA-256 is the immutable trustBaseId in J. Installation authenticates correspondence to network/root genesis and enforces unit stakes, matching count quorum and one fixed epoch."
+        },
+        "proofEndpoints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uri"
+          },
+          "uniqueItems": true
+        },
+        "rpcUrls": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "format": "uri"
+          },
+          "uniqueItems": true
+        }
+      },
+      "required": [
+        "schemaVersion",
+        "protocolVersion",
+        "family",
+        "sdkVersion",
+        "tokenTypeHex",
+        "coinIdHex",
+        "symbol",
+        "decimals",
+        "plugin",
+        "networkId",
+        "rootGenesisHash",
+        "executionGenesisHash",
+        "evmChainId",
+        "chainRef",
+        "asset",
+        "activeDeployment",
+        "replacedDeployments",
+        "trustBase"
+      ]
+    }
+  }
+}

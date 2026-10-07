@@ -1,0 +1,257 @@
+{
+ "format": "native-bridge-vectors/2",
+ "nativeBridgeProtoVersion": 2,
+ "family": "unlock",
+ "fixtureDigest": "36c06e33eeca46c13b2d9a55c43342f110adb2fbba097dbfabea822f2d0ca9d8",
+ "cases": [
+  {
+   "id": "unlock-valid",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "valid unlock: recovery equals key, compact signature verifies",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f258d4e043063f2e94cf8c9f9694f315a1ca8fe0de9dd3e44caefb808edf230af1945f9d993b1093ef75248bfa80792dc6ff5188be53fbe6c25e339ff136ac93af3c00",
+   "aux": {
+    "key": "03904652b3462f73a0d125ab995c19e75abf14e29bca4e4fa6fc4da5ceb677af09"
+   },
+   "expected": {
+    "status": "ok"
+   }
+  },
+  {
+   "id": "unlock-flipped-parity",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "recovery ID parity flipped, r and s unchanged and low-s",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f258d4e043063f2e94cf8c9f9694f315a1ca8fe0de9dd3e44caefb808edf230af1945f9d993b1093ef75248bfa80792dc6ff5188be53fbe6c25e339ff136ac93af3c01",
+   "aux": {
+    "key": "03904652b3462f73a0d125ab995c19e75abf14e29bca4e4fa6fc4da5ceb677af09"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockKey"
+   }
+  },
+  {
+   "id": "unlock-id2",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "recovery ID 2 against a signature whose ID is 0 or 1",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f258d4e043063f2e94cf8c9f9694f315a1ca8fe0de9dd3e44caefb808edf230af1945f9d993b1093ef75248bfa80792dc6ff5188be53fbe6c25e339ff136ac93af3c02",
+   "aux": {
+    "key": "03904652b3462f73a0d125ab995c19e75abf14e29bca4e4fa6fc4da5ceb677af09"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockKey"
+   }
+  },
+  {
+   "id": "unlock-id3",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "recovery ID 3",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f258d4e043063f2e94cf8c9f9694f315a1ca8fe0de9dd3e44caefb808edf230af1945f9d993b1093ef75248bfa80792dc6ff5188be53fbe6c25e339ff136ac93af3c03",
+   "aux": {
+    "key": "03904652b3462f73a0d125ab995c19e75abf14e29bca4e4fa6fc4da5ceb677af09"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockKey"
+   }
+  },
+  {
+   "id": "unlock-id4",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "recovery ID 4 is out of range",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f258d4e043063f2e94cf8c9f9694f315a1ca8fe0de9dd3e44caefb808edf230af1945f9d993b1093ef75248bfa80792dc6ff5188be53fbe6c25e339ff136ac93af3c04",
+   "aux": {
+    "key": "03904652b3462f73a0d125ab995c19e75abf14e29bca4e4fa6fc4da5ceb677af09"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockRecovery"
+   }
+  },
+  {
+   "id": "unlock-id255",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "recovery ID 255 is out of range",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f258d4e043063f2e94cf8c9f9694f315a1ca8fe0de9dd3e44caefb808edf230af1945f9d993b1093ef75248bfa80792dc6ff5188be53fbe6c25e339ff136ac93af3cff",
+   "aux": {
+    "key": "03904652b3462f73a0d125ab995c19e75abf14e29bca4e4fa6fc4da5ceb677af09"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockRecovery"
+   }
+  },
+  {
+   "id": "unlock-short",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "64 bytes",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f258d4e043063f2e94cf8c9f9694f315a1ca8fe0de9dd3e44caefb808edf230af1945f9d993b1093ef75248bfa80792dc6ff5188be53fbe6c25e339ff136ac93af3c",
+   "aux": {
+    "key": "03904652b3462f73a0d125ab995c19e75abf14e29bca4e4fa6fc4da5ceb677af09"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockLength"
+   }
+  },
+  {
+   "id": "unlock-high-s",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "high-s twin of a valid signature, never normalised",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f258d4e043063f2e94cf8c9f9694f315a1ca8fe0de9dd3e44caefb808edf230af194a06266c4ef6c108adb74057f86d238ff69261e92b361dddd8c326d5623a2920501",
+   "aux": {
+    "key": "03904652b3462f73a0d125ab995c19e75abf14e29bca4e4fa6fc4da5ceb677af09"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockScalars"
+   }
+  },
+  {
+   "id": "unlock-r-zero",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "r = 0",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f25800000000000000000000000000000000000000000000000000000000000000005f9d993b1093ef75248bfa80792dc6ff5188be53fbe6c25e339ff136ac93af3c00",
+   "aux": {
+    "key": "03904652b3462f73a0d125ab995c19e75abf14e29bca4e4fa6fc4da5ceb677af09"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockScalars"
+   }
+  },
+  {
+   "id": "unlock-s-zero",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "s = 0",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f258d4e043063f2e94cf8c9f9694f315a1ca8fe0de9dd3e44caefb808edf230af194000000000000000000000000000000000000000000000000000000000000000000",
+   "aux": {
+    "key": "03904652b3462f73a0d125ab995c19e75abf14e29bca4e4fa6fc4da5ceb677af09"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockScalars"
+   }
+  },
+  {
+   "id": "unlock-r-n",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "r = n",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f258fffffffffffffffffffffffffffffffebaaedce6af48a03bbfd25e8cd03641415f9d993b1093ef75248bfa80792dc6ff5188be53fbe6c25e339ff136ac93af3c00",
+   "aux": {
+    "key": "03904652b3462f73a0d125ab995c19e75abf14e29bca4e4fa6fc4da5ceb677af09"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockScalars"
+   }
+  },
+  {
+   "id": "unlock-other-key",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "valid signature against another expected key",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f258d4e043063f2e94cf8c9f9694f315a1ca8fe0de9dd3e44caefb808edf230af1945f9d993b1093ef75248bfa80792dc6ff5188be53fbe6c25e339ff136ac93af3c00",
+   "aux": {
+    "key": "03753da3c21ca561d3acd3dfab7932a7011bd718356dfd91ab40b96707123ba300"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockKey"
+   }
+  },
+  {
+   "id": "unlock-high-recovery-match",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "recovery ID 2 or 3 where recovery succeeds and equals the expected key",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f25800000000000000000000000000000000000000000000000000000000000000023f3c7512b563fc84cb8b716851458a670c5a4b913280fe4c30df36d26738f3f702",
+   "aux": {
+    "key": "02a845c50fa44d0266330ecf4d2d27fc8468dedbd838ea14404abad3fb854af708"
+   },
+   "expected": {
+    "status": "ok"
+   }
+  },
+  {
+   "id": "unlock-high-recovery-flipped",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "the same signature with the other of IDs 2 and 3",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f25800000000000000000000000000000000000000000000000000000000000000023f3c7512b563fc84cb8b716851458a670c5a4b913280fe4c30df36d26738f3f703",
+   "aux": {
+    "key": "02a845c50fa44d0266330ecf4d2d27fc8468dedbd838ea14404abad3fb854af708"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockKey"
+   }
+  },
+  {
+   "id": "unlock-high-recovery-id0",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "the same signature with ID 0",
+   "input": "badb34c8bf5ad76b80cfeaaad84b2d13a2c7049b0d8808d0a3086f4fdb1b47cf604d9e88f21473c574a5a079b7f6075eaefb4e5ec0a72e0899c127455e22f25800000000000000000000000000000000000000000000000000000000000000023f3c7512b563fc84cb8b716851458a670c5a4b913280fe4c30df36d26738f3f700",
+   "aux": {
+    "key": "02a845c50fa44d0266330ecf4d2d27fc8468dedbd838ea14404abad3fb854af708"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockKey"
+   }
+  },
+  {
+   "id": "unlock-regression-00",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "review regression vector over G: r||s||01 accepts and r||s||00 rejects",
+   "input": "010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202027303acb5b7bab8529f540716e3bb91c02edfd535950b0a81efc558dc39589e4c615c4a64d26e3f07cbbcc8cce562e26319aa91ec6e9a59167e05b8da3eb15c7f00",
+   "aux": {
+    "key": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+   },
+   "expected": {
+    "status": "error",
+    "family": "invalid",
+    "reason": "ErrUnlockKey"
+   }
+  },
+  {
+   "id": "unlock-regression-01",
+   "family": "unlock",
+   "op": "unlock",
+   "description": "review regression vector over G: r||s||01 accepts and r||s||00 rejects",
+   "input": "010101010101010101010101010101010101010101010101010101010101010102020202020202020202020202020202020202020202020202020202020202027303acb5b7bab8529f540716e3bb91c02edfd535950b0a81efc558dc39589e4c615c4a64d26e3f07cbbcc8cce562e26319aa91ec6e9a59167e05b8da3eb15c7f01",
+   "aux": {
+    "key": "0279be667ef9dcbbac55a06295ce870b07029bfcdb2dce28d959f2815b16f81798"
+   },
+   "expected": {
+    "status": "ok"
+   }
+  }
+ ]
+}

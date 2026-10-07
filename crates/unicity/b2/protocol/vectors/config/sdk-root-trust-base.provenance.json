@@ -1,0 +1,8 @@
+{
+  "fixture": "synthetic-fixed-base-not-authenticated",
+  "sdkVersion": "3.0.1",
+  "sdkCommit": "f5f0737306901215860aa920a6ab570b699efba8",
+  "serialization": "UTF8(JSON.stringify(RootTrustBase.fromJSON(source).toJSON()))",
+  "byteLength": 524,
+  "sha256": "e5454ae4fe566b05dab8c1b15c88a05356b8816b1cd66a2b7adcce184af27fb5"
+}

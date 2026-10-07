@@ -1,0 +1,16 @@
+{
+  "generator": {
+    "command": [
+      "go",
+      "run",
+      "./cmd/gencorpus",
+      "-out",
+      "{output}"
+    ],
+    "commit": "52fe1934ce707edecec0a0df05b6a77eaf54e53e",
+    "repository": "https://github.com/ristik/bft-core.git"
+  },
+  "protocolVersion": 2,
+  "sdkVersion": "3.0.1",
+  "semanticProfileSha256": "597402765870ef4e09eec0014cedb33c0062c6f28438fcd5913a2dc609110f98"
+}

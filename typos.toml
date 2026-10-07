@@ -7,6 +7,8 @@ extend-exclude = [
     "Cargo.lock",
     "testing/ef-tests",
     "arena.txt",
+    # Exact SDK document; base58 peer IDs are covered by the pinned digest.
+    "crates/unicity/b2/protocol/vectors/config/sdk-root-trust-base.json",
 ]
 
 [default]

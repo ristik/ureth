@@ -1,0 +1,85 @@
+{
+  "artifactVersion": 2,
+  "nativeBridgeProtocolVersion": 2,
+  "sdkVersion": "3.0.1",
+  "status": "development-provisional-unactivated",
+  "identityFamily": "unicity-native",
+  "tags": {
+    "predicate": 39032,
+    "mint": 39041,
+    "transfer": 39045,
+    "certificationData": 39031,
+    "token": 39040,
+    "inclusionProof": 39033,
+    "lock": 39049,
+    "returnReason": 39048,
+    "value": 39050
+  },
+  "versions": {
+    "mint": 2,
+    "transfer": 2,
+    "certificationData": 2,
+    "token": 2,
+    "inclusionProof": 1,
+    "predicate": 1,
+    "lock": 2,
+    "lockProof": 1,
+    "returnReason": 1,
+    "value": 1
+  },
+  "limits": {
+    "justificationBytes": 65536,
+    "ucBytes": 16384,
+    "pdrBytes": 16384,
+    "headerBytes": 2048,
+    "mptNodesPerTrie": 65,
+    "mptNodeBytes": 1024,
+    "combinedMptBytes": 24576,
+    "cborDepth": 16,
+    "rlpDepth": 16,
+    "cborItems": 32768,
+    "semanticBytes": 131072,
+    "envelopeBytes": 262144,
+    "transfers": 64,
+    "leaves": 65,
+    "pathSteps": 2048,
+    "policyBytes": 128,
+    "aggregatorAnchors": 1
+  },
+  "normativeArtifacts": [
+    "protocol/interop.md",
+    "protocol/abi.json",
+    "protocol/manifest.schema.json",
+    "protocol/sdk-trust-base.md"
+  ],
+  "hashing": "Activation descriptor must bind exact SHA-256 of the normative artifacts and final measured bounds; no deployment semanticProfileHash is claimed here.",
+  "trustModel": {
+    "scope": "fixed-sdk-root-trust-base",
+    "validatorStake": "1",
+    "epochs": "one-fixed-epoch-and-committee",
+    "quorum": "sdk-count: N-(N-1)/3",
+    "verification": "existing-sdk-3.0.1",
+    "trustBaseId": "SHA256(exact-sdk-emitted-JSON-document-bytes)",
+    "trustDocumentFormat": "sdk-root-trust-base-json-v1",
+    "certificateTransport": "sdk-decodable-subset-for-ordinary-and-embedded-UCs",
+    "deferredIssue": "https://github.com/ristik/bft-core/issues/421"
+  },
+  "deferred": [
+    "arbitrary-validator-weights",
+    "trust-base-append-or-fetch",
+    "epoch-evolution-and-interval-closure",
+    "mixed-historical-current-committees",
+    "old-J-validity-through-rotation",
+    "full-B1-SDK-seal-acceptance-parity"
+  ],
+  "normativeArtifactSha256": {
+    "protocol/interop.md": "07c8ee9602037d86caf0b0fa4d66832abfba0cbd0a793cb02dda7d6ed002080e",
+    "protocol/abi.json": "73714a4a6e143049e96c01997436b9316707f4fe45e43f536d82cf2dc5d6a654",
+    "protocol/manifest.schema.json": "7bd3919e0492634912dbdfd21891665d1da7a00c207a1f2f63d5888ba23be8b0",
+    "protocol/sdk-trust-base.md": "4240485c09d0d5c2e86e3e5d88e79b08314d37a309229cf8970d5a21f3fc8b2e"
+  },
+  "networkId": {
+    "minimum": 1,
+    "maximum": 65535
+  }
+}
