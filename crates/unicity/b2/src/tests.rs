@@ -6,7 +6,9 @@ use serde_json::Value;
 fn hx(s: &str) -> Vec<u8> {
     assert_eq!(s.len() % 2, 0);
     s.as_bytes()
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|p| u8::from_str_radix(core::str::from_utf8(p).unwrap(), 16).unwrap())
         .collect()
 }
@@ -590,6 +592,15 @@ fn depth_and_shared_item_ceilings_exact_and_over() {
         let mut payload = vec![0x99, (n >> 8) as u8, n as u8];
         payload.extend_from_slice(&vec![0; n]);
         assert_eq!(run(&abi(0, &[0], &payload), u64::MAX), Err(err));
+        if n == 32767 {
+            for forbidden in [0xa0, 0x60, 0x1c] {
+                *payload.last_mut().unwrap() = forbidden;
+                assert_eq!(
+                    run(&abi(0, &[0], &payload), u64::MAX),
+                    Err(Error::BudgetExceeded(BridgeError::TooManyItems))
+                );
+            }
+        }
     }
 }
 

@@ -37,15 +37,15 @@ fn scan(
     tokens: &mut usize,
     token: bool,
 ) -> Result<(), Malformed> {
+    *tokens += 1;
+    if *tokens > 32768 {
+        return Err(Malformed::Limit);
+    }
     if token && r.data.first().is_some_and(|b| matches!(b >> 5, 3 | 5)) {
         return Err(Malformed::Cbor);
     }
     if token && r.data.first().is_some_and(|b| matches!(b & 31, 28..=30)) {
         return Err(Malformed::Canonical);
-    }
-    *tokens += 1;
-    if *tokens > 32768 {
-        return Err(Malformed::Limit);
     }
     if r.data.first().is_some_and(|b| b >> 5 == 7 && *b != 0xf6) {
         return Err(Malformed::Cbor);
@@ -281,5 +281,8 @@ mod token_tests {
         assert_eq!(one_token(&[0x81, 0xa0], &mut 0).unwrap_err(), Malformed::Cbor);
         assert_eq!(one_token(&[0, 0], &mut 0).unwrap_err(), Malformed::Trailing);
         assert_eq!(one_token(&[0], &mut 32768).unwrap_err(), Malformed::Limit);
+        for b in [&[0xa0][..], &[0x60], &[0x1c]] {
+            assert_eq!(one_token(b, &mut 32768).unwrap_err(), Malformed::Limit);
+        }
     }
 }

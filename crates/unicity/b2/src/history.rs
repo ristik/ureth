@@ -481,7 +481,9 @@ mod guard_tests {
             .as_str()
             .unwrap()
             .as_bytes()
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|p| u8::from_str_radix(core::str::from_utf8(p).unwrap(), 16).unwrap())
             .collect::<Vec<_>>();
         let hist = History::decode(&input).unwrap();
@@ -509,7 +511,9 @@ mod field_guard_tests {
             serde_json::from_str(include_str!("../tests/testdata/go-9136c661.json")).unwrap();
         let hx = |s: &str| {
             s.as_bytes()
-                .chunks_exact(2)
+                .as_chunks::<2>()
+                .0
+                .iter()
                 .map(|p| u8::from_str_radix(core::str::from_utf8(p).unwrap(), 16).unwrap())
                 .collect::<Vec<_>>()
         };
