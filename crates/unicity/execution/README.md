@@ -55,3 +55,5 @@ adds the stock beacon-roots code and funds the public secp256k1 scalar-1 test si
 is a deployment default. Its independent geth 1.14.11 oracle pins genesis hash
 `0xefbe99d08e86d7e06034bfcb0d48f0f40a92b321fb3f96ca82a58e83d0c62363` and state root
 `0x868d8ac89ecb4bd0ab588ab97aba438a51898b0eaf18860a054b224897100f4a`.
+
+UC time: this crate does not bound the seal timestamp. Importers keep it monotonic on one lineage; bounding the root's own proposal timestamp is a root consensus rule tracked as ristik/bft-core#445.
