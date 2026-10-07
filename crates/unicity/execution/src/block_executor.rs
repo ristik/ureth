@@ -2,7 +2,9 @@
 
 use crate::{
     block::{next_base_fee, BlockGasAccounting, BlockProfile, ParentExecutionOutcome},
-    derive_beacon_root, derive_prev_randao, derive_timestamp, execute_registry_transition_on_db,
+    derive_beacon_root, derive_prev_randao, derive_timestamp,
+    evm_factory::{UnicityEvmFactory, UnicityInnerEvmConfig},
+    execute_registry_transition_on_db,
     update::B1Job,
     ExecutionConfig, RootInputV2, UpdateInput, SYSTEM_CALLER,
 };
@@ -31,7 +33,7 @@ use reth_evm::{
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput, Executor},
     ConfigureEvm, EvmEnv, NextBlockEnvAttributes,
 };
-use reth_evm_ethereum::{EthBlockAssembler, EthEvmConfig, RethReceiptBuilder};
+use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 use reth_primitives_traits::{RecoveredBlock, SealedBlock, SealedHeader};
 use reth_storage_api::StateProvider;
 use revm::{database::State, DatabaseCommit, Inspector};
@@ -449,9 +451,9 @@ impl InvalidTxError for UnsupportedPoolTransaction {
 /// Concrete Ethereum EVM configuration bound to one authenticated companion.
 #[derive(Clone, Debug)]
 pub struct UnicityEvmConfig {
-    inner: EthEvmConfig,
+    inner: UnicityInnerEvmConfig,
     executor_factory:
-        UnicityBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, alloy_evm::EthEvmFactory>,
+        UnicityBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, UnicityEvmFactory>,
     bound: Arc<BoundExecutionInput>,
     /// Gross system gas of the last block this configuration finished, if any.
     system_gas: Arc<Mutex<Option<u64>>>,
@@ -459,7 +461,7 @@ pub struct UnicityEvmConfig {
 
 impl UnicityEvmConfig {
     /// Creates one immutable block-job configuration for both build and replay.
-    pub fn new(inner: EthEvmConfig, bound: Arc<BoundExecutionInput>) -> Self {
+    pub fn new(inner: UnicityInnerEvmConfig, bound: Arc<BoundExecutionInput>) -> Self {
         let system_gas = Arc::new(Mutex::new(None));
         let executor_factory = UnicityBlockExecutorFactory::new(
             inner.executor_factory.clone(),
@@ -784,7 +786,7 @@ impl ConfigureEvm for UnicityEvmConfig {
     type Error = BindingError;
     type NextBlockEnvCtx = NextBlockEnvAttributes;
     type BlockExecutorFactory =
-        UnicityBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, alloy_evm::EthEvmFactory>;
+        UnicityBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, UnicityEvmFactory>;
     type BlockAssembler = EthBlockAssembler<ChainSpec>;
 
     fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {

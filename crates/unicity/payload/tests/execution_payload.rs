@@ -21,7 +21,6 @@ use reth_engine_primitives::{BeaconEngineMessage, ConsensusEngineHandle};
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
 use reth_ethereum_primitives::{Block, Receipt, Transaction, TransactionSigned};
 use reth_evm::{execute::Executor, ConfigureEvm};
-use reth_evm_ethereum::EthEvmConfig;
 use reth_payload_builder::{
     EthBuiltPayload, PayloadBuilderHandle, PayloadServiceCommand, PayloadStore,
 };
@@ -48,6 +47,7 @@ use reth_unicity_execution::{
         MISSING_EXECUTION_INPUT_ERROR,
     },
     derive_beacon_root, derive_prev_randao, derive_timestamp,
+    evm_factory::unicity_eth_config,
     node_evm::{
         BlockExecutionRegistryError, UnicityBlockExecutionRegistry, UnicityNodeEvmConfig,
         UnicityNodeEvmError,
@@ -318,7 +318,7 @@ fn resolved_job(
         )
         .unwrap(),
     );
-    let evm = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec.clone()), bound);
+    let evm = UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), bound);
     let attrs = attributes(root, parent.timestamp);
     let job = ResolvedPayloadJob::new(parent.clone(), attrs.clone(), evm, base).unwrap();
     (job, attrs)
@@ -400,7 +400,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         )
         .unwrap(),
     );
-    let evm = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec.clone()), bound);
+    let evm = UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), bound);
     let job = ResolvedPayloadJob::new(parent.clone(), attrs.clone(), evm.clone(), &base).unwrap();
     let resolver = FixedPayloadJobResolver::new(vec![job]).unwrap();
     let pool = test_pool();
@@ -467,7 +467,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         )
         .unwrap(),
     );
-    let second_evm = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec.clone()), second_bound);
+    let second_evm = UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), second_bound);
     let second_job = ResolvedPayloadJob::new(
         Arc::new(first_header.clone()),
         second_attrs.clone(),
@@ -793,7 +793,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         .unwrap(),
     );
     let alternate_evm =
-        UnicityEvmConfig::new(EthEvmConfig::new(client.chain_spec.clone()), alternate_bound);
+        UnicityEvmConfig::new(unicity_eth_config(client.chain_spec.clone()), alternate_bound);
     assert!(ResolvedPayloadJob::new(
         parent.clone(),
         attrs.clone(),
@@ -3063,7 +3063,7 @@ fn node_evm_resolves_each_block_to_its_own_bound_input() {
     let other_commitment = other.root_input().input_commitment().unwrap();
     registry.insert(other_commitment, other).unwrap();
 
-    let node_config = UnicityNodeEvmConfig::new(EthEvmConfig::new(client.chain_spec()), registry);
+    let node_config = UnicityNodeEvmConfig::new(unicity_eth_config(client.chain_spec()), registry);
     let ctx = node_config.context_for_block(&block).unwrap();
     assert_eq!(ctx.extra_data, block.header().extra_data);
 
@@ -3086,13 +3086,13 @@ fn node_evm_executes_a_registered_block_and_fails_closed_without_an_input() {
 
     let registry = UnicityBlockExecutionRegistry::default();
     registry.insert(commitment, bound_input(&root, &parent)).unwrap();
-    let registered = UnicityNodeEvmConfig::new(EthEvmConfig::new(client.chain_spec()), registry);
+    let registered = UnicityNodeEvmConfig::new(unicity_eth_config(client.chain_spec()), registry);
     let output = registered.executor(client.state.clone()).execute(&recovered).unwrap();
     assert_eq!(output.result.gas_used, block.header().gas_used);
 
     // Without the input the executor fails closed with the named error, not stock execution.
     let bare = UnicityNodeEvmConfig::new(
-        EthEvmConfig::new(client.chain_spec()),
+        unicity_eth_config(client.chain_spec()),
         UnicityBlockExecutionRegistry::default(),
     );
     let error = bare.executor(client.state).execute(&recovered).unwrap_err();

@@ -4,13 +4,13 @@ use alloy_consensus::Header;
 use alloy_primitives::B256;
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
 use reth_ethereum_primitives::{Block, TransactionSigned};
-use reth_evm_ethereum::EthEvmConfig;
 use reth_primitives_traits::{Block as _, SealedHeader};
 use reth_revm::database::StateProviderDatabase;
 use reth_storage_api::{BlockNumReader, BlockReader, HeaderProvider, StateProviderFactory};
 use reth_unicity_execution::{
     block::BlockProfile,
     block_executor::{replay_complete, UnicityEvmConfig},
+    evm_factory::unicity_eth_config,
     pairing::{
         header_attributes_digest, verify_pair_binding, ExpectedSubject, PairBinding,
         PairBindingError, PairContext, PairSubject,
@@ -308,7 +308,7 @@ where
         }
         .map_err(|error| eyre::eyre!("parent accounting binding failed at {number}: {error:?}"))?;
         let state = provider.state_by_block_hash(parent_hash)?;
-        let config = UnicityEvmConfig::new(EthEvmConfig::new(chain.clone()), Arc::new(bound));
+        let config = UnicityEvmConfig::new(unicity_eth_config(chain.clone()), Arc::new(bound));
         let replay =
             replay_complete(&config, StateProviderDatabase::new(state.as_ref()), &state, &block)
                 .map_err(|error| eyre::eyre!("accounting replay failed at {number}: {error}"))?;

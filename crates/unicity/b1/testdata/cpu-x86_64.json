@@ -1,0 +1,58 @@
+{
+  "arch": "x86_64",
+  "iterations": 10000,
+  "kernels": [
+    {
+      "gas": 1274738,
+      "gasPerNs": 3.4687503401434587,
+      "id": "cert.single.ok",
+      "maxNs": 1312890,
+      "medianNs": 367492,
+      "p99Ns": 725394,
+      "pass": true
+    },
+    {
+      "gas": 1380318,
+      "gasPerNs": 1.639957751114142,
+      "id": "cert.shared.max-8.ok",
+      "maxNs": 19407350,
+      "medianNs": 841679,
+      "p99Ns": 2361117,
+      "pass": true
+    },
+    {
+      "gas": 1712002,
+      "gasPerNs": 0.29556647354734944,
+      "id": "quorum.max.all",
+      "maxNs": 42757074,
+      "medianNs": 5792274,
+      "p99Ns": 13226331,
+      "pass": true
+    },
+    {
+      "gas": 1476068,
+      "gasPerNs": 2.870471097282318,
+      "id": "paths.shard-depth-256.ok",
+      "maxNs": 45099419,
+      "medianNs": 514225,
+      "p99Ns": 1124945,
+      "pass": true
+    },
+    {
+      "gas": 199050,
+      "gasPerNs": 0.9018703445276112,
+      "id": "rsmt.depth-256.ok",
+      "maxNs": 547109,
+      "medianNs": 220708,
+      "p99Ns": 358006,
+      "pass": true
+    }
+  ],
+  "os": "macos",
+  "pass": true,
+  "referenceGasPerNs": {
+    "ecrecover": 0.05284946710120673,
+    "sha256_1KiB": 0.050673362246062545
+  },
+  "warmups": 1000
+}

@@ -51,7 +51,6 @@ use jsonrpsee::{
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
 use reth_engine_primitives::{ConsensusEngineHandle, EngineApiValidator, PayloadValidator};
 use reth_ethereum_payload_builder::EthereumBuilderConfig;
-use reth_evm_ethereum::EthEvmConfig;
 use reth_node_builder::{
     rpc::{EngineApiBuilder, PayloadValidatorBuilder},
     AddOnsContext, FullNodeComponents,
@@ -71,6 +70,7 @@ use reth_storage_api::{BlockNumReader, BlockReader, HeaderProvider, StateProvide
 use reth_unicity_execution::{
     block::BlockAccountingError,
     block_executor::{replay_complete, BoundExecutionInput, UnicityEvmConfig},
+    evm_factory::unicity_eth_config,
     node_evm::UnicityBlockExecutionRegistry,
     pairing::{
         attributes_digest, verify_pair_binding, ExpectedSubject, PairBinding, PairBindingError,
@@ -453,7 +453,7 @@ where
 
     let builder_config =
         context.builder_config.get().ok_or(SealBuildError::BuilderConfigUnavailable)?;
-    let evm_config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec), Arc::new(bound));
+    let evm_config = UnicityEvmConfig::new(unicity_eth_config(chain_spec), Arc::new(bound));
     let job =
         ResolvedPayloadJob::new(Arc::new(parent), attributes.clone(), evm_config, builder_config)
             .map_err(SealBuildError::Job)?
@@ -936,7 +936,7 @@ where
             .map_err(SealImportError::Binding)?
         };
         let input = Arc::new(bound);
-        let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec.clone()), input.clone());
+        let config = UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), input.clone());
 
         // 6. Re-use the shared replay rather than a second execution or comparison path.
         let state_provider = self

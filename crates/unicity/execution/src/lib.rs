@@ -23,9 +23,12 @@ use revm::{
 use sha2::{Digest, Sha256};
 
 #[cfg(test)]
+mod b1_profile;
+#[cfg(test)]
 mod b1_tests;
 pub mod block;
 pub mod block_executor;
+pub mod evm_factory;
 pub mod node_evm;
 pub mod pairing;
 #[cfg(any(test, feature = "test-utils"))]

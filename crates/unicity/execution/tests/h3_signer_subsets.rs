@@ -13,11 +13,11 @@ use alloy_genesis::Genesis;
 use alloy_primitives::{keccak256, Address, B256, U256};
 use reth_chainspec::ChainSpec;
 use reth_evm::NextBlockEnvAttributes;
-use reth_evm_ethereum::EthEvmConfig;
 use reth_primitives_traits::SealedHeader;
 use reth_unicity_execution::{
     block_executor::{build_complete, replay_complete, BoundExecutionInput, UnicityEvmConfig},
     derive_beacon_root, derive_prev_randao, derive_timestamp,
+    evm_factory::unicity_eth_config,
     testing::GENESIS_TAIL,
     wire::{SealBuildInput, SealCompanion},
     RootInputV2, SEAL_REGISTRY,
@@ -88,7 +88,7 @@ fn apply(witnesses: Vec<Vec<u8>>) -> Outcome {
         )
         .expect("the acknowledgement binds to the genesis parent"),
     );
-    let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec), bound);
+    let config = UnicityEvmConfig::new(unicity_eth_config(chain_spec), bound);
     let attrs = NextBlockEnvAttributes {
         timestamp: derive_timestamp(root.origin.reference_time, parent.timestamp).unwrap(),
         suggested_fee_recipient: FEE_COLLECTOR,
