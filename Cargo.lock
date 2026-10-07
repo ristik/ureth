@@ -10778,6 +10778,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "reth-unicity-b1"
+version = "2.5.0"
+dependencies = [
+ "alloy-evm",
+ "alloy-primitives",
+ "revm",
+ "secp256k1 0.30.0",
+ "serde_json",
+ "sha2 0.10.9",
+]
+
+[[package]]
 name = "reth-unicity-execution"
 version = "2.5.0"
 dependencies = [

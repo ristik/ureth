@@ -43,6 +43,7 @@ members = [
     "crates/ethereum/payload/",
     "crates/unicity/payload/",
     "crates/unicity/execution/",
+    "crates/unicity/b1/",
     "crates/unicity/store/",
     "crates/ethereum/primitives/",
     "crates/ethereum/reth/",
