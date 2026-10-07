@@ -61,7 +61,7 @@ jobs:
             --features "${{ matrix.features }}" --locked \
             ${{ matrix.exclude_args }} --workspace \
             --exclude ef-tests --no-tests=warn \
-            -E "(!kind(test) and not binary(e2e_testsuite)) or package(reth-unicity-b1)"
+            -E "(!kind(test) and not binary(e2e_testsuite)) or package(reth-unicity-b1) or package(reth-unicity-b2)"
 
   state:
     name: Ethereum state tests

@@ -1,0 +1,85 @@
+{
+  "protocolVersion": 2,
+  "kernelAddress": "0x0000000000000000000000000000000000000104",
+  "reservedAddress": "0x0000000000000000000000000000000000000103",
+  "input": [
+    "uint8 operation",
+    "bytes cfg",
+    "bytes payload"
+  ],
+  "operations": {
+    "prepareLock": 0,
+    "mint": 1,
+    "return": 2
+  },
+  "output": [
+    "bytes32 marker",
+    "bool valid",
+    "Result result"
+  ],
+  "markerAscii": "UNICITY_TOKEN_SEMANTICS",
+  "result": [
+    "bytes32 cfg",
+    "uint256 nonce",
+    "uint256 amount",
+    "bytes32 tokenId",
+    "bytes32 salt",
+    "bytes32 firstPredicateHash",
+    "bytes32 lockDigest",
+    "address releaseTo",
+    "bytes32 nullifier",
+    "Leaf[] leaves"
+  ],
+  "leaf": [
+    "bytes32 sid",
+    "bytes32 txHash",
+    "uint64 referenceTime",
+    "bytes32 leafValue"
+  ],
+  "outputOffsets": {
+    "marker": 0,
+    "valid": 32,
+    "resultOffset": 64,
+    "cfg": 96,
+    "nonce": 128,
+    "amount": 160,
+    "tokenId": 192,
+    "salt": 224,
+    "firstPredicateHash": 256,
+    "lockDigest": 288,
+    "releaseTo": 320,
+    "nullifier": 352,
+    "leavesOffset": 384,
+    "leafCount": 416,
+    "firstLeaf": 448
+  },
+  "resultOffsetValue": 96,
+  "leavesOffsetValue": 320,
+  "outputFixedBytes": 448,
+  "leafStrideBytes": 128,
+  "envelope": [
+    "bytes policyBody",
+    "bytes history",
+    "Anchor[] anchors",
+    "LeafProof[] leafProofs"
+  ],
+  "anchor": [
+    "uint32 partition",
+    "bytes shard",
+    "bytes32 shardConfHash",
+    "bytes32 expectedStateRoot",
+    "bytes32 expectedIRHash",
+    "bytes uc",
+    "bytes inputRecord"
+  ],
+  "leafProof": [
+    "uint16 anchorIndex",
+    "bytes32 bitmap",
+    "bytes32[] siblings"
+  ],
+  "b1ResultBytes": 64,
+  "b1Result": [
+    "uint256(1)",
+    "bool(true)"
+  ]
+}

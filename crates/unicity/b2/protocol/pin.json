@@ -1,0 +1,13 @@
+{
+  "repository": "ristik/native-bridge-plugins",
+  "revision": "efd9d150bf02945df2c9ba751617c86a4625deb4",
+  "sha256": {
+    "interop.md": "01d5f099d95cc3d69da76685cd5ff59ad912b559624e5592066f655f9d9d0535",
+    "abi.json": "73714a4a6e143049e96c01997436b9316707f4fe45e43f536d82cf2dc5d6a654",
+    "profile-v2.json": "3469355726e089e5dfd0bcf329c51d7df02e82c60cca50e686cb30514c4579f9",
+    "manifest.schema.json": "6f2f36986e8fb649e4da27170c82c56187a3c1cede2232f8345fdb6d35bcdb63",
+    "sdk-trust-base.md": "fda636309d3930fd534531d50ef414b62b49920a47ac703a2817e07febc4182c"
+  },
+  "corpusRevision": null,
+  "corpusManifestSha256": null
+}
