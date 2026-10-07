@@ -40,7 +40,11 @@ struct UnicityArgs {
     fee_collector: Address,
 
     /// Root network identifier this pair is pinned to. Every pair binding must name it.
-    #[arg(long = "unicity.network-id", value_name = "ID")]
+    ///
+    /// The explicit id keeps this argument apart from reth's own `--network-id` (the P2P override,
+    /// whose clap id is `network_id`): sharing the id made this required argument unsatisfiable
+    /// in the full node command.
+    #[arg(id = "unicity_network_id", long = "unicity.network-id", value_name = "ID")]
     network_id: u64,
 
     /// Identity of the pinned root genesis this pair is pinned to. Every pair binding must name
@@ -216,6 +220,37 @@ mod tests {
     use super::*;
     use alloy_primitives::Address;
     use reth_prune_types::{PruneMode, ReceiptsLogPruneConfig};
+
+    const ROOT_GENESIS: &str =
+        "--unicity.root-genesis-id=0x0101010101010101010101010101010101010101010101010101010101010101";
+
+    fn node_command(extra: &[&str]) -> Result<(), clap::Error> {
+        let mut args = vec![
+            "unicity-reth",
+            "node",
+            "--unicity.fee-collector=0x000000000000000000000000000000000000dead",
+            ROOT_GENESIS,
+        ];
+        args.extend_from_slice(extra);
+        Cli::<EthereumChainSpecParser, UnicityArgs>::try_parse_from(args).map(|_| ())
+    }
+
+    /// The whole node command, not `UnicityArgs` alone: the pins must be satisfiable next to reth's
+    /// own flags.
+    #[test]
+    fn full_node_command_accepts_the_unicity_network_id() {
+        node_command(&["--unicity.network-id=3"]).expect("the pinned network id is accepted");
+        // reth's own P2P override is a different flag and does not satisfy the pin
+        node_command(&["--network-id=3"])
+            .expect_err("reth's --network-id is not the root network id");
+        // both together are two independent values
+        node_command(&["--unicity.network-id=3", "--network-id=7"])
+            .expect("the P2P override is independent of the pin");
+        // the pin is required
+        let err = node_command(&[]).expect_err("no network id");
+        assert_eq!(err.kind(), clap::error::ErrorKind::MissingRequiredArgument);
+        assert!(err.to_string().contains("--unicity.network-id"), "{err}");
+    }
 
     #[test]
     fn companion_retention_covers_accounting_repair() {
