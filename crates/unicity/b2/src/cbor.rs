@@ -124,7 +124,10 @@ impl<'a> Item<'a> {
         Ok(out)
     }
     pub(crate) fn tagged<const N: usize>(self, tag: u64, version: u64) -> Result<[Self; N]> {
-        if self.major != 6 || self.arg != tag {
+        if self.major != 6 {
+            return Err(Error::Shape);
+        }
+        if self.arg != tag {
             return Err(Error::Tag);
         }
         let a = item(self.data)?.array::<N>()?;

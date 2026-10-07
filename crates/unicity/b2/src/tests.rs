@@ -172,7 +172,7 @@ impl Fixture {
         request(op, &self.cfg, &self.history)
     }
 }
-fn request(op: u64, cfg: &[u8], payload: &[u8]) -> Vec<u8> {
+pub(crate) fn request(op: u64, cfg: &[u8], payload: &[u8]) -> Vec<u8> {
     fn enc(b: &[u8]) -> Vec<u8> {
         let mut out = abi::word(b.len() as u64).to_vec();
         out.extend_from_slice(b);
@@ -565,7 +565,7 @@ negative!(mint_multiple_assets, 0, MintData, |f| {
     let entry = a(&[&field(&f.cfg, 10), &b(&[7])]);
     f.mutate_data(&[1], &a(&[&entry, &entry]));
 });
-negative!(mint_burn_recipient, 0, Predicate, |f| {
+negative!(mint_burn_recipient, 0, MintShape, |f| {
     let p = tag(39032, &a(&[&u(1), &b(&[2]), &b(&[0; 32])]));
     f.mutate_tx(&[0, 0, 2], &p);
 });
@@ -789,7 +789,7 @@ fn scanner_schema_guard_errors() {
     assert_eq!(it(&[0x81, 0]).count(0), Err(E::TooManyTx));
     assert_eq!(it(&[0]).array::<0>().unwrap_err(), E::Shape);
     assert_eq!(it(&[0x80]).array::<1>().unwrap_err(), E::Shape);
-    assert_eq!(it(&[0]).tagged::<1>(39032, 1).unwrap_err(), E::Tag);
+    assert_eq!(it(&[0]).tagged::<1>(39032, 1).unwrap_err(), E::Shape);
     let tagged = tag(39032, &a(&[&u(1)]));
     assert_eq!(it(&tagged).tagged::<1>(39033, 1).unwrap_err(), E::Tag);
     assert_eq!(it(&tagged).tagged::<1>(39032, 2).unwrap_err(), E::Version);
@@ -805,4 +805,51 @@ fn base_gas_precedes_framing() {
     let base = 26000 + 20 * malformed.len() as u64;
     assert_eq!(run(&malformed, base - 1), Err(E::OutOfGas));
     assert_ne!(run(&malformed, base), Err(E::OutOfGas));
+}
+
+#[test]
+fn sdk_network_range_with_reconstructed_signed_mint() {
+    for network in [0, 1, 65535, 65536] {
+        let mut f = Fixture::new(0, None, 100);
+        f.cfg = edit(&f.cfg, &[1], &u(network));
+        let domain =
+            format!("{network}:{}:{}:1337:{}", "11".repeat(32), "22".repeat(32), "00".repeat(20));
+        let ty = hash(format!("unicity-bridge:unicity-native:{domain}").as_bytes());
+        let aid = hash(format!("unicity-bridge-coin:unicity-native:{domain}").as_bytes());
+        f.cfg = edit(&f.cfg, &[9], &b(&ty));
+        f.cfg = edit(&f.cfg, &[10], &b(&aid));
+        let salt = ha(&[&b(b"UNICITY_BR_SALT"), &b(&hash(&f.cfg)), &u(1)]);
+        f.id = ha(&[&b(&salt), &u(network)]);
+        let mint = field(&field(&f.history, 0), 0);
+        let j = edit(blob(&field(&mint, 5)), &[5, 1], &b(&hash(&f.cfg)));
+        let data = edit(blob(&field(&mint, 6)), &[1, 0, 0], &b(&aid));
+        for (index, value) in
+            [(1, u(network)), (3, b(&salt)), (4, b(&ty)), (5, b(&j)), (6, b(&data))]
+        {
+            f.history = edit(&f.history, &[0, 0, index], &value);
+        }
+        f.resign();
+        if (1..=65535).contains(&network) {
+            assert_eq!(run(&f.request(1), u64::MAX).unwrap().invalid, None);
+            let payload = a(&[&u(1), &b(&[7]), &f.p0]);
+            assert_eq!(run(&request(0, &f.cfg, &payload), u64::MAX).unwrap().invalid, None);
+        } else {
+            rejection(&f, 1, E::IntRange);
+            let payload = a(&[&u(1), &b(&[7]), &f.p0]);
+            assert_eq!(run(&request(0, &f.cfg, &payload), u64::MAX), Err(E::IntRange));
+        }
+    }
+    // The mint wire range is checked independently of Cfg's range.
+    for network in [0, 65536] {
+        let mut f = Fixture::new(0, None, 100);
+        f.mutate_tx(&[0, 0, 1], &u(network));
+        rejection(&f, 1, E::IntRange);
+    }
+}
+
+#[test]
+fn scanner_count_precheck_preserves_exact_diagnostic() {
+    let mut input = vec![0x99, 0x80, 0x01]; // 32769 elements, only 32768 bytes
+    input.resize(3 + 32768, 0);
+    assert_eq!(cbor::one(&input, &mut 0).unwrap_err(), E::Truncated);
 }

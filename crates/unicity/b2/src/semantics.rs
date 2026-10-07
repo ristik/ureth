@@ -20,7 +20,7 @@ impl<'a> Cfg<'a> {
         if a[0].blob(32)? != b"UNICITY_BR_CFG" {
             return Err(E::CfgMismatch);
         }
-        let network = a[1].uint(65535)?;
+        let network = network(a[1])?;
         a[2].bytes(32)?;
         let chain = a[3].uint(u64::MAX)?;
         a[4].bytes(32)?;
@@ -59,6 +59,14 @@ impl<'a> Cfg<'a> {
         Ok(Self { raw: it.raw, network, chain, vault, ty, aid })
     }
 }
+// Both SDK 3.0.1 NetworkId codecs require the inclusive range 1..=65535.
+fn network(it: Item<'_>) -> Result<u64> {
+    let n = it.uint(65535)?;
+    if n == 0 {
+        return Err(E::IntRange);
+    }
+    Ok(n)
+}
 fn amount(it: Item<'_>) -> Result<&[u8]> {
     let b = it.blob(crate::MAX_HISTORY)?;
     if b.is_empty() || b.len() > 32 || b[0] == 0 {
@@ -77,9 +85,11 @@ fn deadline(it: Item<'_>) -> Result<Option<u64>> {
     Ok(Some(e))
 }
 fn predicate(it: Item<'_>) -> Result<(u8, &[u8])> {
-    let a = it.tagged::<3>(39032, 1)?;
-    let code = a[1].blob(1)?;
-    let params = a[2].blob(33)?;
+    let a = it.tagged::<3>(39032, 1).map_err(|e| if e == E::Version { E::Predicate } else { e })?;
+    // Code and key lengths describe the supported predicate relation, not a
+    // proof budget. The complete outer CBOR was already bounded and scanned.
+    let code = a[1].blob(crate::MAX_HISTORY)?;
+    let params = a[2].blob(crate::MAX_HISTORY)?;
     match code {
         [1] if params.len() == 33 && matches!(params[0], 2 | 3) => Ok((1, params)),
         [2] if params.len() == 32 => Ok((2, params)),
@@ -376,8 +386,10 @@ pub(crate) fn evaluate(
         return Err(E::NoTransfers);
     }
     let m = g[0].tagged::<8>(39041, 2)?;
-    let network = m[1].uint(65535)?;
-    predicate(m[2])?;
+    let network = network(m[1])?;
+    if predicate(m[2])?.0 != 1 {
+        return Err(E::MintShape);
+    }
     m[3].bytes(32)?;
     m[4].bytes(32)?;
     let j = m[5].blob(65536).map_err(|e| {
@@ -396,13 +408,17 @@ pub(crate) fn evaluate(
     let n = justification(&cfg, j, tokens)?;
     let amt = mint_data(&cfg, d, tokens)?;
     let mut transfers = Vec::with_capacity(count as usize);
-    for tuple in h[1].children() {
+    for (i, tuple) in h[1].children().enumerate() {
         let a = tuple.array::<3>()?;
         let tx = transfer(a[0])?;
         let cert = cd(a[1])?;
         let t = a[2].uint(u64::MAX)?;
-        if let Some(data) = tx.data {
-            cbor::one(data, tokens)?;
+        // Intermediate data is opaque and any non-null value fails the relation.
+        // Only the terminal return reason is embedded CBOR.
+        if i + 1 == count as usize &&
+            let Some(data) = tx.data
+        {
+            cbor::one(data, tokens).map_err(|e| preserve_budget(e, E::ReturnData))?;
         }
         transfers.push((tx, cert, t));
     }

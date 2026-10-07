@@ -1,13 +1,16 @@
 {
   "repository": "ristik/native-bridge-plugins",
-  "revision": "efd9d150bf02945df2c9ba751617c86a4625deb4",
+  "revision": "db9617ff10dd9f3699649fee644519d9e50d3091",
   "sha256": {
     "interop.md": "01d5f099d95cc3d69da76685cd5ff59ad912b559624e5592066f655f9d9d0535",
     "abi.json": "73714a4a6e143049e96c01997436b9316707f4fe45e43f536d82cf2dc5d6a654",
-    "profile-v2.json": "3469355726e089e5dfd0bcf329c51d7df02e82c60cca50e686cb30514c4579f9",
+    "profile-v2.json": "9d5c794afb4eaeb83866cef6397efbe7bb556c9c99c8d6dec09090014da38edc",
     "manifest.schema.json": "6f2f36986e8fb649e4da27170c82c56187a3c1cede2232f8345fdb6d35bcdb63",
-    "sdk-trust-base.md": "fda636309d3930fd534531d50ef414b62b49920a47ac703a2817e07febc4182c"
+    "sdk-trust-base.md": "4240485c09d0d5c2e86e3e5d88e79b08314d37a309229cf8970d5a21f3fc8b2e",
+    "kernel-expectations.json": "89455462e0338e8de4291b3e470a11435dd6f9bd38b32f6aed2688fe91db9a75"
   },
-  "corpusRevision": null,
-  "corpusManifestSha256": null
+  "corpusRevision": "db9617ff10dd9f3699649fee644519d9e50d3091",
+  "corpusManifestSha256": "d20ed939b97297c05156bcdeee686f2ba70b38c3fa99fd933ed2e26df13b483d",
+  "oracleRevision": "89d63455ba3db2a3ba2b04dfe033354669f65650",
+  "upstreamStatus": "sealed-candidate-unmerged"
 }

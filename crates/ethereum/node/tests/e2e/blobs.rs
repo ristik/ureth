@@ -178,10 +178,11 @@ async fn blob_conversion_at_osaka() -> eyre::Result<()> {
     let first = wallets.pop().unwrap();
     let second = wallets.pop().unwrap();
 
-    // build a dummy payload at `current_timestamp`
+    // Keep the initial tip outside the conversion window. Conversion begins
+    // only after the last Prague payload is committed below.
     let raw_tx = TransactionTestContext::transfer_tx_bytes(1, wallets.pop().unwrap()).await;
     node.rpc.inject_tx(raw_tx).await?;
-    node.payload.timestamp = current_timestamp - 1;
+    node.payload.timestamp = current_timestamp - 13;
     node.advance_block().await?;
 
     // build blob txs
@@ -214,7 +215,7 @@ async fn blob_conversion_at_osaka() -> eyre::Result<()> {
     TransactionTestContext::validate_sidecar(envelope);
 
     // build last Prague payload
-    node.payload.timestamp = current_timestamp + 1;
+    node.payload.timestamp = current_timestamp - 1;
     let prague_payload = node.new_payload().await?;
     assert!(matches!(prague_payload.sidecars(), BlobSidecars::Eip4844(_)));
 
@@ -227,7 +228,22 @@ async fn blob_conversion_at_osaka() -> eyre::Result<()> {
     // validate sidecar
     TransactionTestContext::validate_sidecar(envelope);
 
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    // Enter the two-slot conversion window after checking both legacy sidecars.
+    node.update_forkchoice(genesis_hash, node.submit_payload(prague_payload).await?).await?;
+
+    // Conversion temporarily removes the transaction from the pool. Wait for
+    // reinsertion instead of assuming conversion finishes after a fixed sleep.
+    tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            if node.inner.pool.get(&blob_tx_hash).is_some() &&
+                node.inner.pool.get_blob(blob_tx_hash)?.is_some_and(|s| s.is_eip7594())
+            {
+                return Ok::<_, eyre::Report>(());
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await??;
 
     // fetch second blob tx from rpc again
     let envelope = node.rpc.envelope_by_hash(blob_tx_hash).await?;
@@ -235,9 +251,6 @@ async fn blob_conversion_at_osaka() -> eyre::Result<()> {
     assert!(envelope.as_eip4844().unwrap().tx().sidecar().unwrap().is_eip7594());
     // validate sidecar
     TransactionTestContext::validate_sidecar(envelope);
-
-    // submit the Prague payload
-    node.update_forkchoice(genesis_hash, node.submit_payload(prague_payload).await?).await?;
 
     // Build first Osaka payload
     node.payload.timestamp = osaka_timestamp - 1;

@@ -1,0 +1,120 @@
+{
+ "format": "native-bridge-vectors/2",
+ "nativeBridgeProtoVersion": 2,
+ "family": "vault",
+ "fixtureDigest": "36c06e33eeca46c13b2d9a55c43342f110adb2fbba097dbfabea822f2d0ca9d8",
+ "cases": [
+  {
+   "id": "derive-n1",
+   "family": "vault",
+   "op": "derive",
+   "description": "salt, token ID, lock record, cfg-bound digest, vault slots and RLP storage value for nonce n",
+   "cfg": "dev",
+   "input": "1",
+   "aux": {
+    "amount": "1000000007",
+    "firstPredicateHash": "4bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a"
+   },
+   "expected": {
+    "status": "ok",
+    "values": {
+     "cfg": "782d7008979287bb8093763fa53941c861ed8dbe93c4dd562ea3b5c27f73ddc9",
+     "lockDigest": "f25457efaa5d307064a7343c0fa5d32179da67f998b0f4eabf58c095a0d0a8ab",
+     "lockRecord": "86540000000000000000000000000000000000000000582015d1221607c1642d3d0951caa6dc63498312057e9566ca3f042c28a7d0e3c5c3582084668297231fe7407894c648db9c5255c937eb41393365674bb127c08efc3b3c443b9aca0758205937e0894d1c47acef7e1a3e17d85d8790e18d304cbc267721e48a37da0d113258204bf5122f344554c53bde2ebb8cd2b7e3d1600ad631c385a5d7cce23c7785459a",
+     "lockSlot": "1471eb6eb2c5e789fc3de43f8ce62938c7d1836ec861730447e2ada8fd81017b",
+     "lockTrieKey": "5ab3c568e6b9e23c87101e15642000038e2a634c0eba9355f868407d119483c2",
+     "mintSourceHash": "af9daff345ed023f39165dfc64ab8428784bd7ef17917190105824fc9091b62d",
+     "salt": "df693e4c059cfda481e1d39586f8cb1d54fad0aeb81b97fdb3d7d2785d205308",
+     "spentSlot": "3e5fec24aa4dc4e5aee2e025e51e1392c72a2500577559fae9665c6d52bd6a31",
+     "spentTrieKey": "80497882cf9008f7f796a89e5514a7b55bd96eab88ecb66aee4fb0a6fd34811c",
+     "storageValueRLP": "a0f25457efaa5d307064a7343c0fa5d32179da67f998b0f4eabf58c095a0d0a8ab",
+     "tokenId": "5937e0894d1c47acef7e1a3e17d85d8790e18d304cbc267721e48a37da0d1132"
+    }
+   }
+  },
+  {
+   "id": "derive-n2",
+   "family": "vault",
+   "op": "derive",
+   "description": "salt, token ID, lock record, cfg-bound digest, vault slots and RLP storage value for nonce n",
+   "cfg": "dev",
+   "input": "2",
+   "aux": {
+    "amount": "1000000007",
+    "firstPredicateHash": "dbc1b4c900ffe48d575b5da5c638040125f65db0fe3e24494b76ea986457d986"
+   },
+   "expected": {
+    "status": "ok",
+    "values": {
+     "cfg": "782d7008979287bb8093763fa53941c861ed8dbe93c4dd562ea3b5c27f73ddc9",
+     "lockDigest": "ae19dbf188d298fc964a36414409cc006af9d59a9c9a16b6c9b71013176cd2a9",
+     "lockRecord": "86540000000000000000000000000000000000000000582015d1221607c1642d3d0951caa6dc63498312057e9566ca3f042c28a7d0e3c5c3582084668297231fe7407894c648db9c5255c937eb41393365674bb127c08efc3b3c443b9aca0758209b14d1bc3c215a03b206432627d1d50f17e701e560d9a78db1f1fbc145b0d08d5820dbc1b4c900ffe48d575b5da5c638040125f65db0fe3e24494b76ea986457d986",
+     "lockSlot": "89832631fb3c3307a103ba2c84ab569c64d6182a18893dcd163f0f1c2090733a",
+     "lockTrieKey": "ce69ad09c79cd38934b567412ffa82bf024fcb938a8b7ec112fb038de5047bb2",
+     "mintSourceHash": "4dec19c3896785005348e68c51fb017ee41ad833ed5243956ff0bc30e2e49198",
+     "salt": "053a40f4cddc984e6be4459691b40d90029c8a92a954a73c1cd66272b364d185",
+     "spentSlot": "8819ef417987f8ae7a81f42cdfb18815282fe989326fbff903d13cf0e03ace29",
+     "spentTrieKey": "f6c9906f00400cd8011256368849abf5d045cb493cf4841c92ea0271eae73bbd",
+     "storageValueRLP": "a0ae19dbf188d298fc964a36414409cc006af9d59a9c9a16b6c9b71013176cd2a9",
+     "tokenId": "9b14d1bc3c215a03b206432627d1d50f17e701e560d9a78db1f1fbc145b0d08d"
+    }
+   }
+  },
+  {
+   "id": "derive-n18446744073709551615",
+   "family": "vault",
+   "op": "derive",
+   "description": "salt, token ID, lock record, cfg-bound digest, vault slots and RLP storage value for nonce n",
+   "cfg": "dev",
+   "input": "18446744073709551615",
+   "aux": {
+    "amount": "1000000007",
+    "firstPredicateHash": "a8100ae6aa1940d0b663bb31cd466142ebbdbd5187131b92d93818987832eb89"
+   },
+   "expected": {
+    "status": "ok",
+    "values": {
+     "cfg": "782d7008979287bb8093763fa53941c861ed8dbe93c4dd562ea3b5c27f73ddc9",
+     "lockDigest": "e5940bb5716cdfe4227d79b26b033007e3a33c731ddef8002d7068f700aab643",
+     "lockRecord": "86540000000000000000000000000000000000000000582015d1221607c1642d3d0951caa6dc63498312057e9566ca3f042c28a7d0e3c5c3582084668297231fe7407894c648db9c5255c937eb41393365674bb127c08efc3b3c443b9aca075820a6a81974aa796e9d507fc16ccdd84baa2326de7aa108e4ed82506bc6087e38515820a8100ae6aa1940d0b663bb31cd466142ebbdbd5187131b92d93818987832eb89",
+     "lockSlot": "97ba3f94e0b4268a28943babfabc3d98811b91fc991d11cce8a5e0715673fb94",
+     "lockTrieKey": "5a6fc03cf90ca631a9d2ff53989864bad799bd3d144fff1b2cc6860b41945c13",
+     "mintSourceHash": "32d1d55cdb322df9ed003a4b4f376cdd3ff224fd75531e1d698b748236684ecf",
+     "salt": "dc367bef38c82e31b1beae610816bd54044ceb6d932c342ea2140d9e04fb85cc",
+     "spentSlot": "4b96434b50f9a46920ece35d8f463c8d9b41861714de36a328f511e47bf14ec7",
+     "spentTrieKey": "a4a460582963bbb890f6d97a5139fa7a0fbf39b79e92caac37baa1af22088346",
+     "storageValueRLP": "a0e5940bb5716cdfe4227d79b26b033007e3a33c731ddef8002d7068f700aab643",
+     "tokenId": "a6a81974aa796e9d507fc16ccdd84baa2326de7aa108e4ed82506bc6087e3851"
+    }
+   }
+  },
+  {
+   "id": "derive-n47",
+   "family": "vault",
+   "op": "derive",
+   "description": "salt, token ID, lock record, cfg-bound digest, vault slots and RLP storage value for nonce n",
+   "cfg": "dev",
+   "input": "47",
+   "aux": {
+    "amount": "1000000007",
+    "firstPredicateHash": "8a5edab282632443219e051e4ade2d1d5bbc671c781051bf1437897cbdfea0f1"
+   },
+   "expected": {
+    "status": "ok",
+    "values": {
+     "cfg": "782d7008979287bb8093763fa53941c861ed8dbe93c4dd562ea3b5c27f73ddc9",
+     "lockDigest": "00d9617c49ce16c2a08e60eb1d5276bdb0566a2acfee38028b091acbb7ec7e14",
+     "lockRecord": "86540000000000000000000000000000000000000000582015d1221607c1642d3d0951caa6dc63498312057e9566ca3f042c28a7d0e3c5c3582084668297231fe7407894c648db9c5255c937eb41393365674bb127c08efc3b3c443b9aca0758205e623d720f237be3f5802f7bd23cf8c5ff197f6d865d2505b04c8bdaa774807858208a5edab282632443219e051e4ade2d1d5bbc671c781051bf1437897cbdfea0f1",
+     "lockSlot": "37ddd4560c83ab741802f29a9f0f3a51fcf0dbfd15f8c9ef42cab43805af040f",
+     "lockTrieKey": "da083ae575ef62fc6fa50ba9b65a32ca224c0c091518ccd5c784dfea74a49238",
+     "mintSourceHash": "7644d9fb76fad885de8999cbbe56019e30e7d69667b68a8b1993836c2cd97d8f",
+     "salt": "4a06fb8d479d9230f74d57fbbc232306ceab3bb64024746a9b812171050aef43",
+     "spentSlot": "c429ba1b260fa9450519a58de59300634864de344dcd9be2b2dea86ef75e4f29",
+     "spentTrieKey": "60fe0fc2f33377db23c660cd66acc85a3bd378f9f4f44ce5a778f7f73c4527e1",
+     "storageValueRLP": "9fd9617c49ce16c2a08e60eb1d5276bdb0566a2acfee38028b091acbb7ec7e14",
+     "tokenId": "5e623d720f237be3f5802f7bd23cf8c5ff197f6d865d2505b04c8bdaa7748078"
+    }
+   }
+  }
+ ]
+}

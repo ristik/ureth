@@ -10,8 +10,8 @@ mod semantics;
 
 use sha2::{Digest, Sha256};
 
-/// Protocol bytes pinned before the shared corpus is released.
-pub const PROTOCOL_REVISION: &str = "efd9d150bf02945df2c9ba751617c86a4625deb4";
+/// Exact protocol snapshot with sealed candidate corpus; upstream merge is pending.
+pub const PROTOCOL_REVISION: &str = "db9617ff10dd9f3699649fee644519d9e50d3091";
 /// This address remains inactive in all production node factories.
 pub const ADDRESS: alloy_primitives::Address =
     alloy_primitives::address!("0000000000000000000000000000000000000104");
@@ -210,3 +210,6 @@ fn hash(data: &[u8]) -> [u8; 32] {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod corpus_tests;

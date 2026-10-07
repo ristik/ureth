@@ -42,13 +42,16 @@ successful parsing establish integrity, not authority. Locations are optional
 installation metadata; receipt receives the installed input and never fetches.
 
 Exact synthetic fixture: [sdk-root-trust-base.json](vectors/config/sdk-root-trust-base.json),
-358 UTF-8 bytes, SHA-256
-`e503a064a16d43c5ad3d53bb8b859667781a349f26e7d4ca03446652741d3c08`.
-It is SDK-emitted JSON, network 1/epoch 7/start 100, one unit-stake generator-key
-validator, count threshold 1. It is test data, not an authenticated deployment.
+524 UTF-8 bytes, SHA-256
+`e5454ae4fe566b05dab8c1b15c88a05356b8816b1cd66a2b7adcce184af27fb5`.
+It is SDK-emitted JSON, network 3/epoch 1/start 0, the oracle's one unit-stake
+validator (seed `root-1`), count threshold 1. It is test data, not an authenticated deployment.
 [Provenance](vectors/config/sdk-root-trust-base.provenance.json) records the SDK
 pin, method and digest; `node tools/sdk_trust_fixture.mjs` reproduces/checks it.
-The full single corpus remains unreleased until the PR2 candidate is imported.
+The corpus also carries the other trust documents its cases install (unit-weight
+committees of 3, 4 and 7 for the count-quorum boundaries, and mismatch/unsupported
+bases); `node tools/sdk_trust_fixture.mjs --corpus protocol/vectors` requires each to be
+byte-identical to the SDK 3.0.1 emission, and the pinned one to equal this fixture.
 
 ## Existing SDK verification and transport
 

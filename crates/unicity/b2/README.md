@@ -5,12 +5,31 @@ address `0x0104`. No production crate imports it and no node factory registers i
 `0x0103` remains reserved. This does not enable bridging or change B1.
 
 The byte contract is native-bridge-plugins PR1 revision
-`efd9d150bf02945df2c9ba751617c86a4625deb4`; exact source artifacts and their digests
-are under `protocol/`. The new protocol corpus is pending upstream. Its release
-commit and manifest digest must be pinned and replayed before merging a released
-consumer or activating the address. Local signed constructors are tests, not a
-second golden corpus. The SDK-extension pure core was not published when this
-kernel was implemented, so this crate implements the narrow relation itself.
+`db9617ff10dd9f3699649fee644519d9e50d3091`; exact source artifacts and their digests
+are under `protocol/`. The sealed candidate corpus has manifest digest
+`d20ed939b97297c05156bcdeee686f2ba70b38c3fa99fd933ed2e26df13b483d` and Go oracle
+revision `89d63455ba3db2a3ba2b04dfe033354669f65650`. All 278 sealed cases replay
+against that oracle. The ordinary Rust test suite enforces all 106 B2 kernel calls
+with exact ABI output or exact halt diagnostics, plus corpus/artifact integrity.
+The remaining operations concern SDK codecs, policy, offline backing, composition
+and vault behavior outside this pure kernel. Local signed constructors are tests,
+not a second golden corpus. `kernel-expectations.json` is derived by executing the
+pinned Go Kernel on the sealed inputs, after verifying all original expectations;
+this also preserves the direct PrepareLock/ABI distinction for zero amounts.
+
+PR1 and bft-core #422 are **unmerged**. These are sealed candidate revision pins,
+not merged release pins. Release/activation remains gated on their merge and the
+corresponding pin update (`verify_protocol.py --require-release`). No merge or
+activation is claimed. The SDK-extension pure core remains a constants-only
+skeleton, so this crate implements the narrow relation itself.
+
+Both SDK 3.0.1 NetworkId codecs require `1..=65535`. Cfg and mint wire decoding
+therefore halt with `IntRange` for zero or values above 65535. The pinned upstream
+manifest schema and Go oracle still allow zero; the sealed corpus contains no
+zero-network case. This SDK intersection rule is an explicit stricter boundary,
+covered by fully reconstructed and re-signed mint regressions at 0, 1, 65535 and
+65536. The shared upstream profile/schema/oracle must adopt this range before
+release; the vendored upstream artifacts retain their exact pinned bytes.
 
 ## Boundary
 
@@ -77,9 +96,17 @@ export CARGO_TARGET_DIR=/private/tmp/cargo-ureth-nbp4
 cargo test -p reth-unicity-b2 --locked -j 4
 cargo clippy -p reth-unicity-b2 --all-targets --all-features --locked -j 4 -- -D warnings
 cargo +nightly-2026-08-12 fmt --all --check
-python3 crates/unicity/b2/tools/verify_protocol.py
+python3 crates/unicity/b2/tools/verify_protocol.py --require-corpus
 python3 crates/unicity/b2/tools/mutate_guards.py
 cargo test -p reth-unicity-b2 --release --locked -j 4 benchmark_native_kernel -- --ignored --nocapture
+```
+
+To independently replay all sealed cases and verify the generated Kernel
+expectations, use a clean bft-core checkout at `pin.json`'s `oracleRevision`:
+
+```sh
+cd /path/to/bft-core
+GOMAXPROCS=4 go run /path/to/ureth/crates/unicity/b2/tools/replay_oracle.go /path/to/ureth/crates/unicity/b2/protocol
 ```
 
 The timing experiment defaults to 1000 warmups/10000 samples per history size;
@@ -90,9 +117,10 @@ and distinguishes compiled test failures from build failures or zero-test runs;
 its report explicitly identifies redundant or cryptographically unreachable
 checks whose removal has no observable effect on those test inputs.
 
-Known guards whose removal has no observable effect (redundant by construction):
-`semantics.rs` zero-digest checks on SHA-256 outputs (cryptographically unreachable),
-the mint-recipient `typ != 1` check (a burn predicate's 32-byte params fail `key()` with
-the same `Predicate` error), the duplicate 64 KiB justification bound (already enforced
-by the caller's `blob(65536)`), and `cbor.rs` pre-loop `count > data.len()` (the loop fails
-`Truncated` identically without allocating).
+The zero-digest guards remain normative even though ordinary inputs cannot
+produce a zero SHA-256 digest. The mint-recipient type guard and duplicate
+justification size bound remain defensive. The scanner count precheck is
+observable: declaring 32769 elements with only 32768 zero bytes yields
+`Truncated`; removing that guard yields `TooManyItems`. A regression pins this
+exact diagnostic. Guard-removal survival on other inputs does not establish
+semantic equivalence.

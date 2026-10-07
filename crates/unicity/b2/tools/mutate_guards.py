@@ -16,7 +16,8 @@ SRC = ROOT / 'crates/unicity/b2/src'
 PATTERN = re.compile(r'if\s+([^{}]+?)\s*\{\s*return Err\(([^;]+)\);\s*\}')
 TESTS = {
     'semantics.rs': [
-        'cfg_domain', 'cfg_empty_shard', 'cfg_nonzero_vault', 'prepare_nonce_amount_and_signature_profile',
+        'cfg_domain', 'cfg_empty_shard', 'cfg_nonzero_vault', 'sdk_network_range_with_reconstructed_signed_mint',
+        'prepare_nonce_amount_and_signature_profile',
         'mint_deadline_zero', 'prepare_nonce_amount_and_signature_profile', 'mint_burn_recipient',
         'signed_sdk3_histories_and_exact_abi', 'lock_proof_empty_pdr', 'embedded_proof_size_boundaries',
         'justification_chain', 'justification_nonce_zero', 'lock_proof_wrong_version', 'lock_proof_wrong_cfg',
@@ -25,12 +26,14 @@ TESTS = {
         'mint_cd_hash', 'mint_cd_deadline', 'deadlines_are_original_times_and_strict',
         'repeated_sid_is_exact_error', 'return_signature_owner', 'return_chain', 'return_whole_amount',
         'return_zero_recipient', 'return_reason_hash', 'operation_cardinality', 'operation_cardinality',
-        'mint_network', 'mint_type', 'mint_salt', 'signed_sdk3_histories_and_exact_abi',
+        'mint_burn_recipient', 'mint_network', 'mint_type', 'mint_salt', 'signed_sdk3_histories_and_exact_abi',
         'burn_not_terminal', 'intermediate_data',
     ],
     'lib.rs': ['abi_offsets_padding_aliases_trailing_and_high_bits', 'base_gas_precedes_framing',
                'signed_sdk3_histories_and_exact_abi'],
-    'cbor.rs': ['canonical_scanner_limits_and_errors'] * 6 + ['scanner_schema_guard_errors'] * 11,
+    'cbor.rs': ['canonical_scanner_limits_and_errors'] * 4 +
+               ['scanner_count_precheck_preserves_exact_diagnostic', 'canonical_scanner_limits_and_errors'] +
+               ['scanner_schema_guard_errors'] * 12,
     'abi.rs': ['abi_offsets_padding_aliases_trailing_and_high_bits'] * 2 + ['scanner_schema_guard_errors',
                'operation_cardinality'] + ['abi_offsets_padding_aliases_trailing_and_high_bits'] * 4,
 }

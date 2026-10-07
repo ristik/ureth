@@ -54,6 +54,8 @@ jobs:
         uses: arduino/setup-protoc@c65c819552d16ad3c9b72d9dfd5ba5237b9c906b # v3.0.0
         with:
           repo-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Verify B2 sealed protocol corpus
+        run: python3 crates/unicity/b2/tools/verify_protocol.py --require-corpus
       - name: Run tests
         run: |
           cargo nextest run \

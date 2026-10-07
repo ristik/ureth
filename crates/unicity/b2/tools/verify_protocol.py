@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify exact PR1 protocol snapshot; a release additionally requires corpus pins."""
+"""Verify exact protocol bytes, sealed corpus and derived Go Kernel expectations."""
 import hashlib
 import json
 from pathlib import Path
@@ -8,10 +8,40 @@ import sys
 root = Path(__file__).resolve().parents[1] / 'protocol'
 pin = json.loads((root / 'pin.json').read_text())
 assert pin['repository'] == 'ristik/native-bridge-plugins'
-assert pin['revision'] == 'efd9d150bf02945df2c9ba751617c86a4625deb4'
+assert pin['revision'] == 'db9617ff10dd9f3699649fee644519d9e50d3091'
+assert pin['corpusRevision'] == pin['revision']
+assert pin['oracleRevision'] == '89d63455ba3db2a3ba2b04dfe033354669f65650'
 for name, expected in pin['sha256'].items():
     actual = hashlib.sha256((root / name).read_bytes()).hexdigest()
     assert actual == expected, (name, actual, expected)
-if '--require-corpus' in sys.argv:
-    assert pin['corpusRevision'] and pin['corpusManifestSha256'], 'Upstream corpus not released/pinned'
-print('Exact PR1 protocol snapshot verified; corpus release pin: ' + ('present' if pin['corpusRevision'] else 'pending'))
+vectors = root / 'vectors'
+manifest = (vectors / 'SHA256SUMS').read_bytes()
+assert hashlib.sha256(manifest).hexdigest() == pin['corpusManifestSha256']
+assert (vectors / 'MANIFEST.sha256').read_text().strip() == pin['corpusManifestSha256']
+tracked = set()
+for line in manifest.decode().splitlines():
+    expected, name = line.split('  ')
+    assert name not in tracked and '..' not in Path(name).parts
+    tracked.add(name)
+    actual = hashlib.sha256((vectors / name).read_bytes()).hexdigest()
+    assert actual == expected, (name, actual, expected)
+provenance = json.loads((vectors / 'provenance.json').read_text())
+assert provenance['generator']['commit'] == pin['oracleRevision']
+ids = set()
+kernel_ids = set()
+for file in sorted(vectors.glob('*/cases.json')):
+    assert file.relative_to(vectors).as_posix() in tracked
+    cases = json.loads(file.read_text())
+    assert cases['fixtureDigest'] == hashlib.sha256((vectors / 'config/fixtures.json').read_bytes()).hexdigest()
+    for case in cases['cases']:
+        assert case['id'] not in ids, case['id']
+        ids.add(case['id'])
+        if case['op'] in {'kernel', 'prepareLock', 'mint', 'return'}:
+            kernel_ids.add(case['id'])
+expected = json.loads((root / 'kernel-expectations.json').read_text())
+assert len(ids) == 278
+assert len(expected) == len(kernel_ids) == 106
+assert {case['id'] for case in expected} == kernel_ids
+if '--require-release' in sys.argv:
+    assert pin['upstreamStatus'] == 'merged-release', 'Sealed candidate is pinned, but upstream PR1/#422 are not merged'
+print('Verified exact protocol snapshot, 278 sealed cases and 106 Go Kernel expectations; upstream status: ' + pin['upstreamStatus'])
