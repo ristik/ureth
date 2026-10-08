@@ -74,6 +74,7 @@ pub fn b1_context() -> B1Context {
         execution_chain_id: w.execution_chain_id,
         profile_hash: w.profile_hash,
         w_cert: w.w_cert,
+        hook: Default::default(),
     }
 }
 
@@ -221,6 +222,60 @@ pub fn empty_import() -> Bytes {
     }
     .to_bytes()
     .into()
+}
+
+/// A valid import of `n` linked one-word records (kind 1), the registry's whole log after it, with
+/// anchors inside the world's genesis time. `n` of zero is [`empty_import`].
+pub fn import_of(n: u64) -> Bytes {
+    use alloy_sol_types::{sol, SolCall};
+    sol! {
+        function preimage(uint64 index, bytes32 predecessor, uint8 kind, uint64 progress, uint64 ucTime, bytes data) external;
+    }
+    let genesis = world().genesis_uc_time;
+    let mut entries: Vec<crate::records::RecordEntry> = Vec::new();
+    for i in 0..n {
+        let predecessor = entries.last().map_or(B256::ZERO, |e| e.record_id);
+        let data = B256::repeat_byte(i as u8 + 1).to_vec();
+        let call = preimageCall {
+            index: i,
+            predecessor,
+            kind: 1,
+            progress: 10 + i,
+            ucTime: genesis + 1 + i,
+            data: data.clone().into(),
+        };
+        entries.push(crate::records::RecordEntry {
+            index: i,
+            record_id: alloy_primitives::keccak256(&call.abi_encode()[4..]),
+            predecessor,
+            kind: 1,
+            progress: 10 + i,
+            uc_time: genesis + 1 + i,
+            data,
+            closed_epoch: 0,
+        });
+    }
+    RecordImport {
+        progress: 100,
+        uc_time: genesis + 1000,
+        target_count: n,
+        target_tip: entries.last().map_or(B256::ZERO, |e| e.record_id),
+        entries,
+    }
+    .to_bytes()
+    .into()
+}
+
+/// Like [`seal`], committing to `import` instead of the empty one.
+pub fn seal_with_import(
+    input: &mut RootInputV2,
+    parent_number: u64,
+    tail: Tail,
+    import: &[u8],
+) -> Bytes {
+    let bytes = seal(input, parent_number, tail);
+    input.root_records_hash = crate::sha256(import);
+    bytes
 }
 
 /// `SHA-256` of [`empty_import`]: the `rootRecordsHash` of a block that imports nothing.
@@ -396,3 +451,26 @@ pub fn rotate(input: &mut RootInputV2, assigned: Assignment) -> Assignment {
     )];
     Assignment { root_epoch: target, shard_epoch, conf }
 }
+
+/// A custody stand-in with the two entry points the hook uses: `recordCursor()` returns
+/// storage word 0 and `applyRootRecords(uint32 n)` runs `body` (word 0 is the cursor).
+pub fn custody_code(body: &[u8]) -> Bytes {
+    let mut c = vec![0x60, 0x00, 0x35, 0x60, 0xe0, 0x1c]; // selector
+    c.extend([0x80, 0x63, 0xca, 0x01, 0xc9, 0x83, 0x14, 0x61, 0x00, 0x20, 0x57]); // -> cursor at 0x20
+    c.extend([0x80, 0x63, 0x1d, 0x2a, 0x00, 0x37, 0x14, 0x61, 0x00, 0x2c, 0x57]); // -> apply at 0x2c
+    c.extend([0x60, 0x00, 0x80, 0xfd]); // unknown selector: revert
+    assert_eq!(c.len(), 0x20);
+    c.extend([0x5b, 0x60, 0x00, 0x54, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]); // cursor
+    assert_eq!(c.len(), 0x2c);
+    c.push(0x5b);
+    c.extend(body);
+    c.into()
+}
+
+/// cursor += n
+pub const ADVANCE: &[u8] = &[0x60, 0x04, 0x35, 0x60, 0x00, 0x54, 0x01, 0x60, 0x00, 0x55, 0x00];
+/// cursor += n + 1
+pub const OVERSHOOT: &[u8] =
+    &[0x60, 0x04, 0x35, 0x60, 0x01, 0x01, 0x60, 0x00, 0x54, 0x01, 0x60, 0x00, 0x55, 0x00];
+pub const NOTHING: &[u8] = &[0x00];
+pub const REVERT: &[u8] = &[0x60, 0x00, 0x80, 0xfd];

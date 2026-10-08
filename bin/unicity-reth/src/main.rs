@@ -64,6 +64,19 @@ struct UnicityArgs {
     #[arg(long = "unicity.w-cert", value_name = "ROUNDS")]
     w_cert: u64,
 
+    /// The custody contract the mandatory records hook applies imported root records to after
+    /// EIP-4788. Absent: the chain has no custody and no hook. It is part of the profile hash.
+    #[arg(long = "unicity.records-custody", value_name = "ADDRESS")]
+    records_custody: Option<Address>,
+
+    /// `H_records`: the most records one block's hook applies (1..=32 with a custody contract).
+    #[arg(long = "unicity.h-records", default_value_t = 0, value_name = "RECORDS")]
+    h_records: u32,
+
+    /// Gross gas the profile reserves for applying one record in the hook.
+    #[arg(long = "unicity.hook-record-gas", default_value_t = 0, value_name = "GAS")]
+    hook_record_gas: u64,
+
     /// Header gas limit (`g_max`), retained as the real EVM block gas limit.
     #[arg(long = "unicity.max-gas")]
     max_gas: u64,
@@ -126,7 +139,13 @@ impl UnicityArgs {
             execution_chain_id: self.chain_id,
             profile_hash: self.profile_hash,
             w_cert: self.w_cert,
+            hook: reth_unicity_execution::hook::RecordsHook {
+                custody: self.records_custody.unwrap_or(Address::ZERO),
+                h_records: self.h_records,
+                record_gas: self.hook_record_gas,
+            },
         };
+        context.hook.validate().map_err(|err| eyre::eyre!("invalid records hook: {err:?}"))?;
         let required = context
             .required_system_gas()
             .map_err(|err| eyre::eyre!("invalid --unicity B1 profile: {err:?}"))?;
@@ -302,6 +321,9 @@ mod tests {
             chain_id: 1337,
             profile_hash: B256::repeat_byte(2),
             w_cert: 1,
+            records_custody: None,
+            h_records: 0,
+            hook_record_gas: 0,
             max_gas: 50_000_000,
             system_gas: 43_000_000,
             base_fee_floor: 1_000_000,
@@ -324,6 +346,9 @@ mod tests {
             chain_id: 1337,
             profile_hash: B256::repeat_byte(2),
             w_cert: 1,
+            records_custody: None,
+            h_records: 0,
+            hook_record_gas: 0,
             max_gas: 50_000_000,
             system_gas: 43_000_000,
             base_fee_floor: 1_000_000,
@@ -420,6 +445,27 @@ mod tests {
         assert_eq!(args.b1(&exact).unwrap().w_cert, 1);
         let short = BlockProfile { system_gas: 53_137_467, max_gas: 60_137_468, ..profile };
         assert!(args.b1(&short).is_err());
+        // The records hook adds its gate reads and H records to the envelope.
+        // 53_137_468 + 150_000 + 2 * 1_000_000 = 55_287_468.
+        let hooked = UnicityArgs {
+            records_custody: Some(Address::repeat_byte(0xc5)),
+            h_records: 2,
+            hook_record_gas: 1_000_000,
+            ..args
+        };
+        let exact = BlockProfile { system_gas: 55_287_468, max_gas: 62_287_468, ..profile };
+        assert_eq!(hooked.b1(&exact).unwrap().hook.h_records, 2);
+        let short = BlockProfile { system_gas: 55_287_467, max_gas: 62_287_468, ..profile };
+        assert!(hooked.b1(&short).is_err());
+        // a hook is a custody with 1..=32 records and a price, or nothing at all
+        for bad in [
+            UnicityArgs { records_custody: None, ..hooked },
+            UnicityArgs { h_records: 0, ..hooked },
+            UnicityArgs { h_records: 33, ..hooked },
+            UnicityArgs { hook_record_gas: 0, ..hooked },
+        ] {
+            assert!(bad.b1(&exact).is_err());
+        }
         let unmeasured = UnicityArgs { w_cert: 16, ..args };
         assert!(unmeasured.b1(&profile).is_err());
     }

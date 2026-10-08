@@ -29,6 +29,7 @@ mod b1_tests;
 pub mod block;
 pub mod block_executor;
 pub mod evm_factory;
+pub mod hook;
 pub mod node_evm;
 pub mod pairing;
 pub mod records;
@@ -343,6 +344,8 @@ pub enum ExecutionError {
     B1Update(UpdateError),
     /// The parent registry's immutable B1 words differ from the pinned profile.
     B1ProfileMismatch(&'static str),
+    /// The records hook invalidated the block.
+    Hook(hook::HookError),
     /// Combined gross gas exceeded the configured cap.
     GasBudgetExceeded {
         /// Gross gas spent when the failure was detected.

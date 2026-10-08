@@ -21,7 +21,7 @@ use reth_unicity_execution::{
     },
     derive_beacon_root, derive_prev_randao, derive_timestamp,
     evm_factory::unicity_eth_config,
-    testing::{Tail, GENESIS_TAIL},
+    testing::{self, Tail, GENESIS_TAIL},
     update::{B1Context, B1Job},
     wire::bind_completed_parent,
     RootInputV2, SEAL_REGISTRY, SYSTEM_CALLER,
@@ -29,7 +29,7 @@ use reth_unicity_execution::{
 use revm::database::State;
 use std::sync::{Arc, Mutex};
 use support::{
-    b1::{ack_input, genesis_hash, input, profile, sealed},
+    b1::{ack_input, context, genesis_hash, input, profile, sealed},
     provider::FixtureProvider,
 };
 
@@ -833,4 +833,164 @@ fn import_rejects_a_blob_transaction_at_the_header_blob_gas_check() {
         !error.to_string().contains("blob transactions are unsupported"),
         "the executor rule must not be the one that fires on the import path, got: {error}"
     );
+}
+
+/// The hook-enabled bound block 1: `import` as its records, `hook` as the pinned records hook,
+/// over a provider that also holds the custody stand-in at `custody`.
+struct HookWorld {
+    provider: FixtureProvider,
+    parent: SealedHeader<alloy_consensus::Header>,
+    root: RootInputV2,
+    chain_spec: Arc<ChainSpec>,
+    import: Vec<u8>,
+    update: Bytes,
+}
+
+fn hook_world(import: &[u8], custody: Address) -> HookWorld {
+    let genesis: Genesis =
+        serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
+    let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
+    let parent = SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash());
+    let mut provider = FixtureProvider::signed_genesis();
+    provider.set_block_hash(0, genesis_hash());
+    provider.insert_contract(
+        custody,
+        testing::custody_code(testing::ADVANCE),
+        &[(U256::ZERO, U256::ZERO)],
+    );
+    let mut root = input(1, 1, genesis_hash());
+    let update = testing::seal_with_import(&mut root, 0, GENESIS_TAIL, import);
+    HookWorld { provider, parent, root, chain_spec, import: import.to_vec(), update }
+}
+
+impl HookWorld {
+    /// The block profile with a system reservation that covers the largest hook the tests pin, so
+    /// the hooked and unhooked blocks differ in nothing but the hook.
+    fn profile(&self) -> BlockProfile {
+        let base = profile();
+        let hook =
+            RecordsHook { custody: Address::repeat_byte(1), h_records: 3, record_gas: 1_000_000 };
+        let system_gas = base.system_gas + hook.envelope_gas().unwrap();
+        BlockProfile { system_gas, max_gas: base.max_gas + (system_gas - base.system_gas), ..base }
+    }
+
+    fn attributes(&self) -> NextBlockEnvAttributes {
+        NextBlockEnvAttributes {
+            gas_limit: self.profile().max_gas,
+            ..attributes(&self.root, self.parent.timestamp)
+        }
+    }
+
+    fn config(&self, hook: RecordsHook) -> UnicityEvmConfig {
+        let mut job = B1Job {
+            context: context(),
+            update: self.update.clone(),
+            records: self.import.clone().into(),
+        };
+        job.context.hook = hook;
+        let bound = Arc::new(
+            BoundExecutionInput::from_validated_genesis(
+                Arc::new(self.root.clone()),
+                job,
+                self.profile(),
+                &self.parent,
+                genesis_hash(),
+                FEE_COLLECTOR,
+            )
+            .unwrap(),
+        );
+        UnicityEvmConfig::new(unicity_eth_config(self.chain_spec.clone()), bound)
+    }
+
+    /// Builds the block and returns it with the state after it.
+    fn build(
+        &self,
+        hook: RecordsHook,
+    ) -> (reth_unicity_execution::block_executor::CompletedBuild, FixtureProvider) {
+        let config = self.config(hook);
+        let mut state =
+            State::builder().with_database(self.provider.clone()).with_bundle_update().build();
+        let built = build_complete(
+            &config,
+            &self.parent,
+            self.attributes(),
+            &mut state,
+            self.provider.clone(),
+            vec![],
+        )
+        .unwrap();
+        let mut after = self.provider.clone();
+        after.apply_bundle(&state.bundle_state);
+        (built, after)
+    }
+}
+
+use reth_unicity_execution::hook::RecordsHook;
+
+#[test]
+fn the_records_hook_runs_after_eip_4788_and_its_gas_joins_the_system_total_only() {
+    let custody = Address::repeat_byte(0xc5);
+    let world = hook_world(&testing::import_of(3), custody);
+    let off = RecordsHook::default();
+    let on = RecordsHook { custody, h_records: 2, record_gas: 1_000_000 };
+
+    let (plain, plain_state) = world.build(off);
+    let (hooked, hooked_state) = world.build(on);
+
+    // the hook applied exactly H = 2 of the 3 imported records, once
+    assert_eq!(plain_state.storage_of(custody)[&U256::ZERO], U256::ZERO);
+    assert_eq!(hooked_state.storage_of(custody)[&U256::ZERO], U256::from(2));
+    // the registry holds the same words with and without the hook: it runs after finalize, so
+    // the outcome commitment finalize wrote does not mention it
+    assert_eq!(plain_state.storage_of(SEAL_REGISTRY), hooked_state.storage_of(SEAL_REGISTRY));
+    // with no transactions the header's gas is the system total, and the hook's gross gas is the
+    // whole difference: a few reads and one call, well inside the reserved envelope
+    let (g_plain, g_hooked) =
+        (plain.outcome.execution_result.gas_used, hooked.outcome.execution_result.gas_used);
+    assert!(g_hooked > g_plain, "{g_hooked} vs {g_plain}");
+    assert!(g_hooked - g_plain < on.envelope_gas().unwrap(), "{}", g_hooked - g_plain);
+    // the hooked block replays to exactly itself
+    let replay = replay_complete(
+        &world.config(on),
+        world.provider.clone(),
+        &world.provider,
+        &hooked.outcome.block,
+    )
+    .unwrap();
+    assert_eq!(replay.output.result, hooked.outcome.execution_result);
+    // a node that pins no hook (or another H) computes another state root and refuses the block
+    for other in [off, RecordsHook { h_records: 3, ..on }] {
+        assert!(
+            replay_complete(
+                &world.config(other),
+                world.provider.clone(),
+                &world.provider,
+                &hooked.outcome.block
+            )
+            .is_err(),
+            "{other:?}"
+        );
+    }
+}
+
+#[test]
+fn a_hook_that_cannot_run_invalidates_the_block() {
+    let custody = Address::repeat_byte(0xc5);
+    let world = hook_world(&testing::import_of(3), custody);
+    let genesis_config = |hook| world.config(hook);
+    // no code at the pinned custody: the cursor read returns nothing
+    let missing = RecordsHook { custody: Address::repeat_byte(0xee), h_records: 1, record_gas: 1 };
+    let mut state =
+        State::builder().with_database(world.provider.clone()).with_bundle_update().build();
+    let err = build_complete(
+        &genesis_config(missing),
+        &world.parent,
+        world.attributes(),
+        &mut state,
+        world.provider.clone(),
+        vec![],
+    )
+    .err()
+    .expect("a hook against a missing custody invalidates the block");
+    assert!(err.to_string().contains("BadReturn") || err.to_string().contains("Hook"), "{err}");
 }

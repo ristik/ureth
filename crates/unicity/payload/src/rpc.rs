@@ -1532,6 +1532,7 @@ mod tests {
                 execution_chain_id: 1337,
                 profile_hash: B256::repeat_byte(2),
                 w_cert: 1,
+                hook: Default::default(),
             },
         };
         let reported = SealConfigV1::from(seal);

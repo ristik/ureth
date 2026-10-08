@@ -54,6 +54,8 @@ pub struct B1Context {
     pub profile_hash: B256,
     /// Certificate window `W_cert`.
     pub w_cert: u64,
+    /// The mandatory records hook the profile pins (no custody: no hook).
+    pub hook: crate::hook::RecordsHook,
 }
 
 impl B1Context {
@@ -74,14 +76,16 @@ impl B1Context {
     /// The least `g_sys` the pinned profile admits: the maximum admission charge, the rectangular
     /// gross history-write allowance and the measured-plus-margin `G_rest(K_max)` of the registry
     /// runtime, `155936 + 15626944*K + 1136500 + 1147500*K`, plus the root-record import envelope
-    /// (`records::IMPORT_ENVELOPE_GAS`). A smaller reservation is refused at
-    /// startup, never truncated at runtime.
+    /// (`records::IMPORT_ENVELOPE_GAS`) and the records hook's envelope. A smaller reservation is
+    /// refused at startup, never truncated at runtime.
     pub fn required_system_gas(&self) -> Result<u64, UpdateError> {
         let k = self.k_max()?;
+        let hook = self.hook.envelope_gas().map_err(|_| UpdateError::Overflow)?;
         Ok(155_936 +
             REST_GAS_BASE +
             (15_626_944 + REST_GAS_PER_ENTRY) * k +
-            crate::records::IMPORT_ENVELOPE_GAS)
+            crate::records::IMPORT_ENVELOPE_GAS +
+            hook)
     }
 
     /// Token cap `32 + 266*K_max`.
