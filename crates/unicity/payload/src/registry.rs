@@ -217,6 +217,13 @@ pub const DEFAULT_PARENT_ACCOUNTING_CAPACITY: usize = 16;
 struct ParentAccountingInner {
     tokens: VecDeque<ParentAccountingEntry>,
     capacity: usize,
+    /// The parent the node last admitted or last resolved for a build or an import: the canonical
+    /// head it is working on. It is never evicted, whatever tokens are published above it: a
+    /// node produces candidates above its head all the time (every build, certified or
+    /// not, and every imported proposal publishes the token of a block at head+1), and without
+    /// this the number order would evict the head itself once `capacity` of them sit above it,
+    /// and the head's copy restored from disk is not admitted.
+    protected: Option<B256>,
 }
 
 #[derive(Debug)]
@@ -305,7 +312,10 @@ fn unpin(inner: &Arc<Mutex<ParentAccountingInner>>, hash: &B256) {
 fn evict_lowest(inner: &mut ParentAccountingInner) -> bool {
     let mut lowest: Option<(usize, u64)> = None;
     for (index, entry) in inner.tokens.iter().enumerate() {
-        if entry.pins == 0 && lowest.is_none_or(|(_, number)| entry.number < number) {
+        if entry.pins == 0 &&
+            inner.protected != Some(entry.hash) &&
+            lowest.is_none_or(|(_, number)| entry.number < number)
+        {
             lowest = Some((index, entry.number));
         }
     }
@@ -374,6 +384,7 @@ impl UnicityParentAccountings {
             inner: Arc::new(Mutex::new(ParentAccountingInner {
                 tokens: VecDeque::new(),
                 capacity,
+                protected: None,
             })),
             durable: Arc::new(std::sync::OnceLock::new()),
             durability_required: false,
@@ -513,10 +524,13 @@ impl UnicityParentAccountings {
     /// Admits the cached token of `block_hash` for resolution. Only recovery admission calls this,
     /// after the retained binding was re-checked and the local Go side presented its own.
     pub(crate) fn admit(&self, block_hash: &B256) -> bool {
-        self.lock().tokens.iter_mut().find(|entry| entry.hash == *block_hash).is_some_and(|entry| {
-            entry.admitted = true;
-            true
-        })
+        let mut inner = self.lock();
+        let Some(entry) = inner.tokens.iter_mut().find(|entry| entry.hash == *block_hash) else {
+            return false;
+        };
+        entry.admitted = true;
+        inner.protected = Some(*block_hash);
+        true
     }
 
     /// Whether the cached token of `block_hash` is admitted.
@@ -610,12 +624,9 @@ impl ParentAccountingResolver for UnicityParentAccountings {
             .checked_next_base_fee(parent, profile)
             .map_err(|_| ParentAccountingUnavailable(parent.hash()))?;
         entry.pins += 1;
-        Ok(ParentAccountingLease {
-            hash: parent.hash(),
-            token: entry.token,
-            next_fee,
-            inner: self.inner.clone(),
-        })
+        let (token, hash) = (entry.token, parent.hash());
+        inner.protected = Some(hash);
+        Ok(ParentAccountingLease { hash, token, next_fee, inner: self.inner.clone() })
     }
 }
 

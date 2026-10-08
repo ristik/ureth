@@ -557,13 +557,20 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         chain_spec.chain().id(),
         chain_spec.genesis_hash(),
     );
-    assert!(reth_unicity_payload::ParentAccountingResolver::resolve(
-        &accounting,
-        &second_parent,
-        &chain_spec,
-        profile(),
-    )
-    .is_err());
+    // the parent last resolved is the node's current head: it is protected from eviction even when
+    // no lease holds it, and everything else stays bounded by the capacity (one protected entry
+    // beyond it)
+    assert!(
+        reth_unicity_payload::ParentAccountingResolver::resolve(
+            &accounting,
+            &second_parent,
+            &chain_spec,
+            profile(),
+        )
+        .is_ok(),
+        "the last resolved parent is protected"
+    );
+    assert!(accounting.len() <= 2, "capacity 1 plus the protected parent");
     accounting.insert_for_chain(
         second_parent.hash(),
         replay.parent,
@@ -4669,4 +4676,47 @@ async fn parent_accounting_is_evicted_lowest_block_number_first() {
     assert!(tokens.get(&hash(1)).is_some(), "the held entry stays");
     assert!(tokens.get(&hash(2)).is_none(), "the lowest unpinned entry goes");
     drop(lease);
+}
+
+/// rev2's probe of ureth#65: a running node publishes the token of a block above its head all the
+/// time (every build, certified or not, and every imported proposal), so a head that is resolved
+/// before each of them must survive more than `capacity` of them. The number order alone
+/// evicted the whole window and then the head; the parent last resolved or admitted is protected
+/// explicitly.
+#[tokio::test]
+async fn failed_rounds_above_the_head_keep_the_head() {
+    let mut schedule = vec![(1, 1, true)];
+    schedule.extend((2..=20).map(|round| (round, 1, false)));
+    let history = capture_route_history(&schedule).await;
+    let chain_id = history.chain_spec.chain().id();
+    let genesis = history.chain_spec.genesis_hash();
+    let tokens = UnicityParentAccountings::default();
+    let publish = |i: usize| {
+        let block = history.blocks[i].payload.block();
+        tokens
+            .publish(
+                block.hash(),
+                block.header().number,
+                chain_id,
+                genesis,
+                history.blocks[i].completed,
+            )
+            .unwrap();
+    };
+    publish(0);
+    publish(1);
+    let head = history.blocks[1].payload.block().clone().into_sealed_header();
+    // every later block stands in for an uncertified candidate above the head (number > head)
+    for i in 2..history.blocks.len() {
+        let lease = reth_unicity_payload::ParentAccountingResolver::resolve(
+            &tokens,
+            &head,
+            &history.chain_spec,
+            profile(),
+        )
+        .unwrap_or_else(|_| panic!("head lost after {} tokens above it", i - 2));
+        drop(lease);
+        publish(i);
+    }
+    assert!(tokens.is_admitted(&head.hash()), "and it is still admitted after all of them");
 }
