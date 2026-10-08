@@ -54,6 +54,7 @@ async fn launch_unicity_network() -> eyre::Result<NoopNetwork> {
                     execution_chain_id: 1337,
                     profile_hash: B256::repeat_byte(2),
                     w_cert: 1,
+                    hook: Default::default(),
                 },
             },
         ))

@@ -151,7 +151,7 @@
       }
     }
   ],
-  "note": "Byte-level reference vectors only; they do not assert certificate signatures or trust validity. Root inputs carry the twelfth field b1UpdateHash and were re-encoded by bft-core's evmroot encoder (ce9cad819) for B1 PR4; origin encodings are unchanged. Root inputs carry the twelfth field b1UpdateHash and the thirteenth rootRecordsHash and were re-encoded by bft-core's evmroot encoder (p85/pr1c-pin); origin encodings are unchanged.",
+  "note": "Byte-level reference vectors only; they do not assert certificate signatures or trust validity. Root inputs carry the twelfth field b1UpdateHash and were re-encoded by bft-core's evmroot encoder (ce9cad819) for B1 PR4; origin encodings are unchanged. Root inputs carry the twelfth field b1UpdateHash and the thirteenth rootRecordsHash and were re-encoded by bft-core's evmroot encoder (p85/pr1c-pin); origin encodings are unchanged. Root inputs carry the twelfth field b1UpdateHash and the thirteenth rootRecordsHash and were re-encoded by bft-core's evmroot encoder (p85/pr1c-pin); origin encodings are unchanged. Root inputs carry the twelfth field b1UpdateHash and the thirteenth rootRecordsHash and were re-encoded by bft-core's evmroot encoder (p85/pr1c-pin); origin encodings are unchanged.",
   "profileVersion": 2,
   "vectors": [
     {
@@ -224,6 +224,10 @@
           ],
           [],
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
           "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e"
         ]
@@ -340,6 +344,10 @@
           [],
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
           "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e"
         ]
       },
@@ -452,6 +460,10 @@
           ],
           [],
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
           "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e"
         ]
@@ -566,6 +578,10 @@
           [],
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
           "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e"
         ]
       },
@@ -678,6 +694,10 @@
           ],
           [],
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
           "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e"
         ]
@@ -792,6 +812,10 @@
           [],
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
           "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e"
         ]
       },
@@ -902,6 +926,10 @@
           ],
           [],
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
+          "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
+          "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e",
           "0x9b79f80a76f290662fa3ffac02d238bd1aef133e14e1375125d012c4530e6bb6",
           "0x9a163dab60f3ba604474d69d0bc51fe6e0ee3875d247fd2344bec4c0dc3bdf9e"
         ]

@@ -65,6 +65,28 @@ impl FixtureProvider {
         this
     }
 
+    /// Adds a contract account with the given code and storage (a test stand-in for a deployment
+    /// the genesis does not carry).
+    #[allow(dead_code)]
+    pub(crate) fn insert_contract(
+        &mut self,
+        address: Address,
+        code: Bytes,
+        balance: U256,
+        storage: &[(U256, U256)],
+    ) {
+        let code = Bytecode::new_raw(code);
+        let code_hash = code.hash_slow();
+        self.code.insert(code_hash, code.clone());
+        self.accounts.insert(
+            address,
+            AccountInfo { balance, code_hash, code: Some(code), ..Default::default() },
+        );
+        for (key, value) in storage {
+            self.storage.entry(address).or_default().insert(*key, *value);
+        }
+    }
+
     #[allow(dead_code)]
     pub(crate) fn signed_genesis() -> Self {
         let this = Self::from_json(include_str!("../../testdata/signed-beacon-genesis.json"));

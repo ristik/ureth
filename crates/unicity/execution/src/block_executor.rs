@@ -701,7 +701,24 @@ where
         // Approved ordering: the stock Cancun EIP-4788 call follows finalize. Its gas is excluded
         // from both system and ordinary accounting. EIP-2935 is inactive in the bounded profile.
         self.inner.apply_pre_execution_changes()?;
-        self.prefix = PrefixState::Ready(result.total_gas_spent);
+        // The mandatory records hook follows EIP-4788. Its gross gas joins the system total (and so
+        // header gasUsed and the parent's recovered ordinary gas) but not the outcome commitment,
+        // which finalize wrote before it ran.
+        let mut system = result.total_gas_spent;
+        let hook = bound.b1.context.hook;
+        if hook.enabled() {
+            let remaining = bound.profile.system_gas.checked_sub(system).ok_or_else(|| {
+                BlockExecutionError::msg("system gas exhausted before the records hook")
+            })?;
+            let env = crate::hook::HookEnv::from_evm(&self.inner.evm);
+            let outcome =
+                crate::hook::run_records_hook(self.inner.evm.db_mut(), &hook, &env, remaining)
+                    .map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
+            system = system.checked_add(outcome.gas_spent).ok_or_else(|| {
+                BlockExecutionError::msg("system gas overflow after the records hook")
+            })?;
+        }
+        self.prefix = PrefixState::Ready(system);
         Ok(())
     }
 

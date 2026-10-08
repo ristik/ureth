@@ -21,7 +21,7 @@ use reth_unicity_execution::{
     },
     derive_beacon_root, derive_prev_randao, derive_timestamp,
     evm_factory::unicity_eth_config,
-    testing::{Tail, GENESIS_TAIL},
+    testing::{self, Tail, GENESIS_TAIL},
     update::{B1Context, B1Job},
     wire::bind_completed_parent,
     RootInputV2, SEAL_REGISTRY, SYSTEM_CALLER,
@@ -29,7 +29,7 @@ use reth_unicity_execution::{
 use revm::database::State;
 use std::sync::{Arc, Mutex};
 use support::{
-    b1::{ack_input, genesis_hash, input, profile, sealed},
+    b1::{ack_input, context, genesis_hash, input, profile, sealed},
     provider::FixtureProvider,
 };
 
@@ -833,4 +833,371 @@ fn import_rejects_a_blob_transaction_at_the_header_blob_gas_check() {
         !error.to_string().contains("blob transactions are unsupported"),
         "the executor rule must not be the one that fires on the import path, got: {error}"
     );
+}
+
+/// The hook-enabled bound block 1: `import` as its records, `hook` as the pinned records hook,
+/// over a provider that also holds the custody stand-in at `custody`.
+struct HookWorld {
+    provider: FixtureProvider,
+    parent: SealedHeader<alloy_consensus::Header>,
+    root: RootInputV2,
+    chain_spec: Arc<ChainSpec>,
+    import: Vec<u8>,
+    update: Bytes,
+}
+
+fn hook_world(import: &[u8], custody: Address) -> HookWorld {
+    hook_world_with(import, |provider| {
+        provider.insert_contract(
+            custody,
+            testing::custody_code(testing::ADVANCE),
+            U256::ZERO,
+            &[(U256::from(1), U256::from(32))], // limits.maxBatch
+        )
+    })
+}
+
+fn hook_world_with(import: &[u8], install: impl FnOnce(&mut FixtureProvider)) -> HookWorld {
+    let genesis: Genesis =
+        serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
+    let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
+    let parent = SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash());
+    let mut provider = FixtureProvider::signed_genesis();
+    provider.set_block_hash(0, genesis_hash());
+    install(&mut provider);
+    let mut root = input(1, 1, genesis_hash());
+    let update = testing::seal_with_import(&mut root, 0, GENESIS_TAIL, import);
+    HookWorld { provider, parent, root, chain_spec, import: import.to_vec(), update }
+}
+
+impl HookWorld {
+    /// The block profile with a system reservation that covers the largest hook the tests pin, so
+    /// the hooked and unhooked blocks differ in nothing but the hook.
+    fn profile(&self) -> BlockProfile {
+        let base = profile();
+        let hook =
+            RecordsHook { custody: Address::repeat_byte(1), h_records: 3, record_gas: 3_000_000 };
+        let system_gas = base.system_gas + hook.envelope_gas().unwrap();
+        BlockProfile { system_gas, max_gas: base.max_gas + (system_gas - base.system_gas), ..base }
+    }
+
+    fn attributes(&self) -> NextBlockEnvAttributes {
+        NextBlockEnvAttributes {
+            gas_limit: self.profile().max_gas,
+            ..attributes(&self.root, self.parent.timestamp)
+        }
+    }
+
+    fn config(&self, hook: RecordsHook) -> UnicityEvmConfig {
+        let mut job = B1Job {
+            context: context(),
+            update: self.update.clone(),
+            records: self.import.clone().into(),
+        };
+        job.context.hook = hook;
+        let bound = Arc::new(
+            BoundExecutionInput::from_validated_genesis(
+                Arc::new(self.root.clone()),
+                job,
+                self.profile(),
+                &self.parent,
+                genesis_hash(),
+                FEE_COLLECTOR,
+            )
+            .unwrap(),
+        );
+        UnicityEvmConfig::new(unicity_eth_config(self.chain_spec.clone()), bound)
+    }
+
+    /// Builds the block and returns it with the state after it.
+    fn build(
+        &self,
+        hook: RecordsHook,
+    ) -> (reth_unicity_execution::block_executor::CompletedBuild, FixtureProvider) {
+        let config = self.config(hook);
+        let mut state =
+            State::builder().with_database(self.provider.clone()).with_bundle_update().build();
+        let built = build_complete(
+            &config,
+            &self.parent,
+            self.attributes(),
+            &mut state,
+            self.provider.clone(),
+            vec![],
+        )
+        .unwrap();
+        let mut after = self.provider.clone();
+        after.apply_bundle(&state.bundle_state);
+        (built, after)
+    }
+}
+
+use reth_unicity_execution::hook::RecordsHook;
+
+#[test]
+fn the_records_hook_runs_after_eip_4788_and_its_gas_joins_the_system_total_only() {
+    let custody = Address::repeat_byte(0xc5);
+    let world = hook_world(&testing::import_of(3), custody);
+    let off = RecordsHook::default();
+    let on = RecordsHook { custody, h_records: 2, record_gas: 1_000_000 };
+
+    let (plain, plain_state) = world.build(off);
+    let (hooked, hooked_state) = world.build(on);
+
+    // the hook applied exactly H = 2 of the 3 imported records, once
+    assert_eq!(plain_state.storage_of(custody).get(&U256::ZERO), None);
+    assert_eq!(hooked_state.storage_of(custody)[&U256::ZERO], U256::from(2));
+    // the registry holds the same words with and without the hook: it runs after finalize, so
+    // the outcome commitment finalize wrote does not mention it
+    assert_eq!(plain_state.storage_of(SEAL_REGISTRY), hooked_state.storage_of(SEAL_REGISTRY));
+    // with no transactions the header's gas is the system total, and the hook's gross gas is the
+    // whole difference: a few reads and one call, well inside the reserved envelope
+    let (g_plain, g_hooked) =
+        (plain.outcome.execution_result.gas_used, hooked.outcome.execution_result.gas_used);
+    assert!(g_hooked > g_plain, "{g_hooked} vs {g_plain}");
+    assert!(g_hooked - g_plain < on.envelope_gas().unwrap(), "{}", g_hooked - g_plain);
+    // the hooked block replays to exactly itself
+    let replay = replay_complete(
+        &world.config(on),
+        world.provider.clone(),
+        &world.provider,
+        &hooked.outcome.block,
+    )
+    .unwrap();
+    assert_eq!(replay.output.result, hooked.outcome.execution_result);
+    // a node that pins no hook (or another H) computes another state root and refuses the block
+    for other in [off, RecordsHook { h_records: 3, ..on }] {
+        assert!(
+            replay_complete(
+                &world.config(other),
+                world.provider.clone(),
+                &world.provider,
+                &hooked.outcome.block
+            )
+            .is_err(),
+            "{other:?}"
+        );
+    }
+}
+
+#[test]
+fn a_hook_that_cannot_run_invalidates_the_block() {
+    let custody = Address::repeat_byte(0xc5);
+    let world = hook_world(&testing::import_of(3), custody);
+    let genesis_config = |hook| world.config(hook);
+    // no code at the pinned custody: the cursor read returns nothing
+    let missing = RecordsHook { custody: Address::repeat_byte(0xee), h_records: 1, record_gas: 1 };
+    let mut state =
+        State::builder().with_database(world.provider.clone()).with_bundle_update().build();
+    let Err(err) = build_complete(
+        &genesis_config(missing),
+        &world.parent,
+        world.attributes(),
+        &mut state,
+        world.provider.clone(),
+        vec![],
+    ) else {
+        panic!("a hook against a missing custody must invalidate the block")
+    };
+    assert!(err.to_string().contains("BadReturn") || err.to_string().contains("Hook"), "{err}");
+}
+
+// ---- the real StakeCustody runtime -----------------------------------------------------------
+//
+// `testdata/hook-<scenario>.json` is generated by unicity-pos-contracts `test/p85/HookState.t.sol`:
+// the three P85 modules as forge deployed them on chain id 1337 with `roots` pointing at the
+// registry's fixed address, the records the scenario applies, and the storage custody ends with
+// when it applies them. The same bytes must run here, in the registry's world.
+
+use std::collections::BTreeMap;
+
+struct Real {
+    world: HookWorld,
+    custody: Address,
+    post: Vec<(Address, BTreeMap<U256, U256>)>,
+    records: Vec<reth_unicity_execution::records::RecordEntry>,
+}
+
+fn word(hex: &str) -> U256 {
+    U256::from_str_radix(hex.trim_start_matches("0x"), 16).unwrap()
+}
+
+fn real(
+    name: &str,
+    edit: impl FnOnce(&mut Vec<reth_unicity_execution::records::RecordEntry>, &mut serde_json::Value),
+) -> Real {
+    let raw = match name {
+        "ack" => include_str!("../testdata/hook-ack.json"),
+        "recovery" => include_str!("../testdata/hook-recovery.json"),
+        other => panic!("no fixture {other}"),
+    };
+    let mut fixture: serde_json::Value = serde_json::from_str(raw).unwrap();
+    assert_eq!(fixture["chainId"], 1337, "the state was produced on the chain the world runs");
+    let mut records: Vec<reth_unicity_execution::records::RecordEntry> = Vec::new();
+    for r in fixture["records"].as_array().unwrap() {
+        let predecessor = records.last().map_or(B256::ZERO, |e| e.record_id);
+        let entry = testing::record_entry(
+            r["index"].as_u64().unwrap(),
+            predecessor,
+            r["kind"].as_u64().unwrap() as u8,
+            r["progress"].as_u64().unwrap(),
+            r["ucTime"].as_u64().unwrap(),
+            r["data"].as_str().unwrap().parse::<Bytes>().unwrap().to_vec(),
+        );
+        assert_eq!(
+            entry.record_id,
+            r["recordId"].as_str().unwrap().parse::<B256>().unwrap(),
+            "the identifier forge computed is the one this crate computes"
+        );
+        records.push(entry);
+    }
+    edit(&mut records, &mut fixture);
+    let custody: Address = fixture["modules"]["custody"].as_str().unwrap().parse().unwrap();
+    let import = testing::import_of_entries(records.clone());
+    let pre = fixture["pre"].as_object().unwrap().clone();
+    let world = hook_world_with(&import, |provider| {
+        for (address, account) in &pre {
+            let storage: Vec<(U256, U256)> = account["storage"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (word(k), word(v.as_str().unwrap())))
+                .collect();
+            let code: Bytes = account["code"].as_str().unwrap().parse().unwrap();
+            assert_eq!(
+                alloy_primitives::keccak256(&code),
+                account["codeHash"].as_str().unwrap().parse::<B256>().unwrap()
+            );
+            provider.insert_contract(
+                address.parse().unwrap(),
+                code,
+                word(account["balance"].as_str().unwrap()),
+                &storage,
+            );
+        }
+    });
+    let post = fixture["post"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(address, account)| {
+            let slots = account["storage"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (word(k), word(v.as_str().unwrap())))
+                .collect();
+            (address.parse().unwrap(), slots)
+        })
+        .collect();
+    Real { world, custody, post, records }
+}
+
+const fn pinned(custody: Address, h: u32) -> RecordsHook {
+    RecordsHook { custody, h_records: h, record_gas: 3_000_000 }
+}
+
+#[test]
+fn the_real_custody_applies_real_records_to_exactly_the_state_forge_computed() {
+    for scenario in ["ack", "recovery"] {
+        let r = real(scenario, |_, _| {});
+        let hook = pinned(r.custody, 1);
+        let (plain, _) = r.world.build(RecordsHook::default());
+        let (hooked, after) = r.world.build(hook);
+        for (address, expected) in &r.post {
+            let got = after.storage_of(*address);
+            let mut diff = Vec::new();
+            for key in got.keys().chain(expected.keys()).collect::<std::collections::BTreeSet<_>>()
+            {
+                if got.get(key) != expected.get(key) {
+                    diff.push(format!(
+                        "slot {key:#x}: hook {:?} forge {:?}",
+                        got.get(key),
+                        expected.get(key)
+                    ));
+                }
+            }
+            assert!(
+                diff.is_empty(),
+                "{scenario}: storage of {address} after the hook differs from what custody computed on chain id 1337:\n{}",
+                diff.join("\n")
+            );
+        }
+        let spent =
+            hooked.outcome.execution_result.gas_used - plain.outcome.execution_result.gas_used;
+        println!("p85-hook: {scenario}: hook gross gas {spent} for {} record(s)", r.records.len());
+        assert!(spent > 100_000 && spent < hook.envelope_gas().unwrap(), "{scenario}: {spent}");
+        // the block replays to exactly itself
+        let replay = replay_complete(
+            &r.world.config(hook),
+            r.world.provider.clone(),
+            &r.world.provider,
+            &hooked.outcome.block,
+        )
+        .unwrap();
+        assert_eq!(replay.output.result, hooked.outcome.execution_result, "{scenario}");
+    }
+}
+
+#[test]
+fn a_record_the_real_custody_cannot_apply_invalidates_the_block() {
+    // an Ack of a session that was never reserved: the registry imports it (it checks the log, not
+    // custody), custody reverts
+    let r = real("ack", |records, _| {
+        records[0].data[0] ^= 1;
+        let e = &records[0];
+        records[0] = testing::record_entry(
+            e.index,
+            e.predecessor,
+            e.kind,
+            e.progress,
+            e.uc_time,
+            e.data.clone(),
+        );
+    });
+    let mut state =
+        State::builder().with_database(r.world.provider.clone()).with_bundle_update().build();
+    let Err(err) = build_complete(
+        &r.world.config(pinned(r.custody, 1)),
+        &r.world.parent,
+        r.world.attributes(),
+        &mut state,
+        r.world.provider.clone(),
+        vec![],
+    ) else {
+        panic!("a record custody cannot apply must invalidate the block")
+    };
+    assert!(err.to_string().contains("applyRootRecords"), "{err}");
+}
+
+#[test]
+fn h_above_the_deployed_custodys_max_batch_invalidates_the_block() {
+    // custody.limits (slot 11) packs (vMax, lMax, rMax, maxBatch) low to high; pin maxBatch = 1 and
+    // ask for two records per block
+    let r = real("ack", |_, fixture| {
+        let custody = fixture["modules"]["custody"].as_str().unwrap().to_string();
+        let key = format!("0x{:064x}", 11);
+        let slot = &mut fixture["pre"][&custody]["storage"][&key];
+        let w = word(slot.as_str().unwrap());
+        let mask: U256 = U256::from(u32::MAX) << 96usize;
+        *slot = serde_json::Value::String(format!(
+            "0x{:064x}",
+            (w & !mask) | (U256::from(1u64) << 96usize)
+        ));
+    });
+    let mut state =
+        State::builder().with_database(r.world.provider.clone()).with_bundle_update().build();
+    let Err(err) = build_complete(
+        &r.world.config(pinned(r.custody, 2)),
+        &r.world.parent,
+        r.world.attributes(),
+        &mut state,
+        r.world.provider.clone(),
+        vec![],
+    ) else {
+        panic!("H above maxBatch must invalidate the block")
+    };
+    assert!(err.to_string().contains("HExceedsMaxBatch"), "{err}");
+    // within the limit the same state applies
+    assert!(!r.world.build(pinned(r.custody, 1)).1.storage_of(r.custody).is_empty());
 }
