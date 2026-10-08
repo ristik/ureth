@@ -23,7 +23,7 @@ use reth_primitives_traits::{
     crypto::secp256k1::sign_message, RecoveredBlock, SealedHeader, SignedTransaction,
 };
 use reth_unicity_execution::{
-    block::BlockProfile,
+    block::{BlockAccountingError, BlockProfile},
     block_executor::{
         build_complete, replay_complete, BoundExecutionInput, CompletedParent, UnicityEvmConfig,
     },
@@ -377,15 +377,18 @@ fn a_companion_with_another_update_cannot_ride_under_the_same_header() {
     // follower's own binding refuses it before any execution.
     let (_, quiet) = follower.derive(2, 1, 0xc0);
     let tampered = B1Job { update: quiet.update, ..two.job.clone() };
-    assert!(BoundExecutionInput::from_completed_parent(
-        two.input.clone(),
-        tampered,
-        profile(),
-        &follower.head,
-        follower.token.unwrap(),
-        FEE_COLLECTOR,
-    )
-    .is_err());
+    assert_eq!(
+        BoundExecutionInput::from_completed_parent(
+            two.input.clone(),
+            tampered,
+            profile(),
+            &follower.head,
+            follower.token.unwrap(),
+            FEE_COLLECTOR,
+        )
+        .unwrap_err(),
+        BlockAccountingError::UpdateHashMismatch
+    );
     follower.follow(&two);
     assert_eq!(follower.live(), vec![1, 2]);
 }

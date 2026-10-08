@@ -246,5 +246,12 @@ async fn rpc_routes_run_the_same_precompiles_over_the_same_registry_state() -> e
         format!("{:#x}", Operation::Uc.address())
     );
     assert_eq!(frames[0]["type"], "STATICCALL");
+    // The traced frame ran the kernel: the manifest's answer at the manifest's charge, not the
+    // empty success an unregistered address gives.
+    assert_eq!(frames[0]["output"].as_str().unwrap(), format!("0x{expected_output}"));
+    assert_eq!(
+        u64::from_str_radix(frames[0]["gasUsed"].as_str().unwrap().trim_start_matches("0x"), 16)?,
+        charge
+    );
     Ok(())
 }
