@@ -1,5 +1,8 @@
 //! The B1 world every block-level test runs in: bft-core's K=2 deployment, its genesis and the
 //! updates an honest pair derives for each block.
+//!
+//! Each test crate includes this module and uses a subset of it.
+#![allow(dead_code)]
 
 use alloy_primitives::B256;
 use reth_unicity_execution::{

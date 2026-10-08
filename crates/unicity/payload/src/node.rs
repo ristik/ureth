@@ -22,7 +22,6 @@ use reth_engine_primitives::{EngineApiValidator, PayloadValidator};
 use reth_ethereum_payload_builder::{EthereumBuilderConfig, EthereumExecutionPayloadValidator};
 use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
-use reth_evm_ethereum::EthEvmConfig;
 use reth_node_builder::{
     components::{
         BasicPayloadServiceBuilder, ComponentsBuilder, ConsensusBuilder, ExecutorBuilder,
@@ -47,6 +46,7 @@ use reth_storage_api::{
 use reth_transaction_pool::{PoolTransaction, TransactionPool};
 use reth_unicity_execution::{
     block::BlockProfile,
+    evm_factory::unicity_eth_config,
     node_evm::{UnicityBlockExecutionRegistry, UnicityNodeEvmConfig},
     pairing::PairPins,
     update::B1Context,
@@ -427,7 +427,7 @@ where
     type EVM = UnicityNodeEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        Ok(UnicityNodeEvmConfig::new(EthEvmConfig::new(ctx.chain_spec()), self.execution_inputs))
+        Ok(UnicityNodeEvmConfig::new(unicity_eth_config(ctx.chain_spec()), self.execution_inputs))
     }
 }
 

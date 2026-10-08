@@ -10880,6 +10880,7 @@ dependencies = [
  "reth-tasks",
  "reth-transaction-pool",
  "reth-trie-common",
+ "reth-unicity-b1",
  "reth-unicity-execution",
  "reth-unicity-store",
  "revm",

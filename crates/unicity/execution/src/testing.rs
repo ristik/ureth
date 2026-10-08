@@ -275,6 +275,22 @@ pub fn genesis_db() -> CacheDB<EmptyDB> {
     db
 }
 
+/// The registry's assignment as the previous block left it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Assignment {
+    /// Assigned root epoch.
+    pub root_epoch: u64,
+    /// Assigned shard epoch.
+    pub shard_epoch: u64,
+    /// Active shard configuration hash.
+    pub conf: B256,
+}
+
+/// The vector world's genesis assignment: root epoch 1, shard epoch 0.
+pub fn genesis_assignment() -> Assignment {
+    Assignment { root_epoch: 1, shard_epoch: 0, conf: world().shard_conf_hash }
+}
+
 /// Encodes an acknowledged EVM transition and its acknowledgement, with the fixed identities the
 /// registry stores verbatim.
 #[allow(clippy::too_many_arguments)]
@@ -316,4 +332,43 @@ pub fn transition_bytes(
     bytes(&mut transition, B256::repeat_byte(0x45).as_slice());
     bytes(&mut transition, &ack);
     transition
+}
+
+/// Makes `input` the acknowledgement block that rotates the root epoch from
+/// `assigned.root_epoch` to the origin's epoch and returns the assignment it leaves behind.
+///
+/// A single-epoch rotation is a root-only acknowledgement. A longer one folds a supersession
+/// span: the shard epoch advances with it and the active configuration changes.
+pub fn rotate(input: &mut RootInputV2, assigned: Assignment) -> Assignment {
+    let target = input.origin.root_epoch;
+    let delta = target - assigned.root_epoch;
+    let (shard_epoch, conf, span, commitment) = if delta == 1 {
+        (assigned.shard_epoch, assigned.conf, 0, B256::ZERO)
+    } else {
+        (
+            assigned.shard_epoch + delta,
+            crate::sha256(&[assigned.conf.as_slice(), &delta.to_be_bytes()].concat()),
+            delta,
+            crate::sha256(&delta.to_be_bytes()),
+        )
+    };
+    input.certified_epoch = assigned.shard_epoch;
+    input.authorized_epoch = shard_epoch;
+    input.technical.epoch = shard_epoch;
+    input.origin.input_record.epoch = assigned.shard_epoch;
+    input.origin.shard_conf_hash = conf;
+    input.origin.tr_hash = crate::technical_record_hash(&input.technical);
+    input.transitions = vec![transition_bytes(
+        assigned.root_epoch,
+        target,
+        assigned.shard_epoch,
+        shard_epoch,
+        assigned.conf,
+        conf,
+        span,
+        commitment,
+        input.authorized_round,
+        input.parent_hash,
+    )];
+    Assignment { root_epoch: target, shard_epoch, conf }
 }

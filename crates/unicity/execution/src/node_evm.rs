@@ -38,11 +38,14 @@ use reth_evm::{
     ConfigureEngineEvm, ConfigureEvm, EvmEnv, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
     NextBlockEnvAttributes,
 };
-use reth_evm_ethereum::{EthBlockAssembler, EthEvmConfig, RethReceiptBuilder};
+use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
 use revm::{primitives::hardfork::SpecId, Inspector};
 
-use crate::block_executor::{BoundExecutionInput, UnicityBlockExecutor, UnicityEvmConfig};
+use crate::{
+    block_executor::{BoundExecutionInput, UnicityBlockExecutor, UnicityEvmConfig},
+    evm_factory::{UnicityEvmFactory, UnicityInnerEvmConfig},
+};
 
 /// Floor capacity for [`UnicityBlockExecutionRegistry`].
 ///
@@ -315,18 +318,15 @@ fn commitment_from_extra_data(extra_data: &[u8]) -> Option<B256> {
 /// [`MISSING_EXECUTION_INPUT_ERROR`]: crate::block_executor::MISSING_EXECUTION_INPUT_ERROR
 #[derive(Clone, Debug)]
 pub struct UnicityNodeEvmConfig {
-    inner: EthEvmConfig,
+    inner: UnicityInnerEvmConfig,
     registry: UnicityBlockExecutionRegistry,
-    executor_factory: UnicityNodeBlockExecutorFactory<
-        RethReceiptBuilder,
-        Arc<ChainSpec>,
-        alloy_evm::EthEvmFactory,
-    >,
+    executor_factory:
+        UnicityNodeBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, UnicityEvmFactory>,
 }
 
 impl UnicityNodeEvmConfig {
     /// Creates the node EVM config over the stock Ethereum config and the execution-input registry.
-    pub fn new(inner: EthEvmConfig, registry: UnicityBlockExecutionRegistry) -> Self {
+    pub fn new(inner: UnicityInnerEvmConfig, registry: UnicityBlockExecutionRegistry) -> Self {
         let executor_factory =
             UnicityNodeBlockExecutorFactory::new(inner.executor_factory.clone(), registry.clone());
         Self { inner, registry, executor_factory }
@@ -355,11 +355,8 @@ impl ConfigureEvm for UnicityNodeEvmConfig {
     type Primitives = EthPrimitives;
     type Error = UnicityNodeEvmError;
     type NextBlockEnvCtx = NextBlockEnvAttributes;
-    type BlockExecutorFactory = UnicityNodeBlockExecutorFactory<
-        RethReceiptBuilder,
-        Arc<ChainSpec>,
-        alloy_evm::EthEvmFactory,
-    >;
+    type BlockExecutorFactory =
+        UnicityNodeBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, UnicityEvmFactory>;
     type BlockAssembler = EthBlockAssembler<ChainSpec>;
 
     fn block_executor_factory(&self) -> &Self::BlockExecutorFactory {

@@ -68,3 +68,11 @@ required-features = ["test-utils"]
 [[test]]
 name = "pairing"
 required-features = ["test-utils"]
+
+[[test]]
+name = "b1_static_callers"
+required-features = ["test-utils"]
+
+[[test]]
+name = "rotation_acceptance"
+required-features = ["test-utils"]

@@ -10,7 +10,6 @@ use alloy_primitives::{Address, Bytes, Signature, TxKind, B256, B64, U256};
 use reth_chainspec::ChainSpec;
 use reth_ethereum_primitives::{Block, Transaction, TransactionSigned};
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
-use reth_evm_ethereum::EthEvmConfig;
 use reth_primitives_traits::{
     crypto::secp256k1::sign_message, BlockBody, RecoveredBlock, SealedHeader, SignedTransaction,
 };
@@ -21,6 +20,7 @@ use reth_unicity_execution::{
         build_complete, replay_complete, BoundExecutionInput, CompletedParent, UnicityEvmConfig,
     },
     derive_beacon_root, derive_prev_randao, derive_timestamp,
+    evm_factory::unicity_eth_config,
     testing::{Tail, GENESIS_TAIL},
     update::{B1Context, B1Job},
     wire::bind_completed_parent,
@@ -129,7 +129,7 @@ fn acknowledgement_replays_before_a_paid_successor_transaction() {
         )
         .unwrap(),
     );
-    let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec.clone()), bound);
+    let config = UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), bound);
     let mut refused_state =
         State::builder().with_database(provider.clone()).with_bundle_update().build();
     let transfer = signed_call(
@@ -207,7 +207,7 @@ fn acknowledgement_replays_before_a_paid_successor_transaction() {
         )
         .unwrap(),
     );
-    let next_config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec), next_bound);
+    let next_config = UnicityEvmConfig::new(unicity_eth_config(chain_spec), next_bound);
     let mut next_state =
         State::builder().with_database(post_ack.clone()).with_bundle_update().build();
     let paid = build_complete(
@@ -244,7 +244,7 @@ fn payload_job_binding_names_gas_and_fee_mismatches() {
         )
         .unwrap(),
     );
-    let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec), bound);
+    let config = UnicityEvmConfig::new(unicity_eth_config(chain_spec), bound);
     let mut attrs = attributes(&root, parent.timestamp);
 
     attrs.gas_limit += 1;
@@ -288,7 +288,7 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
         )
         .unwrap(),
     );
-    let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec.clone()), bound);
+    let config = UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), bound);
     let over_capacity = signed_call(
         chain_spec.chain.id(),
         0,
@@ -529,7 +529,7 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     .try_into_recovered()
     .unwrap();
     let block_a = build_complete(
-        &UnicityEvmConfig::new(EthEvmConfig::new(chain_spec.clone()), build_bound),
+        &UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), build_bound),
         &first_header,
         attrs.clone(),
         &mut state_a,
@@ -538,7 +538,7 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     )
     .unwrap();
     let block_b = build_complete(
-        &UnicityEvmConfig::new(EthEvmConfig::new(chain_spec), replay_bound),
+        &UnicityEvmConfig::new(unicity_eth_config(chain_spec), replay_bound),
         &first_header,
         attrs,
         &mut state_b,
@@ -612,7 +612,7 @@ fn import_fixture() -> ImportFixture {
         )
         .unwrap(),
     );
-    let config = UnicityEvmConfig::new(EthEvmConfig::new(chain_spec.clone()), bound);
+    let config = UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), bound);
     let mut build_state =
         State::builder().with_database(provider.clone()).with_bundle_update().build();
     let transfer = signed_call(

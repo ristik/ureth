@@ -386,6 +386,40 @@ funded B1 genesis, a K=2 scenario with every changed registry word from bft-core
 model, and the twelve-field re-encoding of the executable root-input vectors; the Rust tests execute
 the real registry runtime against them. `tools/mutate_b1_guards.py` disables each guard once.
 
+## B1 #62 (4b/4): system integration and acceptance, inactive
+
+- **One EVM factory.** `UnicityEvmFactory` (`crates/unicity/execution/src/evm_factory.rs`) wraps
+  `EthEvmFactory` and installs the B1 precompiles at `0x0100` (UC), `0x0101` (shared seal) and
+  `0x0102` (RSMT) in every EVM it creates. Build, import, replay, recovery, `eth_call`,
+  `eth_estimateGas` and tracing all go through the node's `ConfigureEvm`, so there is no second
+  construction path. `0x0103` (S1) stays unregistered. UC and shared results are never
+  result-cached (a test pins `supports_caching`); RSMT may be.
+- **Actual callers.** All 144 requests of the pinned conformance manifest are sent by a contract
+  executing `STATICCALL` (`tests/b1_static_callers.rs`): same verdict and returndata, exact
+  gas and gas-1, malformed requests burn the forwarded gas, repeated calls pay the same flat
+  charge, an unregistered address answers with empty success. `payload/tests/rpc_routes.rs` runs a
+  launched node over HTTP: `eth_call`, `eth_estimateGas`, an explicit state-override simulation
+  (including that a half-erased entry is an infrastructure error, never a verdict) and
+  `debug_traceCall`.
+- **Two pairs.** `tests/rotation_acceptance.rs`: a builder and an independent follower (state,
+  head and accounting token only; the follower sees the block, root input and update bytes)
+  through a root-only rotation, a two-epoch supersession with expiry, ordinary traffic and window
+  pruning reach identical headers, state roots, gas and registry words; a restart from the
+  persisted token record continues identically; a reorg applies the other branch to the common
+  parent only; a swapped update is refused at binding.
+- **G_rest re-measurement.** `b1_profile` drives the real registry runtime at ring sizes 1, 2, 4,
+  8 and 16 with maximal entries (64 members, 128-byte identifiers) through baseline, insertion,
+  rotation, pruning, refill and a two-epoch supersession over a full ring. Every gross total fits the profile envelope and
+  the measured non-history gas (gross minus the exact Cancun price of the history writes) is
+  2.05x to 3.8x below the frozen `G_rest(a, p)` allowance, so the constants stand. The result is
+  frozen in `testdata/b1-gas-profile.json`; the test fails if gas changes.
+- **CPU.** `cargo run --release -p reth-unicity-b1 --example bench` (1000 warmups, 10000
+  iterations) times the maximal requests against same-binary ecrecover and SHA-256 references and
+  requires twice the slower reference's gas per nanosecond. x86-64 result:
+  `crates/unicity/b1/testdata/cpu-x86_64.json`, all five kernels pass (worst: maximal quorum at
+  0.296 gas/ns against a 0.101 requirement), measured on a loaded host. **arm64 has not been
+  measured**: no arm64 host was available, and activation needs that run.
+
 ## Current total fork inventory
 
 Upstream-change inventory against the fork point `189c0df32617afc488e0f091dbface1bd72cceb4`:
