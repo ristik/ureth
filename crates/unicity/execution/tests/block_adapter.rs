@@ -982,15 +982,15 @@ fn a_hook_that_cannot_run_invalidates_the_block() {
     let missing = RecordsHook { custody: Address::repeat_byte(0xee), h_records: 1, record_gas: 1 };
     let mut state =
         State::builder().with_database(world.provider.clone()).with_bundle_update().build();
-    let err = build_complete(
+    let Err(err) = build_complete(
         &genesis_config(missing),
         &world.parent,
         world.attributes(),
         &mut state,
         world.provider.clone(),
         vec![],
-    )
-    .err()
-    .expect("a hook against a missing custody invalidates the block");
+    ) else {
+        panic!("a hook against a missing custody must invalidate the block")
+    };
     assert!(err.to_string().contains("BadReturn") || err.to_string().contains("Hook"), "{err}");
 }

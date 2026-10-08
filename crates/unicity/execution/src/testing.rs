@@ -476,5 +476,7 @@ pub const ADVANCE: &[u8] = &[
 /// cursor += n + 1
 pub const OVERSHOOT: &[u8] =
     &[0x60, 0x04, 0x35, 0x60, 0x01, 0x01, 0x60, 0x00, 0x54, 0x01, 0x60, 0x00, 0x55, 0x00];
+/// `applyRootRecords` that does nothing: the cursor does not move
 pub const NOTHING: &[u8] = &[0x00];
+/// `applyRootRecords` that always reverts
 pub const REVERT: &[u8] = &[0x60, 0x00, 0x80, 0xfd];
