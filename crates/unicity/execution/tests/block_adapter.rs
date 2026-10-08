@@ -1093,7 +1093,7 @@ fn real(
     Real { world, custody, post, records }
 }
 
-fn pinned(custody: Address, h: u32) -> RecordsHook {
+const fn pinned(custody: Address, h: u32) -> RecordsHook {
     RecordsHook { custody, h_records: h, record_gas: 3_000_000 }
 }
 
@@ -1107,9 +1107,14 @@ fn the_real_custody_applies_real_records_to_exactly_the_state_forge_computed() {
         for (address, expected) in &r.post {
             let got = after.storage_of(*address);
             let mut diff = Vec::new();
-            for key in got.keys().chain(expected.keys()).collect::<std::collections::BTreeSet<_>>() {
+            for key in got.keys().chain(expected.keys()).collect::<std::collections::BTreeSet<_>>()
+            {
                 if got.get(key) != expected.get(key) {
-                    diff.push(format!("slot {key:#x}: hook {:?} forge {:?}", got.get(key), expected.get(key)));
+                    diff.push(format!(
+                        "slot {key:#x}: hook {:?} forge {:?}",
+                        got.get(key),
+                        expected.get(key)
+                    ));
                 }
             }
             assert!(
@@ -1194,6 +1199,5 @@ fn h_above_the_deployed_custodys_max_batch_invalidates_the_block() {
     };
     assert!(err.to_string().contains("HExceedsMaxBatch"), "{err}");
     // within the limit the same state applies
-    assert!(r.world.build(pinned(r.custody, 1)).1.storage_of(r.custody).len() > 0);
+    assert!(!r.world.build(pinned(r.custody, 1)).1.storage_of(r.custody).is_empty());
 }
-
