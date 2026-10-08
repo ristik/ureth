@@ -884,6 +884,8 @@ mod import {
         keccak256(&call.abi_encode()[4..])
     }
 
+    type RecordMutation = (&'static str, Box<dyn Fn(&mut RecordImport)>);
+
     fn make(
         index: u64,
         predecessor: B256,
@@ -996,7 +998,7 @@ mod import {
     }
 
     #[test]
-    fn a_mixed_log_lands_in_the_registrys_documented_words() {
+    fn a_mixed_log_lands_in_the_documented_registry_words() {
         let log = mixed();
         let imp = import_of(&log, 5, 20, 1_100);
         let (result, db) = run_imports(&[imp], world().system_gas).unwrap();
@@ -1075,11 +1077,11 @@ mod import {
     }
 
     #[test]
-    fn the_registrys_own_rules_refuse_each_mutation_alone() {
+    fn the_registry_refuses_each_mutation_alone() {
         let log = mixed();
         let good = import_of(&log, 5, 20, 1_100);
-        assert!(run_imports(&[good.clone()], world().system_gas).is_ok());
-        let cases: Vec<(&str, Box<dyn Fn(&mut RecordImport)>)> = vec![
+        assert!(run_imports(std::slice::from_ref(&good), world().system_gas).is_ok());
+        let cases: Vec<RecordMutation> = vec![
             ("a skipped index", Box::new(|i| i.entries[2].index += 1)),
             ("a broken link", Box::new(|i| i.entries[3].predecessor.0[0] ^= 1)),
             ("an identifier that is not content", Box::new(|i| i.entries[1].record_id.0[0] ^= 1)),
@@ -1206,7 +1208,7 @@ mod import {
         );
     }
 
-    /// The most expensive legal import: thirty-two RecoveryAck records (nine payload words each),
+    /// The most expensive legal import: thirty-two `RecoveryAck` records (nine payload words each),
     /// every word nonzero, so each entry writes fifteen fresh words.
     fn maximal() -> RecordImport {
         let mut log: Vec<RecordEntry> = Vec::new();
@@ -1231,7 +1233,7 @@ mod import {
         let imp = maximal();
         let raw = imp.to_bytes();
         assert!(raw.len() <= crate::records::MAX_IMPORT_BYTES, "{} bytes", raw.len());
-        let (result, db) = run_imports(&[imp.clone()], world().system_gas).unwrap();
+        let (result, db) = run_imports(std::slice::from_ref(&imp), world().system_gas).unwrap();
         assert_eq!(slot_value(&db, f("records.count")), u(32));
         assert!(
             result.import_gas_spent <= IMPORT_EXECUTION_GAS,

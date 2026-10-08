@@ -780,7 +780,7 @@ mod tests {
             (
                 "a closed epoch on a retirement",
                 {
-                    let mut s = base.clone();
+                    let mut s = base;
                     s.entries[1].closed = 1;
                     s
                 },
