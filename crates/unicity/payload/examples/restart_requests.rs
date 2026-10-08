@@ -64,6 +64,7 @@ fn main() {
         technical,
         transitions: vec![],
         b1_update_hash: B256::ZERO,
+        root_records_hash: B256::ZERO,
     };
     let update = testing::seal(&mut root, parent_number, GENESIS_TAIL);
     let attrs = UnicityPayloadAttributes {
@@ -103,6 +104,7 @@ fn main() {
         root_input: root.canonical_cbor().unwrap().into(),
         transitions: vec![],
         b1_update: update,
+        records: testing::empty_import(),
         pair_binding: binding.canonical_cbor().into(),
     };
     println!("{}", serde_json::json!({"attributes": attrs, "input": input}));

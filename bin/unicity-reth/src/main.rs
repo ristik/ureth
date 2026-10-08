@@ -414,10 +414,11 @@ mod tests {
     fn system_gas_must_cover_the_b1_profile_envelope() {
         let args = proof_args(true, None);
         let profile = args.profile().unwrap();
-        // W_cert = 1 needs 155936 + 1096500 + 2 * (15626944 + 1141500) = 34_789_324.
-        let exact = BlockProfile { system_gas: 34_789_324, max_gas: 41_789_324, ..profile };
+        // W_cert = 1 needs 155936 + 1136500 + 2 * (15626944 + 1147500) + the import envelope
+        // (296144 admission + 18000000 execution) = 53_137_468.
+        let exact = BlockProfile { system_gas: 53_137_468, max_gas: 60_137_468, ..profile };
         assert_eq!(args.b1(&exact).unwrap().w_cert, 1);
-        let short = BlockProfile { system_gas: 34_789_323, max_gas: 41_789_324, ..profile };
+        let short = BlockProfile { system_gas: 53_137_467, max_gas: 60_137_468, ..profile };
         assert!(args.b1(&short).is_err());
         let unmeasured = UnicityArgs { w_cert: 16, ..args };
         assert!(unmeasured.b1(&profile).is_err());

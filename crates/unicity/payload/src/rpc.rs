@@ -424,7 +424,11 @@ where
         },
     )
     .map_err(SealBuildError::PairBinding)?;
-    let b1 = B1Job { context: context.seal.b1, update: seal_build_input.b1_update.clone() };
+    let b1 = B1Job {
+        context: context.seal.b1,
+        update: seal_build_input.b1_update.clone(),
+        records: seal_build_input.records.clone(),
+    };
     let bound = if parent.number == 0 && parent.hash() == genesis_hash {
         bind_validated_genesis(
             root,
@@ -515,6 +519,7 @@ pub fn companion_not_retained_error(payload_id: PayloadId) -> EngineApiError {
 pub fn build_seal_companion(
     root_input: &RootInputV2,
     b1_update: &[u8],
+    records: &[u8],
     pair_binding: &PairBinding,
 ) -> Result<SealCompanion, SealCompanionError> {
     let root_input =
@@ -522,6 +527,7 @@ pub fn build_seal_companion(
     Ok(SealCompanion {
         root_input: root_input.into(),
         b1_update: Bytes::copy_from_slice(b1_update),
+        records: Bytes::copy_from_slice(records),
         pair_binding: pair_binding.canonical_cbor().into(),
         witnesses: Vec::new(),
         provenance: BUILD_PROVENANCE.to_owned(),
@@ -724,12 +730,17 @@ where
             .registry
             .b1_update(&payload_id)
             .ok_or_else(|| companion_not_retained_error(payload_id))?;
+        let records = self
+            .context
+            .registry
+            .records(&payload_id)
+            .ok_or_else(|| companion_not_retained_error(payload_id))?;
         let pair_binding = self
             .context
             .registry
             .pair_binding(&payload_id)
             .ok_or_else(|| companion_not_retained_error(payload_id))?;
-        let seal_companion = build_seal_companion(&root_input, &b1_update, &pair_binding)
+        let seal_companion = build_seal_companion(&root_input, &b1_update, &records, &pair_binding)
             .map_err(|error| EngineApiError::Internal(Box::new(error)))?;
 
         // Capture the key before the payload is consumed by the conversion. The store key is the
@@ -906,7 +917,11 @@ where
 
         // 5b. Bind through the U3a entry points. The token is the genesis bootstrap or the token
         //    the build path or a previous import published, never a value derived from the header.
-        let b1 = B1Job { context: self.context.seal.b1, update: seal_companion.b1_update.clone() };
+        let b1 = B1Job {
+            context: self.context.seal.b1,
+            update: seal_companion.b1_update.clone(),
+            records: seal_companion.records.clone(),
+        };
         let (bound, parent_lease) = if parent.number == 0 && parent.hash() == genesis_hash {
             bind_validated_genesis(
                 root,

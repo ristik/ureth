@@ -79,6 +79,7 @@ pub(crate) fn input(round: u64, root_round: u64, parent_hash: B256) -> RootInput
         technical,
         transitions: vec![],
         b1_update_hash: B256::repeat_byte(0xb1),
+        root_records_hash: testing::empty_import_hash(),
     }
 }
 
@@ -142,7 +143,7 @@ pub(crate) const fn tail() -> Tail {
 /// the parent's height in these fixtures).
 pub(crate) fn job(input: &RootInputV2) -> B1Job {
     let update = testing::update_for(input, input.authorized_round - 1, tail()).to_bytes();
-    B1Job { context: context(), update: Bytes::from(update) }
+    B1Job { context: context(), update: Bytes::from(update), records: testing::empty_import() }
 }
 
 /// Recommits `input` to its own update; call after every mutation of a committed field.

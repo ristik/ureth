@@ -341,10 +341,12 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     assert_eq!(built.outcome.execution_result.receipts.len(), 1);
     assert!(built.outcome.execution_result.receipts[0].success);
     let commits = commits.lock().unwrap();
-    assert!(commits[0].contains(&SEAL_REGISTRY));
-    assert!(commits[1].contains(&SEAL_REGISTRY));
-    assert!(commits[2].contains(&BEACON_ROOTS_ADDRESS));
-    assert!(commits.iter().skip(3).any(|state| state.contains(&signer)));
+    // The approved order: open, the root-record import, finalize, then the stock EIP-4788 call.
+    assert!(commits[0].contains(&SEAL_REGISTRY), "open");
+    assert!(commits[1].contains(&SEAL_REGISTRY), "importRootRecords");
+    assert!(commits[2].contains(&SEAL_REGISTRY), "finalize");
+    assert!(commits[3].contains(&BEACON_ROOTS_ADDRESS), "EIP-4788");
+    assert!(commits.iter().skip(4).any(|state| state.contains(&signer)));
     drop(commits);
 
     let first_block = built.outcome.block.clone();
@@ -431,7 +433,7 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     .is_err());
     // The completed-parent path refuses an update or a context the root input does not commit to,
     // as the genesis path does: every non-genesis build, import and recovery binds here.
-    let swapped = B1Job { update: Bytes::from_static(b"another update"), ..second_job };
+    let swapped = B1Job { update: Bytes::from_static(b"another update"), ..second_job.clone() };
     assert_eq!(
         bind_completed_parent(
             (*second_input).clone(),
@@ -443,6 +445,20 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
         )
         .unwrap_err(),
         BlockAccountingError::UpdateHashMismatch
+    );
+    let swapped_records =
+        B1Job { records: Bytes::from_static(b"another import"), ..second_job.clone() };
+    assert_eq!(
+        bind_completed_parent(
+            (*second_input).clone(),
+            swapped_records,
+            profile(),
+            &first_header,
+            built.parent,
+            FEE_COLLECTOR,
+        )
+        .unwrap_err(),
+        BlockAccountingError::RecordsHashMismatch
     );
     let unmeasured =
         B1Job { context: B1Context { w_cert: 16, ..second_job.context }, ..second_job.clone() };

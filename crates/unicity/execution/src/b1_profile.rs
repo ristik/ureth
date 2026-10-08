@@ -1,6 +1,6 @@
 //! Re-measurement of the registry's gross system gas under this client's revm.
 //!
-//! The contracts artifact freezes `G_rest(a, p) = 1096500 + 949500*a + 192000*p` from its own
+//! The contracts artifact freezes `G_rest(a, p) = 1136500 + 949500*a + 198000*p` from its own
 //! fixtures and requires this client to re-measure it before activation. Each run here drives the
 //! real registry runtime through the privileged `open`/`finalize` pair with maximal entries (64
 //! members, 128-byte identifiers sharing a 96-byte prefix) at ring sizes 1, 2, 4, 8 and 16, from an
@@ -29,7 +29,7 @@ const RECTANGLE_SET: u64 = 22_100;
 const RECTANGLE_CLEAR: u64 = 7_100;
 
 fn g_rest(a: u64, p: u64) -> u64 {
-    1_096_500 + 949_500 * a + 192_000 * p
+    1_136_500 + 949_500 * a + 198_000 * p
 }
 
 /// One measured block.
@@ -199,6 +199,7 @@ impl World {
             technical,
             transitions: vec![],
             b1_update_hash: B256::repeat_byte(0xb1),
+            root_records_hash: crate::sha256(&testing::empty_import()),
         };
         if epoch != self.assigned.root_epoch {
             self.assigned_after(&mut input);
@@ -225,12 +226,13 @@ impl World {
             testing::update_in(&self.context, &input, parent_number, self.tail, Members::Maximal);
         let a = update.new_entries.len() as u64;
         input.b1_update_hash = update.hash();
+        input.root_records_hash = crate::sha256(&testing::empty_import());
         let bytes = update.to_bytes();
         let limit = self.context.required_system_gas().unwrap();
         let before = word(&self.db, "b1.count");
         let (result, next): (ExecutionResult, _) = crate::execute_registry_transition(
             &input,
-            UpdateInput { bytes: &bytes, parent_number },
+            UpdateInput { bytes: &bytes, records: &testing::empty_import(), parent_number },
             &self.db,
             ExecutionConfig { system_gas_limit: limit, b1: self.context },
         )
@@ -341,7 +343,7 @@ fn gross_gas_stays_within_the_profile_envelope_and_the_frozen_allowance() {
     let manifest = serde_json::json!({
         "format": "unicity-b1-gas-profile",
         "client": "reth-unicity-execution on revm 42, Cancun, gross pre-refund",
-        "frozenAllowance": "G_rest(a,p) = 1096500 + 949500*a + 192000*p",
+        "frozenAllowance": "G_rest(a,p) = 1136500 + 949500*a + 198000*p",
         "rectangle": "22100 per addressed set, 7100 per addressed clear",
         "exactWrites": "22100 per set, 5000 per clear or reset",
         "measurements": all,

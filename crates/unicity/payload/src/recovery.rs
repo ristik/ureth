@@ -284,7 +284,7 @@ where
     for number in anchor + 1..=target {
         let RetainedBlock { hash, root, parent, companion, .. } =
             check_retained(provider, store, seal, genesis, number)?;
-        let b1 = B1Job { context: b1, update: companion.b1_update };
+        let b1 = B1Job { context: b1, update: companion.b1_update, records: companion.records };
         let parent_hash = parent.hash();
         let block = provider
             .block_by_hash(hash)?
