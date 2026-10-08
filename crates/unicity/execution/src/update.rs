@@ -209,6 +209,8 @@ pub enum UpdateError {
     ZeroWeight,
     /// Member weights overflow `u64`.
     WeightOverflow,
+    /// The committed total weight exceeds the profile cap `B` ([`crate::quant::WEIGHT_CAP_B`]).
+    WeightCap,
     /// A closed entry has `end <= start`.
     EmptyInterval,
     /// A new entry has the genesis body kind.
@@ -522,6 +524,9 @@ impl Entry {
                 return Err(UpdateError::DuplicateKey);
             }
             total = total.checked_add(member.weight).ok_or(UpdateError::WeightOverflow)?;
+        }
+        if total > crate::quant::WEIGHT_CAP_B {
+            return Err(UpdateError::WeightCap);
         }
         Ok(())
     }

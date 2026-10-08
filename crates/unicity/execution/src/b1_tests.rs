@@ -518,6 +518,15 @@ fn every_member_invariant_is_checked_alone() {
         ),
         ("zero weight", Box::new(|u| entry_mut(u).members[1].weight = 0), UpdateError::ZeroWeight),
         (
+            "weight above the profile cap",
+            Box::new(|u| {
+                let e = entry_mut(u);
+                let others: u64 = e.members.iter().skip(1).map(|m| m.weight).sum();
+                e.members[0].weight = crate::quant::WEIGHT_CAP_B - others + 1;
+            }),
+            UpdateError::WeightCap,
+        ),
+        (
             "weight overflow",
             Box::new(|u| {
                 entry_mut(u).members[0].weight = u64::MAX;

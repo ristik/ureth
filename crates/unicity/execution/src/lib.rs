@@ -32,6 +32,7 @@ pub mod evm_factory;
 pub mod hook;
 pub mod node_evm;
 pub mod pairing;
+pub mod quant;
 pub mod records;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
