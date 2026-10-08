@@ -512,6 +512,11 @@ impl UnicityEvmConfig {
         &self.bound.b1.update
     }
 
+    /// Returns the exact root-record import bytes this immutable job executes.
+    pub fn records(&self) -> &[u8] {
+        &self.bound.b1.records
+    }
+
     /// Checks that payload-builder inputs select this configuration's exact immutable job.
     ///
     /// This is a structural check only. Authentication of the root input and consistency of the
@@ -683,7 +688,11 @@ where
         bound.profile.validate().map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
         let result = execute_registry_transition_on_db(
             &bound.input,
-            UpdateInput { bytes: &bound.b1.update, parent_number: bound.parent_number },
+            UpdateInput {
+                bytes: &bound.b1.update,
+                records: &bound.b1.records,
+                parent_number: bound.parent_number,
+            },
             self.inner.evm.db_mut(),
             ExecutionConfig { system_gas_limit: bound.profile.system_gas, b1: bound.b1.context },
         )

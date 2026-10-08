@@ -56,11 +56,13 @@ fn apply(witnesses: Vec<Vec<u8>>) -> Outcome {
         root_input: root_input.clone().into(),
         transitions: root.transitions.iter().cloned().map(Into::into).collect(),
         b1_update: job.update.clone(),
+        records: job.records.clone(),
         pair_binding: Default::default(),
     };
     let companion = SealCompanion {
         root_input: root_input.into(),
         b1_update: job.update.clone(),
+        records: job.records.clone(),
         pair_binding: Default::default(),
         witnesses: witnesses.into_iter().map(Into::into).collect(),
         provenance: "newPayload".into(),

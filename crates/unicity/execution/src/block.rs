@@ -43,6 +43,9 @@ pub enum BlockAccountingError {
     InvalidParentBaseFee,
     /// The carried B1 update does not hash to the root input's committed value.
     UpdateHashMismatch,
+    /// The carried root-record import does not hash to the root input's committed
+    /// `rootRecordsHash`.
+    RecordsHashMismatch,
     /// The B1 profile is unmeasured, overflows, or `g_sys` is below its envelope.
     B1Profile,
 }

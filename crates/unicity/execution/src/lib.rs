@@ -31,11 +31,13 @@ pub mod block_executor;
 pub mod evm_factory;
 pub mod node_evm;
 pub mod pairing;
+pub mod records;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 pub mod update;
 pub mod wire;
 
+use records::{admit_import, ImportError};
 use update::{admit, B1Context, Update, UpdateBinding, UpdateError};
 
 sol! {
@@ -108,9 +110,10 @@ pub const SYSTEM_CALLER: Address =
 /// Fixed registry destination from the pinned profile.
 pub const SEAL_REGISTRY: Address =
     Address::new([0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
-/// Keccak-256 of the pinned B1 `SealRegistry` runtime artifact (contracts commit 71eb6325).
+/// Keccak-256 of the pinned `SealRegistry` runtime artifact: B1 plus the authenticated root-record
+/// log (contracts commit 30bc153).
 pub const SEAL_REGISTRY_CODE_HASH: B256 =
-    b256!("28ebc47d5beeb45307cb92ff1521be6a5623d4e4fa1721bc13a6f755cdf0781c");
+    b256!("1c660647c1dc27aff97d9e9d5315e2ff60208ea8446253164d831c3ae0cd2611");
 const GENESIS_SHARD_CONF_HASH_SLOT: B256 =
     b256!("4d19b7530faa2fa3495319b01857830cdc6ca35a5b20c4084d10119118d44afe");
 const ASSIGNMENT_EPOCH_SLOT: B256 =
@@ -227,6 +230,9 @@ pub struct RootInputV2 {
     pub transitions: Vec<Vec<u8>>,
     /// `SHA-256` of the canonical B1 [`Update`] this block must carry and execute.
     pub b1_update_hash: B256,
+    /// `SHA-256` of the canonical root-record import companion ([`records::RecordImport`]) this
+    /// block must carry and execute: the thirteenth field. Mandatory, even for an empty batch.
+    pub root_records_hash: B256,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -273,6 +279,8 @@ pub struct ExecutionConfig {
 pub struct UpdateInput<'a> {
     /// Exact canonical update bytes carried with the root-input companion.
     pub bytes: &'a [u8],
+    /// Exact canonical root-record import companion carried with the root-input companion.
+    pub records: &'a [u8],
     /// Height of the execution parent.
     pub parent_number: u64,
 }
@@ -280,17 +288,24 @@ pub struct UpdateInput<'a> {
 #[derive(Clone, Debug, PartialEq, Eq)]
 /// Derived commitments and gross pre-refund gas accounting for a successful pair.
 pub struct ExecutionResult {
-    /// Admission gas `G_admit` debited before open: the scan charge plus the member charge.
+    /// Admission gas `G_admit` debited before open: the B1 scan and member charges plus the
+    /// root-record import's.
     pub admission_gas: u64,
+    /// The root-record share of `admission_gas`: `2000 + 16*C_R + 1000*N`.
+    pub records_admission_gas: u64,
     /// Gross open gas spent before refunds.
     pub open_gas_spent: u64,
     /// Open refund observed but not credited to the privileged gas budget.
     pub open_gas_refunded: u64,
+    /// Gross `importRootRecords` gas spent before refunds.
+    pub import_gas_spent: u64,
+    /// Import refund observed but not credited to the privileged gas budget.
+    pub import_gas_refunded: u64,
     /// Gross finalize gas spent before refunds.
     pub finalize_gas_spent: u64,
     /// Finalize refund observed but not credited to the privileged gas budget.
     pub finalize_gas_refunded: u64,
-    /// Checked sum of admission, open and finalize gross gas.
+    /// Checked sum of admission, open, import and finalize gross gas.
     pub total_gas_spent: u64,
     /// Locally derived root-input commitment.
     pub input_commitment: B256,
@@ -318,8 +333,12 @@ pub enum ExecutionError {
         /// Epoch named by the supplied root input.
         received: u64,
     },
+    /// The privileged root-record import errored, reverted, or halted.
+    ImportFailed(String),
     /// Finalize errored, reverted, halted, or produced wrong storage.
     FinalizeFailed(String),
+    /// The root-record import companion was refused at admission.
+    RecordImport(ImportError),
     /// The committed B1 update was refused before execution.
     B1Update(UpdateError),
     /// The parent registry's immutable B1 words differ from the pinned profile.
@@ -342,6 +361,9 @@ impl RootInputV2 {
         }
         if self.b1_update_hash == B256::ZERO {
             return Err(ExecutionError::InvalidInput("B1 update hash must be non-zero"));
+        }
+        if self.root_records_hash == B256::ZERO {
+            return Err(ExecutionError::InvalidInput("root records hash must be non-zero"));
         }
         if self.origin.input_record_version != 1 {
             return Err(ExecutionError::InvalidInput("input record version must be 1"));
@@ -408,7 +430,7 @@ impl RootInputV2 {
     pub fn canonical_cbor(&self) -> Result<Vec<u8>, ExecutionError> {
         self.origin_class()?;
         let mut out = Vec::new();
-        array(&mut out, 12);
+        array(&mut out, 13);
         uint(&mut out, self.version);
         uint(&mut out, self.network_id);
         uint(&mut out, self.partition_id);
@@ -424,6 +446,7 @@ impl RootInputV2 {
             bytes(&mut out, transition);
         }
         bytes(&mut out, self.b1_update_hash.as_slice());
+        bytes(&mut out, self.root_records_hash.as_slice());
         Ok(out)
     }
 
@@ -730,7 +753,24 @@ where
         },
         config.system_gas_limit,
     )?;
-    let admission_gas = admitted.gas;
+    // The root-record import is admitted from the budget the B1 admission left, in the same staged
+    // order; G_admit is both charges.
+    let records = admit_import(
+        update.records,
+        input.root_records_hash,
+        config.system_gas_limit.checked_sub(admitted.gas).ok_or(
+            ExecutionError::GasBudgetExceeded {
+                spent: admitted.gas,
+                limit: config.system_gas_limit,
+            },
+        )?,
+    )
+    .map_err(ExecutionError::RecordImport)?;
+    let admission_gas =
+        admitted.gas.checked_add(records.gas).ok_or(ExecutionError::GasBudgetExceeded {
+            spent: u64::MAX,
+            limit: config.system_gas_limit,
+        })?;
     let prepared = prepare_transition(input, &admitted.update, genesis_shard_conf_hash)?;
     let mut evm = Context::mainnet()
         .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecId::CANCUN))
@@ -754,9 +794,45 @@ where
     let open_gas_refunded = open_result.gas().inner_refunded();
     let open_state = evm.ctx_mut().journal_mut().finalize();
     evm.ctx_mut().db_mut().commit(open_state);
-    // The outcome commitment covers admission plus open; finalize's gas joins only the combined
-    // system total, so the commitment never refers to itself.
-    let staged_gas = admission_gas + open_gas_spent;
+    // Privileged import, forwarded exactly the system budget still unspent after admission and
+    // open.
+    let after_open =
+        admission_gas.checked_add(open_gas_spent).ok_or(ExecutionError::GasBudgetExceeded {
+            spent: u64::MAX,
+            limit: config.system_gas_limit,
+        })?;
+    let import_remaining = config.system_gas_limit.checked_sub(after_open).ok_or(
+        ExecutionError::GasBudgetExceeded { spent: after_open, limit: config.system_gas_limit },
+    )?;
+    let mut import_tx = TxEnv::new_system_tx_with_caller(
+        SYSTEM_CALLER,
+        SEAL_REGISTRY,
+        records.import.call_data(prepared.n),
+    );
+    import_tx.gas_limit = import_remaining;
+    evm.ctx_mut().set_tx(import_tx);
+    let import_result = MainnetHandler::<
+        _,
+        revm::context_interface::result::EVMError<<DB as Database>::Error>,
+        _,
+    >::default()
+    .run_system_call(&mut evm)
+    .map_err(|e| ExecutionError::ImportFailed(format!("{e:?}")))?;
+    if !import_result.is_success() {
+        return Err(ExecutionError::ImportFailed(format!("{import_result:?}")));
+    }
+    let import_gas_spent = import_result.gas().total_gas_spent();
+    let import_gas_refunded = import_result.gas().inner_refunded();
+    let import_state = evm.ctx_mut().journal_mut().finalize();
+    evm.ctx_mut().db_mut().commit(import_state);
+    // G_pre = G_admit + G_open + G_import is the figure the outcome commitment carries; finalize's
+    // gas (and the hooks') join only the combined system total, so the commitment never refers
+    // to itself.
+    let staged_gas =
+        after_open.checked_add(import_gas_spent).ok_or(ExecutionError::GasBudgetExceeded {
+            spent: u64::MAX,
+            limit: config.system_gas_limit,
+        })?;
     let registry_commitment = system_outcome_commitment(staged_gas, prepared.input_commitment);
     let remaining = config.system_gas_limit.checked_sub(staged_gas).ok_or(
         ExecutionError::GasBudgetExceeded { spent: staged_gas, limit: config.system_gas_limit },
@@ -814,8 +890,11 @@ where
     }
     Ok(ExecutionResult {
         admission_gas,
+        records_admission_gas: records.gas,
         open_gas_spent,
         open_gas_refunded,
+        import_gas_spent,
+        import_gas_refunded,
         finalize_gas_spent,
         finalize_gas_refunded,
         total_gas_spent,
@@ -988,6 +1067,7 @@ mod tests {
         technical: SourceTechnical,
         transitions: Vec<String>,
         b1_update_hash: B256,
+        root_records_hash: B256,
     }
     #[derive(Deserialize)]
     #[serde(rename_all = "camelCase")]
@@ -1048,6 +1128,7 @@ mod tests {
             },
             transitions: source.transitions.into_iter().map(|v| decode_hex(&v)).collect(),
             b1_update_hash: source.b1_update_hash,
+            root_records_hash: source.root_records_hash,
         }
     }
 
@@ -1106,6 +1187,7 @@ mod tests {
             transitions: vec![],
             // Placeholder: `run` commits the real update for the input as it stands at the call.
             b1_update_hash: B256::repeat_byte(0xb1),
+            root_records_hash: B256::repeat_byte(0xb2),
         }
     }
 
@@ -1142,7 +1224,7 @@ mod tests {
         let update = testing::seal(&mut input, parent_number, tail_of(parent));
         execute_registry_transition(
             &input,
-            UpdateInput { bytes: &update, parent_number },
+            UpdateInput { bytes: &update, records: &testing::empty_import(), parent_number },
             parent,
             ExecutionConfig { system_gas_limit: limit, b1: testing::b1_context() },
         )
@@ -1232,17 +1314,21 @@ mod tests {
         );
         assert_eq!(
             second.total_gas_spent,
-            second.admission_gas + second.open_gas_spent + second.finalize_gas_spent
+            second.admission_gas +
+                second.open_gas_spent +
+                second.import_gas_spent +
+                second.finalize_gas_spent
         );
         // Recorded from revm 42 executing the pinned B1 artifact/test genesis.
         assert_eq!(
             (
                 second.admission_gas,
                 second.open_gas_spent,
+                second.import_gas_spent,
                 second.finalize_gas_spent,
                 second.total_gas_spent
             ),
-            (4_640, 123_091, 45_081, 172_812)
+            (7_728, 123_610, 24_726, 47_525, 203_589)
         );
         let exact = second.total_gas_spent;
         assert!(run(&second_input, &after_first, exact).is_ok());

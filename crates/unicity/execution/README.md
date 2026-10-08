@@ -2,16 +2,36 @@
 
 This crate contains the bounded execution kernel and shared Reth block-execution adapter for the
 single B1 profile: full authenticated root members in deterministically pruned ordinary EVM state.
-It pins the B1 `SealRegistry` of unicity-pos-contracts PR 6 (`71eb6325`), whose runtime is in
-`testdata/seal-registry.json` with code hash
-`0x28ebc47d5beeb45307cb92ff1521be6a5623d4e4fa1721bc13a6f755cdf0781c`. There is no layout version
+It pins the `SealRegistry` of unicity-pos-contracts (B1 plus the authenticated root-record log,
+`30bc153`), whose runtime is in `testdata/seal-registry.json` with code hash
+`0x1c660647c1dc27aff97d9e9d5315e2ff60208ea8446253164d831c3ae0cd2611`. There is no layout version
 and no older registry: the fixed words, the circular live-set queue and the entry and member words
 are the one layout, and a genesis that does not carry it is refused.
 
-## The committed update
+## The committed update and the root-record import
 
-The canonical root input has twelve fields: the earlier eleven followed by
-`b1UpdateHash = SHA-256(Update)`. The exact `Update` bytes travel with the root-input companion
+The canonical root input has thirteen fields: the earlier eleven followed by
+`b1UpdateHash = SHA-256(Update)` and `rootRecordsHash = SHA-256(import companion)`. Both are
+mandatory; there is no shorter tuple and no alternative-arity decoder.
+
+The import companion is the canonical CBOR `["UNICITY_P85_RECORD_IMPORT", p, t, targetCount,
+targetTip, entries]` that bft-core's `rootrecords.Import` encodes: exactly the next
+`min(32, targetCount - registryCount)` records of the authenticated root source log, with the
+authenticated current progress and UC time. It travels beside the update (`records` in the build
+envelope and the seal companion, a frame in the durable companion record), is re-executed by build,
+import, replay and recovery, and is admitted in the staged order of [`records`]: the byte cap
+`16384`, the scan charge `2000 + 16*C_R`, an allocation-free structural scan that reports `N`, the
+entry charge `1000*N`, then the hash check. The registry's own rules (indices, links, identifiers,
+anchors, targets, closure and retirement uniqueness) run inside the metered `importRootRecords`
+call; this crate repeats none of them and decides which records are right never: the paired Go node
+does.
+
+The privileged sequence is admission, `open`, `importRootRecords`, `finalize`, then the stock
+EIP-4788 call. `G_pre = G_admit + G_open + G_import` is what the system outcome entry
+`["system", G_pre, 1, "", SHA-256(rootInput)]` commits; finalize's gas joins the total only, so
+the commitment never refers to itself. The system envelope (`required_system_gas`) includes the
+import's largest admission charge and `IMPORT_EXECUTION_GAS`, a bound measured by the maximal
+import test (32 nine-word records) with the registry's 3/2 margin. The exact `Update` bytes travel with the root-input companion
 (`b1Update` in the build envelope and the seal companion), are persisted with it, and are
 re-executed by build, import, replay and recovery. [`update`] decodes them with a schema-directed
 reader that accepts one encoding per value, and admits them in the design's staged order:
@@ -59,11 +79,14 @@ that immutable exact parent.
 
 ## Test data
 
-`testdata/generate-b1-vectors_test.go` is run from bft-core's Go module at `ce9cad819` (see the
+`testdata/p85-import-vectors.json` is bft-core's `rootrecords/testdata/import-vectors.json`: canonical
+import companions with their `rootRecordsHash`, decoded and charged here to the unit.
+
+`testdata/generate-b1-vectors_test.go` is run from bft-core's Go module at the commit of the same-named PR (`p85/pr1c-pin`; see the
 file header). It builds the funded, EIP-4788-equipped B1 genesis (`signed-beacon-genesis.json` and
 its oracle), the K=2 scenario `b1-vectors.json` (Updates, root inputs, acknowledgement
 transitions and every changed registry word, all from bft-core's `b1state` model and `evmroot`
-encoder) and re-encodes the executable sources of `v2-vectors.json` as twelve-field inputs. The
+encoder) and re-encodes the executable sources of `v2-vectors.json` as thirteen-field inputs. The
 Rust tests execute the real registry runtime and require every addressed word to equal bft-core's
 model after each step. `system-outcome-vectors.json` was generated independently through bft-core
 `evmroot.SealRegistryCommitment`. The `testing` module (feature `test-utils`) builds the updates an

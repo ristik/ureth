@@ -67,6 +67,9 @@ pub struct SealBuildInput {
     pub transitions: Vec<Bytes>,
     /// Canonical B1 update bytes whose `SHA-256` the root input commits to.
     pub b1_update: Bytes,
+    /// Canonical root-record import companion whose `SHA-256` the root input commits to
+    /// (`rootRecordsHash`).
+    pub records: Bytes,
     /// Canonical [`crate::pairing::PairBinding`] the local Go verification produced for this build
     /// job. Required: a request without one is refused before anything is installed.
     pub pair_binding: Bytes,
@@ -94,6 +97,7 @@ impl SealBuildInput {
             ));
         }
         root.check_update(&self.b1_update)?;
+        root.check_records(&self.records)?;
         Ok(root)
     }
 }
@@ -113,6 +117,9 @@ pub struct SealCompanion {
     /// Canonical B1 update bytes whose `SHA-256` the root input commits to. They are retained
     /// with the companion so replay and recovery re-execute exactly the bytes the header binds.
     pub b1_update: Bytes,
+    /// Canonical root-record import companion whose `SHA-256` the root input commits to, retained
+    /// and re-executed exactly like the update.
+    pub records: Bytes,
     /// Canonical [`crate::pairing::PairBinding`] the receiving pair's own Go verification
     /// produced for the exact block this companion accompanies. It is retained with the
     /// companion, so recovery re-checks the same binding rather than trusting the stored input.
@@ -128,6 +135,7 @@ impl SealCompanion {
     pub fn decode_root_input(&self) -> Result<RootInputV2, CanonicalCborError> {
         let root = RootInputV2::from_canonical_cbor(&self.root_input)?;
         root.check_update(&self.b1_update)?;
+        root.check_records(&self.records)?;
         Ok(root)
     }
 }
@@ -192,6 +200,16 @@ impl RootInputV2 {
         Ok(())
     }
 
+    /// Refuses import bytes that do not hash to the committed thirteenth field.
+    pub fn check_records(&self, records: &[u8]) -> Result<(), CanonicalCborError> {
+        if crate::sha256(records) != self.root_records_hash {
+            return Err(CanonicalCborError::InvalidRootInput(
+                "root-record import does not hash to the committed value",
+            ));
+        }
+        Ok(())
+    }
+
     /// Decodes one canonical RFC 8949 root input and validates it through
     /// [`RootInputV2::origin_class`], so an accepted value is a valid value.
     ///
@@ -225,8 +243,8 @@ impl RootInputV2 {
 
 fn decode_root_input(decoder: &mut Decoder<'_>) -> Result<RootInputV2, CanonicalCborError> {
     let arity = decoder.read_array()?;
-    if arity != 12 {
-        return Err(CanonicalCborError::WrongArity { expected: 12, found: arity });
+    if arity != 13 {
+        return Err(CanonicalCborError::WrongArity { expected: 13, found: arity });
     }
     Ok(RootInputV2 {
         version: decoder.read_uint()?,
@@ -241,6 +259,7 @@ fn decode_root_input(decoder: &mut Decoder<'_>) -> Result<RootInputV2, Canonical
         technical: decode_technical(decoder)?,
         transitions: decode_byte_string_array(decoder)?,
         b1_update_hash: decoder.read_word()?,
+        root_records_hash: decoder.read_word()?,
     })
 }
 
@@ -512,7 +531,7 @@ impl<'a> Decoder<'a> {
     }
 
     /// A byte string no longer than `limit`, refused before its content is touched.
-    fn read_bounded_bytes(
+    pub(crate) fn read_bounded_bytes(
         &mut self,
         what: &'static str,
         limit: usize,
@@ -631,7 +650,7 @@ impl<'a> Decoder<'a> {
         }
     }
 
-    fn read_bytes(&mut self) -> Result<&'a [u8], CanonicalCborError> {
+    pub(crate) fn read_bytes(&mut self) -> Result<&'a [u8], CanonicalCborError> {
         match self.read_head()? {
             (2, length) => {
                 let length =
@@ -719,12 +738,21 @@ mod tests {
     }
 
     fn job() -> B1Job {
-        B1Job { context: crate::testing::b1_context(), update: Bytes::from_static(SAMPLE_UPDATE) }
+        B1Job {
+            context: crate::testing::b1_context(),
+            update: Bytes::from_static(SAMPLE_UPDATE),
+            records: Bytes::from_static(SAMPLE_RECORDS),
+        }
     }
 
     /// Opaque bytes: the wire layer only ties an update to its committed hash, it does not parse
     /// it.
     const SAMPLE_UPDATE: &[u8] = b"sample-b1-update";
+    const SAMPLE_RECORDS: &[u8] = b"sample-records-import";
+
+    fn records_hex() -> String {
+        format!("0x{}", alloy_primitives::hex::encode(SAMPLE_RECORDS))
+    }
 
     fn update_hex() -> String {
         format!("0x{}", alloy_primitives::hex::encode(SAMPLE_UPDATE))
@@ -768,28 +796,33 @@ mod tests {
             technical,
             transitions: vec![],
             b1_update_hash: crate::sha256(SAMPLE_UPDATE),
+            root_records_hash: crate::sha256(SAMPLE_RECORDS),
         }
     }
 
     fn encoded_sample() -> Vec<u8> {
         let encoded = sample().canonical_cbor().unwrap();
         // The mutations below index the sample encoding directly, so pin the shape they assume.
-        assert_eq!(encoded[0], 0x8c, "top-level array of twelve");
+        assert_eq!(encoded[0], 0x8d, "top-level array of thirteen");
         assert_eq!(encoded[1], 0x02, "version two");
         assert_eq!(encoded[4], 0x42, "two-byte shard id");
         encoded
     }
 
-    /// The sample's encoding without its final field, the thirty-two-byte update hash frame.
+    /// The sample's encoding without its two final fields, the thirty-two-byte update hash and
+    /// records hash frames.
     fn without_update_hash() -> Vec<u8> {
         let mut encoded = encoded_sample();
-        encoded.truncate(encoded.len() - 34);
+        encoded.truncate(encoded.len() - 68);
         encoded
     }
 
+    /// The two final frames: the update hash, then the records hash.
     fn update_hash_frame() -> Vec<u8> {
         let mut frame = vec![0x58, 0x20];
         frame.extend_from_slice(crate::sha256(SAMPLE_UPDATE).as_slice());
+        frame.extend([0x58, 0x20]);
+        frame.extend_from_slice(crate::sha256(SAMPLE_RECORDS).as_slice());
         frame
     }
 
@@ -907,7 +940,7 @@ mod tests {
         short_array[0] = 0x8a;
         assert_eq!(
             decode_error(&short_array),
-            CanonicalCborError::WrongArity { expected: 12, found: 10 }
+            CanonicalCborError::WrongArity { expected: 13, found: 10 }
         );
 
         // Point the thirty-two-byte parent hash head at only sixteen bytes.
@@ -946,6 +979,7 @@ mod tests {
             root_input: sample().canonical_cbor().unwrap().into(),
             transitions: vec![],
             b1_update: Bytes::from_static(SAMPLE_UPDATE),
+            records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::from(vec![0x01]),
         };
         let json = serde_json::to_string(&value).unwrap();
@@ -960,6 +994,7 @@ mod tests {
             root_input: sample().canonical_cbor().unwrap().into(),
             transitions: vec![Bytes::from(vec![0xaa])],
             b1_update: Bytes::from_static(SAMPLE_UPDATE),
+            records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::new(),
         };
         assert_eq!(
@@ -978,12 +1013,14 @@ mod tests {
             root_input: sample().canonical_cbor().unwrap().into(),
             transitions: vec![],
             b1_update: Bytes::from_static(b"another update"),
+            records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::new(),
         };
         assert_eq!(build.decode_root_input(), Err(mismatch.clone()));
         let companion = SealCompanion {
             root_input: sample().canonical_cbor().unwrap().into(),
             b1_update: Bytes::new(),
+            records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::new(),
             witnesses: vec![],
             provenance: "build".into(),
@@ -995,10 +1032,57 @@ mod tests {
     fn a_zero_update_hash_is_not_a_root_input() {
         let mut raw = encoded_sample();
         let end = raw.len();
-        raw[end - 32..].fill(0);
+        raw[end - 66..end - 34].fill(0);
         assert_eq!(
             RootInputV2::from_canonical_cbor(&raw),
             Err(CanonicalCborError::InvalidRootInput("B1 update hash must be non-zero"))
+        );
+    }
+
+    #[test]
+    fn a_zero_records_hash_is_not_a_root_input() {
+        let mut raw = encoded_sample();
+        let end = raw.len();
+        raw[end - 32..].fill(0);
+        assert_eq!(
+            RootInputV2::from_canonical_cbor(&raw),
+            Err(CanonicalCborError::InvalidRootInput("root records hash must be non-zero"))
+        );
+    }
+
+    #[test]
+    fn root_records_that_do_not_hash_to_the_committed_value_are_refused_in_both_envelopes() {
+        let mismatch = CanonicalCborError::InvalidRootInput(
+            "root-record import does not hash to the committed value",
+        );
+        let build = SealBuildInput {
+            root_input: sample().canonical_cbor().unwrap().into(),
+            transitions: vec![],
+            b1_update: Bytes::from_static(SAMPLE_UPDATE),
+            records: Bytes::from_static(b"another import"),
+            pair_binding: Bytes::new(),
+        };
+        assert_eq!(build.decode_root_input(), Err(mismatch.clone()));
+        let companion = SealCompanion {
+            root_input: sample().canonical_cbor().unwrap().into(),
+            b1_update: Bytes::from_static(SAMPLE_UPDATE),
+            records: Bytes::new(),
+            pair_binding: Bytes::new(),
+            witnesses: vec![],
+            provenance: "build".into(),
+        };
+        assert_eq!(companion.decode_root_input(), Err(mismatch));
+    }
+
+    #[test]
+    fn a_twelve_field_root_input_is_refused() {
+        // drop the thirteenth field (0x58 0x20 and 32 bytes) and say twelve
+        let full = encoded_sample();
+        let mut twelve = full[..full.len() - 34].to_vec();
+        twelve[0] = 0x8c;
+        assert_eq!(
+            RootInputV2::from_canonical_cbor(&twelve),
+            Err(CanonicalCborError::WrongArity { expected: 13, found: 12 })
         );
     }
 
@@ -1007,6 +1091,7 @@ mod tests {
         let value = SealCompanion {
             root_input: sample().canonical_cbor().unwrap().into(),
             b1_update: Bytes::from_static(SAMPLE_UPDATE),
+            records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::from(vec![0x01]),
             witnesses: vec![Bytes::from(vec![0x0a, 0x0b]), Bytes::new()],
             provenance: "newPayload".into(),
@@ -1021,13 +1106,14 @@ mod tests {
     fn seal_build_input_json_shape_is_enforced() {
         let root = root_input_hex();
         let update = update_hex();
+        let records = records_hex();
         let good = format!(
-            r#"{{"rootInput":"{root}","b1Update":"{update}","transitions":[],"pairBinding":"0x00"}}"#
+            r#"{{"rootInput":"{root}","b1Update":"{update}","records":"{records}","transitions":[],"pairBinding":"0x00"}}"#
         );
         assert!(serde_json::from_str::<SealBuildInput>(&good).is_ok());
 
         let unknown = format!(
-            r#"{{"rootInput":"{root}","b1Update":"{update}","transitions":[],"pairBinding":"0x00","bogus":1}}"#
+            r#"{{"rootInput":"{root}","b1Update":"{update}","records":"{records}","transitions":[],"pairBinding":"0x00","bogus":1}}"#
         );
         let no_update =
             format!(r#"{{"rootInput":"{root}","transitions":[],"pairBinding":"0x00"}}"#);
@@ -1038,12 +1124,11 @@ mod tests {
         assert!(serde_json::from_str::<SealBuildInput>(&missing).is_err());
 
         let wrong_type = format!(
-            r#"{{"rootInput":"{root}","b1Update":"{update}","transitions":5,"pairBinding":"0x00"}}"#
+            r#"{{"rootInput":"{root}","b1Update":"{update}","records":"{records}","transitions":5,"pairBinding":"0x00"}}"#
         );
         assert!(serde_json::from_str::<SealBuildInput>(&wrong_type).is_err());
 
-        let bad_hex =
-            r#"{"rootInput":"0xzz","b1Update":"0x","transitions":[],"pairBinding":"0x00"}"#;
+        let bad_hex = r#"{"rootInput":"0xzz","b1Update":"0x","records":"0x","transitions":[],"pairBinding":"0x00"}"#;
         assert!(serde_json::from_str::<SealBuildInput>(bad_hex).is_err());
 
         let parsed: SealBuildInput = serde_json::from_str(&good).unwrap();
@@ -1054,8 +1139,9 @@ mod tests {
     fn seal_companion_json_shape_is_enforced() {
         let root = root_input_hex();
         let update = update_hex();
+        let records = records_hex();
         let good = format!(
-            r#"{{"rootInput":"{root}","b1Update":"{update}","pairBinding":"0x00","witnesses":[],"provenance":"build"}}"#
+            r#"{{"rootInput":"{root}","b1Update":"{update}","records":"{records}","pairBinding":"0x00","witnesses":[],"provenance":"build"}}"#
         );
         let no_update = format!(
             r#"{{"rootInput":"{root}","pairBinding":"0x00","witnesses":[],"provenance":"build"}}"#
@@ -1064,7 +1150,7 @@ mod tests {
         assert!(serde_json::from_str::<SealCompanion>(&good).is_ok());
 
         let unknown = format!(
-            r#"{{"rootInput":"{root}","b1Update":"{update}","pairBinding":"0x00","witnesses":[],"provenance":"build","x":0}}"#
+            r#"{{"rootInput":"{root}","b1Update":"{update}","records":"{records}","pairBinding":"0x00","witnesses":[],"provenance":"build","x":0}}"#
         );
         assert!(serde_json::from_str::<SealCompanion>(&unknown).is_err());
 
@@ -1072,11 +1158,11 @@ mod tests {
         assert!(serde_json::from_str::<SealCompanion>(&missing).is_err());
 
         let wrong_type = format!(
-            r#"{{"rootInput":"{root}","b1Update":"{update}","pairBinding":"0x00","witnesses":[],"provenance":7}}"#
+            r#"{{"rootInput":"{root}","b1Update":"{update}","records":"{records}","pairBinding":"0x00","witnesses":[],"provenance":7}}"#
         );
         assert!(serde_json::from_str::<SealCompanion>(&wrong_type).is_err());
 
-        let bad_hex = r#"{"rootInput":"0xzz","b1Update":"0x","pairBinding":"0x00","witnesses":[],"provenance":"build"}"#;
+        let bad_hex = r#"{"rootInput":"0xzz","b1Update":"0x","records":"0x","pairBinding":"0x00","witnesses":[],"provenance":"build"}"#;
         assert!(serde_json::from_str::<SealCompanion>(bad_hex).is_err());
     }
 
@@ -1086,16 +1172,18 @@ mod tests {
             root_input: vec![0x80].into(),
             transitions: vec![],
             b1_update: Bytes::new(),
+            records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::new(),
         };
         assert_eq!(
             build.decode_root_input(),
-            Err(CanonicalCborError::WrongArity { expected: 12, found: 0 })
+            Err(CanonicalCborError::WrongArity { expected: 13, found: 0 })
         );
 
         let companion = SealCompanion {
             root_input: vec![0x01].into(),
             b1_update: Bytes::new(),
+            records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::new(),
             witnesses: vec![],
             provenance: "build".into(),
@@ -1203,6 +1291,7 @@ mod tests {
             root_input: encoded_sample().into(),
             transitions: vec![vec![1].into(), vec![2].into()],
             b1_update: Bytes::from_static(SAMPLE_UPDATE),
+            records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::new(),
         };
         assert_eq!(
@@ -1217,7 +1306,7 @@ mod tests {
 
     fn envelope_json(extra: &str) -> String {
         format!(
-            r#"{{"rootInput":"0x80","b1Update":"0x80","transitions":[],"pairBinding":"0x80"{extra}}}"#
+            r#"{{"rootInput":"0x80","b1Update":"0x80","records":"0x80","transitions":[],"pairBinding":"0x80"{extra}}}"#
         )
     }
 
@@ -1226,7 +1315,7 @@ mod tests {
         assert!(serde_json::from_str::<SealBuildInput>(&envelope_json("")).is_ok());
         // Absent.
         assert!(serde_json::from_str::<SealBuildInput>(
-            r#"{"rootInput":"0x80","b1Update":"0x80","transitions":[]}"#
+            r#"{"rootInput":"0x80","b1Update":"0x80","records":"0x80","transitions":[]}"#
         )
         .unwrap_err()
         .to_string()
@@ -1246,8 +1335,7 @@ mod tests {
             .to_string()
             .contains("unknown field `legacy`"));
         // The companion envelope is held to the same rules.
-        let companion =
-            r#"{"rootInput":"0x80","b1Update":"0x80","witnesses":[],"provenance":"build""#;
+        let companion = r#"{"rootInput":"0x80","b1Update":"0x80","records":"0x80","witnesses":[],"provenance":"build""#;
         assert!(serde_json::from_str::<SealCompanion>(&format!("{companion}}}"))
             .unwrap_err()
             .to_string()

@@ -80,6 +80,7 @@ pub(crate) fn input(round: u64, root_round: u64, parent_hash: B256) -> RootInput
         technical,
         transitions: vec![],
         b1_update_hash: B256::repeat_byte(0xb1),
+        root_records_hash: B256::repeat_byte(0xb2),
     }
 }
 
@@ -142,5 +143,5 @@ pub(crate) fn sealed(
     tail: Tail,
 ) -> (Arc<RootInputV2>, B1Job) {
     let update = testing::seal(&mut input, parent_number, tail);
-    (Arc::new(input), B1Job { context: context(), update })
+    (Arc::new(input), B1Job { context: context(), update, records: testing::empty_import() })
 }

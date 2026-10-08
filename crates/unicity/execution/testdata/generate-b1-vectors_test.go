@@ -28,6 +28,7 @@ import (
 	"github.com/unicitynetwork/bft-core/b1state"
 	"github.com/unicitynetwork/bft-core/evmroot"
 	"github.com/unicitynetwork/bft-core/internal/testutils/b1fixture"
+	"github.com/unicitynetwork/bft-core/rootrecords"
 )
 
 func h32(parts ...string) [32]byte {
@@ -80,6 +81,9 @@ type stepOut struct {
 	LiveEpochs    []uint64          `json:"liveEpochs"`
 	Head          uint64            `json:"head"`
 	OriginIdentity string           `json:"originIdentity"`
+	RecordsImport  string           `json:"recordsImport"`
+	RecordsHash    string           `json:"rootRecordsHash"`
+	RecordsGas     uint64           `json:"recordsAdmissionGas"`
 }
 
 func TestGenerateUrethPR4Vectors(t *testing.T) {
@@ -212,7 +216,14 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 		require.NoError(t, err)
 		require.Equal(t, mustSelect(t, history, s.round, w), next.Entries, "Apply and Select agree")
 		updateHash := u.Hash()
-		input := evmroot.RootInputV2{Version: 2, NetworkID: uint64(p.Network), PartitionID: 8, Round: n, CertifiedEpoch: assignedShard, AuthorizedEpoch: newShard, ParentHash: parent[:], Origin: origin, TE: tr, Transitions: transitions, B1UpdateHash: updateHash[:]}
+		// The mandatory root-record import of an empty source log: no entries, the pinned genesis UC time, a zero target.
+		imp := rootrecords.Import{Progress: 0, UCTime: p.GenesisUCTime}
+		impRaw, err := imp.Encode()
+		require.NoError(t, err)
+		impHash := sha256.Sum256(impRaw)
+		_, impGas, err := rootrecords.AdmitImport(impRaw, p.SystemGas)
+		require.NoError(t, err)
+		input := evmroot.RootInputV2{Version: 2, NetworkID: uint64(p.Network), PartitionID: 8, Round: n, CertifiedEpoch: assignedShard, AuthorizedEpoch: newShard, ParentHash: parent[:], Origin: origin, TE: tr, Transitions: transitions, B1UpdateHash: updateHash[:], RootRecordsHash: impHash[:]}
 		require.NoError(t, input.Validate())
 		allow, err := changes.WriteAllowance()
 		require.NoError(t, err)
@@ -233,7 +244,7 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 		for _, e := range next.Entries {
 			live = append(live, e.Epoch)
 		}
-		steps = append(steps, stepOut{Name: s.name, N: n, OriginRound: s.round, OriginEpoch: s.epoch, ParentHash: hx32(parent), ParentNumber: n - 1, RootInput: hx(input.Encode()), Update: hx(raw), UpdateHash: hx32(u.Hash()), AdmissionGas: gas, Inserts: ins, Clears: clr, WriteAllow: allow, Final: final, LiveEpochs: live, Head: next.Head, OriginIdentity: hx32(identity)})
+		steps = append(steps, stepOut{Name: s.name, N: n, OriginRound: s.round, OriginEpoch: s.epoch, ParentHash: hx32(parent), ParentNumber: n - 1, RootInput: hx(input.Encode()), Update: hx(raw), UpdateHash: hx32(u.Hash()), AdmissionGas: gas, Inserts: ins, Clears: clr, WriteAllow: allow, Final: final, LiveEpochs: live, Head: next.Head, OriginIdentity: hx32(identity), RecordsImport: hx(impRaw), RecordsHash: hx32(impHash), RecordsGas: impGas})
 		ring, parentOrigin = next, s.round
 		assignedRoot, assignedShard, assignedConf = s.epoch, newShard, newConf
 	}
@@ -248,11 +259,11 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 	sort.Strings(keys)
 	vec := map[string]any{
 		"format": "unicity-b1-pr4-vectors",
-		"source": "bft-core ce9cad819 b1state model, evmroot encoder, registrygenesis.GenerateB1; contracts 71eb6325",
+		"source": "bft-core p85/pr1c-pin b1state model, evmroot encoder, rootrecords import, registrygenesis.GenerateB1; contracts 30bc153",
 		"world": map[string]any{
 			"network": p.Network, "executionChainId": p.ExecutionChainID, "wCert": p.WCert, "rootGenesisId": hx32(p.RootGenesisID),
 			"runtimeHash": hx32(p.RuntimeHash), "profileHash": hx32(profileHash), "systemGas": p.SystemGas, "maxGas": p.MaxGas,
-			"ordinaryCapacity": p.OrdinaryCapacity, "restGas": p.RestGas, "genesisHash": block.Hash().Hex(), "shardConfHash": hx(f.Genesis.FullShardConfHash().Bytes()),
+			"ordinaryCapacity": p.OrdinaryCapacity, "restGas": p.RestGas, "genesisUcTime": p.GenesisUCTime, "genesisHash": block.Hash().Hex(), "shardConfHash": hx(f.Genesis.FullShardConfHash().Bytes()),
 		},
 		"universe":     keys,
 		"genesisWords": words,
@@ -320,6 +331,7 @@ func TestRegenerateV2RootInputVectors(t *testing.T) {
 	}
 	num := func(v any) uint64 { return uint64(v.(float64)) }
 	update := h32("b1pr4/v2-vector-update")
+	recordsHash := h32("p85/v2-vector-records")
 	for _, v := range doc["vectors"].([]any) {
 		vec := v.(map[string]any)
 		src := vec["source"].(map[string]any)
@@ -334,17 +346,18 @@ func TestRegenerateV2RootInputVectors(t *testing.T) {
 			transitions = append(transitions, dec(tr))
 		}
 		input := evmroot.RootInputV2{Version: num(src["version"]), NetworkID: num(src["networkId"]), PartitionID: num(src["partitionId"]), ShardID: dec(src["shardId"]), Round: num(src["authorizedRound"]), CertifiedEpoch: num(src["certifiedEpoch"]), AuthorizedEpoch: num(src["authorizedEpoch"]), ParentHash: dec(src["parentHash"]), Origin: origin,
-			TE: evmroot.TechnicalRecord{Round: num(tech["round"]), Epoch: num(tech["epoch"]), Leader: tech["leader"].(string), StatHash: dec(tech["statHash"]), FeeHash: dec(tech["feeHash"])}, Transitions: transitions, B1UpdateHash: update[:]}
+			TE: evmroot.TechnicalRecord{Round: num(tech["round"]), Epoch: num(tech["epoch"]), Leader: tech["leader"].(string), StatHash: dec(tech["statHash"]), FeeHash: dec(tech["feeHash"])}, Transitions: transitions, B1UpdateHash: update[:], RootRecordsHash: recordsHash[:]}
 		require.NoError(t, input.Validate())
 		src["b1UpdateHash"] = hx32(update)
+		src["rootRecordsHash"] = hx32(recordsHash)
 		ri := vec["rootInput"].(map[string]any)
 		fields := ri["fields"].([]any)
-		ri["fields"] = append(fields, hx32(update))
+		ri["fields"] = append(fields, hx32(update), hx32(recordsHash))
 		ri["cbor"] = hx(input.Encode())
 		extra := input.ExtraData()
 		ri["commitment"] = hx32(extra)
 	}
-	doc["note"] = fmt.Sprint(doc["note"], " Root inputs carry the twelfth field b1UpdateHash and were re-encoded by bft-core's evmroot encoder (ce9cad819) for B1 PR4; origin encodings are unchanged.")
+	doc["note"] = fmt.Sprint(doc["note"], " Root inputs carry the twelfth field b1UpdateHash and the thirteenth rootRecordsHash and were re-encoded by bft-core's evmroot encoder (p85/pr1c-pin); origin encodings are unchanged.")
 	body, err := json.MarshalIndent(doc, "", "  ")
 	require.NoError(t, err)
 	require.NoError(t, os.WriteFile(out, append(body, '\n'), 0o644))

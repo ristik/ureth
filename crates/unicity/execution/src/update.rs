@@ -34,9 +34,9 @@ pub const SCAN_BYTE_GAS: u64 = 16;
 /// Charge per member of the update, reserved before member allocation.
 pub const MEMBER_GAS: u64 = 1000;
 /// Measured-plus-margin `G_rest` constant term (contracts PR 6, to be re-measured here).
-pub const REST_GAS_BASE: u64 = 1_096_500;
+pub const REST_GAS_BASE: u64 = 1_136_500;
 /// Measured-plus-margin `G_rest` term per ring slot.
-pub const REST_GAS_PER_ENTRY: u64 = 1_141_500;
+pub const REST_GAS_PER_ENTRY: u64 = 1_147_500;
 /// Largest measured ring size. A larger profile is refused, never truncated.
 pub const MAX_MEASURED_K: u64 = 16;
 
@@ -73,11 +73,15 @@ impl B1Context {
 
     /// The least `g_sys` the pinned profile admits: the maximum admission charge, the rectangular
     /// gross history-write allowance and the measured-plus-margin `G_rest(K_max)` of the registry
-    /// runtime, `155936 + 15626944*K + 1096500 + 1141500*K`. A smaller reservation is refused at
+    /// runtime, `155936 + 15626944*K + 1136500 + 1147500*K`, plus the root-record import envelope
+    /// (`records::IMPORT_ENVELOPE_GAS`). A smaller reservation is refused at
     /// startup, never truncated at runtime.
     pub fn required_system_gas(&self) -> Result<u64, UpdateError> {
         let k = self.k_max()?;
-        Ok(155_936 + REST_GAS_BASE + (15_626_944 + REST_GAS_PER_ENTRY) * k)
+        Ok(155_936 +
+            REST_GAS_BASE +
+            (15_626_944 + REST_GAS_PER_ENTRY) * k +
+            crate::records::IMPORT_ENVELOPE_GAS)
     }
 
     /// Token cap `32 + 266*K_max`.
@@ -680,6 +684,9 @@ pub struct B1Job {
     pub context: B1Context,
     /// Exact canonical update bytes the root input commits to.
     pub update: Bytes,
+    /// Exact canonical root-record import companion the root input commits to
+    /// (`rootRecordsHash`), carried with the update and re-executed with it.
+    pub records: Bytes,
 }
 
 impl B1Job {
@@ -693,6 +700,9 @@ impl B1Job {
     ) -> Result<(), BlockAccountingError> {
         if sha256(&self.update) != input.b1_update_hash {
             return Err(BlockAccountingError::UpdateHashMismatch);
+        }
+        if sha256(&self.records) != input.root_records_hash {
+            return Err(BlockAccountingError::RecordsHashMismatch);
         }
         let required =
             self.context.required_system_gas().map_err(|_| BlockAccountingError::B1Profile)?;

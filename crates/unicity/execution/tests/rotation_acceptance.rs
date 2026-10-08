@@ -102,7 +102,7 @@ impl Pair {
             testing::rotate(&mut input, self.assigned);
         }
         let update = testing::seal(&mut input, self.head.number, self.tail);
-        (Arc::new(input), B1Job { context: context(), update })
+        (Arc::new(input), B1Job { context: context(), update, records: testing::empty_import() })
     }
 
     fn config(&self, input: &Arc<RootInputV2>, job: &B1Job) -> UnicityEvmConfig {

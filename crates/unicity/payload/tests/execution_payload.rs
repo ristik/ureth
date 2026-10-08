@@ -1131,6 +1131,7 @@ fn seal_input(
         root_input: root.canonical_cbor().unwrap().into(),
         transitions: root.transitions.iter().cloned().map(Into::into).collect(),
         b1_update: b1::job(root).update,
+        records: b1::job(root).records,
         pair_binding: pair_binding(parent, root, build_subject(attrs)).canonical_cbor().into(),
     }
 }
@@ -1141,6 +1142,7 @@ fn import_companion(parent: &SealedHeader, root: &RootInputV2, block_hash: B256)
     SealCompanion {
         root_input: root.canonical_cbor().unwrap().into(),
         b1_update: b1::job(root).update,
+        records: b1::job(root).records,
         pair_binding: binding.canonical_cbor().into(),
         witnesses: Vec::new(),
         provenance: "newPayload".to_owned(),
@@ -1155,6 +1157,7 @@ fn seal_build_rejects_non_canonical_root_input_as_invalid() {
         root_input: vec![0x80].into(),
         transitions: vec![],
         b1_update: Default::default(),
+        records: Default::default(),
         pair_binding: Default::default(),
     };
 
@@ -1307,6 +1310,7 @@ fn get_payload_companion_reencodes_exactly_the_caller_bytes() {
     let companion = build_seal_companion(
         &decoded,
         &b1::job(&decoded).update,
+        &b1::job(&decoded).records,
         &pair_binding(&parent, &decoded, build_subject(&attrs)),
     )
     .unwrap();
@@ -1674,6 +1678,7 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
         let companion = build_seal_companion(
             &root,
             &b1::job(&root).update,
+            &b1::job(&root).records,
             &pair_binding(&parent_for_block, &root, build_subject(&attrs)),
         )
         .unwrap();
@@ -2274,6 +2279,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         root_input: wrong_root.canonical_cbor().unwrap().into(),
         transitions: vec![],
         b1_update: b1::job(&wrong_root).update,
+        records: b1::job(&wrong_root).records,
         pair_binding: seal_input(&first.parent, &first.root, &attrs).pair_binding,
     };
     let (_, _, _, _, build_context, build_validator) = seal_fixture();
@@ -2310,6 +2316,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     let wrong_context_companion = SealCompanion {
         root_input: wrong_root.canonical_cbor().unwrap().into(),
         b1_update: b1::job(&wrong_root).update,
+        records: b1::job(&wrong_root).records,
         ..first.import_companion.clone()
     };
     let (_, _, _, _, wrong_context, wrong_context_validator) = seal_fixture();
@@ -2382,6 +2389,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     let wrong_order_companion = build_seal_companion(
         &wrong_order_root,
         &b1::job(&wrong_order_root).update,
+        &b1::job(&wrong_order_root).records,
         &pair_binding(
             &second.parent,
             &wrong_order_root,
@@ -2786,6 +2794,7 @@ async fn get_payload_with_seal_stores_the_companion_it_returns() {
     let expected = build_seal_companion(
         &root,
         &b1::job(&root).update,
+        &b1::job(&root).records,
         &pair_binding(&parent, &root, build_subject(&attrs)),
     )
     .unwrap();
@@ -2968,6 +2977,7 @@ async fn new_payload_with_seal_rejects_a_malformed_root_input() {
     let malformed = SealCompanion {
         root_input: vec![0x80].into(),
         b1_update: Default::default(),
+        records: Default::default(),
         pair_binding: Default::default(),
         witnesses: vec![],
         provenance: "newPayload".into(),
@@ -3360,6 +3370,7 @@ async fn get_seal_companion_returns_a_stored_companion() {
     let companion = build_seal_companion(
         &root,
         &b1::job(&root).update,
+        &b1::job(&root).records,
         &pair_binding(&parent, &root, build_subject(&attrs)),
     )
     .unwrap();
@@ -3377,6 +3388,7 @@ async fn get_seal_companion_reports_unavailable_below_the_horizon() {
     let companion = build_seal_companion(
         &root,
         &b1::job(&root).update,
+        &b1::job(&root).records,
         &pair_binding(&parent, &root, build_subject(&attrs)),
     )
     .unwrap();
@@ -3493,6 +3505,7 @@ fn pruner_fixture(
     let companion = build_seal_companion(
         &root,
         &b1::job(&root).update,
+        &b1::job(&root).records,
         &pair_binding(&parent, &root, build_subject(&attrs)),
     )
     .unwrap();
@@ -3700,6 +3713,7 @@ fn go_x2_vector() -> serde_json::Value {
         "parent_hash": hex(genesis_hash().as_slice()),
         "root_input": hex(&root.canonical_cbor().unwrap()),
         "b1_update": hex(&b1::job(&root).update),
+        "records": hex(&b1::job(&root).records),
         "transition": hex(&root.transitions[0]),
         "commitment": hex(root.input_commitment().unwrap().as_slice()),
         "parent_beacon_block_root": hex(
@@ -3788,6 +3802,7 @@ async fn apply_go_subset(
     let genesis_hash = B256::from_slice(&go_hex(&vector["parent_hash"]));
     let mut root_input = go_hex(&vector["root_input"]);
     let mut b1_update = go_hex(&vector["b1_update"]);
+    let mut records = go_hex(&vector["records"]);
     if leak_signer_into_input {
         // Negative control: a root input that differed per signer subset (here: the unicity tree
         // root) must NOT compare equal.
@@ -3795,6 +3810,7 @@ async fn apply_go_subset(
         leaked.origin.tree_root = B256::repeat_byte(0xee);
         b1::reseal(&mut leaked);
         b1_update = b1::job(&leaked).update.to_vec();
+        records = b1::job(&leaked).records.to_vec();
         root_input = leaked.canonical_cbor().unwrap();
     }
     let beacon_root = B256::from_slice(&go_hex(&vector["parent_beacon_block_root"]));
@@ -3802,11 +3818,13 @@ async fn apply_go_subset(
         root_input: root_input.clone().into(),
         transitions: vec![go_hex(&vector["transition"]).into()],
         b1_update: b1_update.clone().into(),
+        records: records.clone().into(),
         pair_binding: Default::default(),
     };
     let mut companion = SealCompanion {
         root_input: root_input.clone().into(),
         b1_update: b1_update.into(),
+        records: records.into(),
         pair_binding: Default::default(),
         witnesses: subset["witnesses"]
             .as_array()

@@ -20,10 +20,14 @@ LIB = "crates/unicity/execution/src/lib.rs"
 WIRE = "crates/unicity/execution/src/wire.rs"
 EXECUTOR = "crates/unicity/execution/src/block_executor.rs"
 STORE = "crates/unicity/store/src/encoding.rs"
+RECORDS = "crates/unicity/execution/src/records.rs"
+BLOCK = "crates/unicity/execution/src/block_executor.rs"
 
 B1 = ["-p", "reth-unicity-execution", "--lib", "b1_tests::"]
 WIREPKG = ["-p", "reth-unicity-execution", "--lib", "wire::"]
 STOREPKG = ["-p", "reth-unicity-store"]
+IMPORT = ["-p", "reth-unicity-execution", "--lib", "records::", "b1_tests::import"]
+IMPORT_ALL = ["-p", "reth-unicity-execution", "--lib"]
 DISABLE = "if false {"
 
 # (name, file, old, new, cargo test arguments)
@@ -91,9 +95,33 @@ MUTANTS = [
     ("profile-words", LIB, "if storage(slot)? != expected {", DISABLE, B1),
     ("open-gas-limit", LIB, "open_tx.gas_limit = config.system_gas_limit - admission_gas;", "open_tx.gas_limit = config.system_gas_limit;", B1),
     ("staged-commitment", LIB, "system_outcome_commitment(staged_gas, prepared.input_commitment)", "system_outcome_commitment(open_gas_spent, prepared.input_commitment)", B1),
+    ("commitment-without-import", LIB, "system_outcome_commitment(staged_gas, prepared.input_commitment)", "system_outcome_commitment(after_open, prepared.input_commitment)", B1),
     ("total-includes-admission", LIB, "staged_gas.checked_add(finalize_gas_spent)", "open_gas_spent.checked_add(finalize_gas_spent)", B1),
+    ("total-includes-import", LIB, "staged_gas.checked_add(finalize_gas_spent)", "after_open.checked_add(finalize_gas_spent)", B1),
+    ("import-gas-limit", LIB, "import_tx.gas_limit = import_remaining;", "import_tx.gas_limit = config.system_gas_limit;", B1),
+    ("import-success", LIB, "if !import_result.is_success() {", DISABLE, IMPORT),
+    ("records-admission-charged", LIB, "let admission_gas = admitted.gas.checked_add(records.gas)", "let admission_gas = admitted.gas.checked_add(0)", B1),
+    ("zero-records-hash", LIB, "if self.root_records_hash == B256::ZERO {", DISABLE, WIREPKG),
+    ("records-envelope-hash", WIRE, "if crate::sha256(records) != self.root_records_hash {", DISABLE, WIREPKG),
+    ("records-bound-hash", UPDATE, "if sha256(&self.records) != input.root_records_hash {", DISABLE, IMPORT_ALL),
+    ("records-byte-cap", RECORDS, "if raw.len() > MAX_IMPORT_BYTES {", DISABLE, IMPORT),
+    ("records-scan-budget", RECORDS, "if scan > budget {", DISABLE, IMPORT),
+    ("records-entry-budget", RECORDS, "if entries_gas > budget - scan {", DISABLE, IMPORT),
+    ("records-hash", RECORDS, "if sha256(raw) != committed_hash {", DISABLE, IMPORT),
+    ("records-domain", RECORDS, "if decoder.read_text()? != IMPORT_DOMAIN {", DISABLE, IMPORT),
+    ("records-envelope-arity", RECORDS, "if arity != 6 {", DISABLE, IMPORT),
+    ("records-entry-arity", RECORDS, "if arity != 8 {", DISABLE, IMPORT),
+    ("records-entry-count", RECORDS, "if entries > MAX_IMPORT_ENTRIES {", DISABLE, IMPORT),
+    ("records-kind", RECORDS, "let width = payload_width(kind).ok_or(ImportError::UnknownKind(kind))?;", "let width = payload_width(kind).unwrap_or(32);", IMPORT),
+    ("records-payload-width", RECORDS, "if data.len() != width {", DISABLE, IMPORT),
+    ("records-closed-epoch", RECORDS, "if kind != 4 && closed_epoch != 0 {", DISABLE, IMPORT),
+    ("records-zero-target-tip", RECORDS, "if target_count == 0 && target_tip != B256::ZERO {", DISABLE, IMPORT),
+    ("records-token-bound", RECORDS, "if tokens > MAX_IMPORT_TOKENS {", DISABLE, IMPORT),
+    ("records-trailing", RECORDS, "decoder.finish()?;\n    Ok(Header", "Ok(Header", IMPORT),
+    ("records-envelope-gas", UPDATE, "crate::records::IMPORT_ENVELOPE_GAS)", "0)", IMPORT_ALL),
     ("finalize-budget", LIB, "let remaining = config.system_gas_limit.checked_sub(staged_gas)", "let remaining = config.system_gas_limit.checked_sub(open_gas_spent)", B1),
     ("store-update-frame", STORE, "    put_frame(&mut out, &companion.b1_update)?;\n", "", STOREPKG),
+    ("store-records-frame", STORE, "    put_frame(&mut out, &companion.records)?;\n", "", STOREPKG),
 ]
 
 

@@ -6,6 +6,7 @@
 //! independent of the Go generator, so the Go vectors and these helpers cross-check each other.
 
 use crate::{
+    records::RecordImport,
     update::{B1Context, Entry, Member, Update},
     RootInputV2, SEAL_REGISTRY_CODE_HASH,
 };
@@ -49,6 +50,8 @@ pub struct World {
     pub genesis_hash: B256,
     /// Full shard configuration hash, the registry's genesis assignment.
     pub shard_conf_hash: B256,
+    /// The pinned genesis UC time: `records.ucTime` before any import.
+    pub genesis_uc_time: u64,
 }
 
 #[derive(Deserialize)]
@@ -206,10 +209,31 @@ pub fn update_in(
     update
 }
 
-/// Commits `input` to the update [`update_for`] builds and returns the exact update bytes.
+/// The mandatory root-record import of an empty source log: no entries, a zero target and the
+/// pinned genesis UC time. Every vector block imports it unless a test supplies a log.
+pub fn empty_import() -> Bytes {
+    RecordImport {
+        progress: 0,
+        uc_time: world().genesis_uc_time,
+        target_count: 0,
+        target_tip: B256::ZERO,
+        entries: Vec::new(),
+    }
+    .to_bytes()
+    .into()
+}
+
+/// `SHA-256` of [`empty_import`]: the `rootRecordsHash` of a block that imports nothing.
+pub fn empty_import_hash() -> B256 {
+    crate::sha256(&empty_import())
+}
+
+/// Commits `input` to the update [`update_for`] builds and to the [`empty_import`], and returns
+/// the exact update bytes.
 pub fn seal(input: &mut RootInputV2, parent_number: u64, tail: Tail) -> Bytes {
     let update = update_for(input, parent_number, tail);
     input.b1_update_hash = update.hash();
+    input.root_records_hash = crate::sha256(&empty_import());
     update.to_bytes().into()
 }
 

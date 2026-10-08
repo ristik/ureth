@@ -37,6 +37,10 @@ struct Step {
     update: String,
     update_hash: B256,
     admission_gas: u64,
+    records_import: String,
+    #[serde(rename = "rootRecordsHash")]
+    root_records_hash: B256,
+    records_admission_gas: u64,
     insert_writes: u64,
     clear_writes: u64,
     write_allowance: u64,
@@ -90,7 +94,7 @@ fn run_bytes(
 ) -> Result<(ExecutionResult, CacheDB<EmptyDB>), ExecutionError> {
     crate::execute_registry_transition(
         input,
-        UpdateInput { bytes, parent_number },
+        UpdateInput { bytes, records: &crate::testing::empty_import(), parent_number },
         parent,
         config(limit),
     )
@@ -170,10 +174,21 @@ fn every_step_reproduces_bft_cores_registry_words_and_admission_gas() {
         assert_eq!(input.authorized_round, step.n, "{}", step.name);
         let (result, next) =
             run_bytes(&input, &bytes, step.parent_number, &db, world().system_gas).unwrap();
-        assert_eq!(result.admission_gas, step.admission_gas, "{}", step.name);
+        assert_eq!(
+            result.admission_gas,
+            step.admission_gas + step.records_admission_gas,
+            "{}",
+            step.name
+        );
+        assert_eq!(result.records_admission_gas, step.records_admission_gas, "{}", step.name);
+        assert_eq!(hex(&step.records_import), testing::empty_import().to_vec(), "{}", step.name);
+        assert_eq!(input.root_records_hash, step.root_records_hash, "{}", step.name);
         assert_eq!(
             result.total_gas_spent,
-            result.admission_gas + result.open_gas_spent + result.finalize_gas_spent,
+            result.admission_gas +
+                result.open_gas_spent +
+                result.import_gas_spent +
+                result.finalize_gas_spent,
             "{}",
             step.name
         );
@@ -185,7 +200,7 @@ fn every_step_reproduces_bft_cores_registry_words_and_admission_gas() {
         // included). `a` and `p` are the entries inserted and deleted by the step.
         let a = step.live_epochs.iter().filter(|e| !live.contains(e)).count() as u64;
         let p = live.iter().filter(|e| !step.live_epochs.contains(e)).count() as u64;
-        let rest = 1_096_500 + 949_500 * a + 192_000 * p;
+        let rest = 1_136_500 + 949_500 * a + 198_000 * p;
         let gross = result.open_gas_spent + result.finalize_gas_spent;
         assert!(
             gross <= step.write_allowance + rest,
@@ -206,7 +221,10 @@ fn deleting_history_refunds_are_never_credited_to_the_system_budget() {
     assert!(result.open_gas_refunded > 0, "pruning the genesis entry clears nonzero words");
     assert_eq!(
         result.total_gas_spent,
-        result.admission_gas + result.open_gas_spent + result.finalize_gas_spent
+        result.admission_gas +
+            result.open_gas_spent +
+            result.import_gas_spent +
+            result.finalize_gas_spent
     );
     // The gross total is the whole budget: one unit less cannot fund the last operation.
     let step = &vectors().steps[EXPIRES_GENESIS];
@@ -635,7 +653,7 @@ fn an_unmeasured_ring_is_refused_never_truncated() {
     assert_eq!(edge.k_max(), Ok(16));
     assert_eq!(
         edge.required_system_gas().unwrap(),
-        155_936 + 1_096_500 + (15_626_944 + 1_141_500) * 16
+        155_936 + 1_136_500 + (15_626_944 + 1_147_500) * 16 + crate::records::IMPORT_ENVELOPE_GAS
     );
     let overflow = B1Context { w_cert: u64::MAX, ..testing::b1_context() };
     assert_eq!(overflow.k_max(), Err(UpdateError::Overflow));
@@ -662,7 +680,11 @@ fn the_registry_profile_words_must_equal_the_pinned_profile() {
     let run = |config: ExecutionConfig, db: &CacheDB<EmptyDB>| {
         crate::execute_registry_transition(
             &case.input,
-            UpdateInput { bytes: &bytes, parent_number: case.parent_number },
+            UpdateInput {
+                bytes: &bytes,
+                records: &crate::testing::empty_import(),
+                parent_number: case.parent_number,
+            },
             db,
             config,
         )
@@ -780,20 +802,453 @@ fn the_system_budget_is_spent_in_stages_and_committed_without_finalize() {
     let case = Case::at(EXPIRES_GENESIS);
     let bytes = case.update.to_bytes();
     let reference = case.with(|_| {}).unwrap();
-    let staged = reference.admission_gas + reference.open_gas_spent;
+    let after_open = reference.admission_gas + reference.open_gas_spent;
+    let staged = after_open + reference.import_gas_spent;
     // Open receives only what admission left: one unit less than admission plus open runs out in
     // open itself, never reaching the later budget check.
     assert!(matches!(
-        run_bytes(&case.input, &bytes, case.parent_number, &case.parent, staged - 1),
+        run_bytes(&case.input, &bytes, case.parent_number, &case.parent, after_open - 1),
         Err(ExecutionError::OpenFailed(_))
     ));
-    // The outcome commitment covers admission plus open, not open alone and not finalize.
+    // The import receives only what admission and open left: one unit less than G_pre runs out
+    // in the import itself.
+    assert!(matches!(
+        run_bytes(&case.input, &bytes, case.parent_number, &case.parent, staged - 1),
+        Err(ExecutionError::ImportFailed(_))
+    ));
+    // The outcome commitment covers G_pre = admission + open + import, not open alone, not
+    // admission plus open, and not finalize.
     assert_eq!(
         reference.registry_commitment,
         crate::system_outcome_commitment(staged, reference.input_commitment)
     );
     assert_ne!(
         reference.registry_commitment,
+        crate::system_outcome_commitment(after_open, reference.input_commitment)
+    );
+    assert_ne!(
+        reference.registry_commitment,
         crate::system_outcome_commitment(reference.open_gas_spent, reference.input_commitment)
     );
+}
+
+// ---- the root-record import, executed by the real registry runtime
+// -------------------------------
+
+mod import {
+    use super::*;
+    use crate::records::{RecordEntry, RecordImport, IMPORT_EXECUTION_GAS};
+    use alloy_primitives::Bytes;
+    use alloy_sol_types::SolValue;
+
+    fn f(name: &str) -> B256 {
+        keccak256(format!("unicity.seal-registry/{name}"))
+    }
+
+    /// `R(i, j) = keccak256(abi.encode(F("records.entry"), uint64(i), uint64(j)))`.
+    fn entry_slot(i: u64, j: u64) -> B256 {
+        keccak256((f("records.entry"), i, j).abi_encode_params())
+    }
+
+    fn closure_key(closed_epoch: u64, h_record: B256, h_round: u64) -> B256 {
+        keccak256((f("records.closure"), closed_epoch, h_record, h_round).abi_encode_params())
+    }
+
+    fn retirement_key(id: u64, generation: u64) -> B256 {
+        keccak256((f("records.retirement"), id, generation).abi_encode_params())
+    }
+
+    fn u(v: u64) -> B256 {
+        B256::from(U256::from(v).to_be_bytes::<32>())
+    }
+
+    fn words(ws: &[B256]) -> Vec<u8> {
+        ws.iter().flat_map(|w| w.0).collect()
+    }
+
+    /// The identifier the registry recomputes: `keccak256(abi.encode(index, predecessor, kind,
+    /// progress, ucTime, data))`, built here from the written spec, not from the registry.
+    fn record_id(e: &RecordEntry) -> B256 {
+        alloy_sol_types::sol! {
+            function preimage(uint64 index, bytes32 predecessor, uint8 kind, uint64 progress, uint64 ucTime, bytes data) external;
+        }
+        let call = preimageCall {
+            index: e.index,
+            predecessor: e.predecessor,
+            kind: e.kind,
+            progress: e.progress,
+            ucTime: e.uc_time,
+            data: Bytes::copy_from_slice(&e.data),
+        };
+        use alloy_sol_types::SolCall;
+        keccak256(&call.abi_encode()[4..])
+    }
+
+    fn make(
+        index: u64,
+        predecessor: B256,
+        kind: u8,
+        progress: u64,
+        uc_time: u64,
+        data: Vec<u8>,
+        closed: u64,
+    ) -> RecordEntry {
+        let mut e = RecordEntry {
+            index,
+            record_id: B256::ZERO,
+            predecessor,
+            kind,
+            progress,
+            uc_time,
+            data,
+            closed_epoch: closed,
+        };
+        e.record_id = record_id(&e);
+        e
+    }
+
+    /// A linked log with one record of each kind, in an order custody could see.
+    fn mixed() -> Vec<RecordEntry> {
+        let mut out: Vec<RecordEntry> = Vec::new();
+        let mut push = |kind: u8, progress: u64, time: u64, data: Vec<u8>, closed: u64| {
+            let pred = out.last().map_or(B256::ZERO, |e| e.record_id);
+            let e = make(out.len() as u64, pred, kind, progress, time, data, closed);
+            out.push(e);
+        };
+        push(1, 10, 1_010, words(&[B256::repeat_byte(0x51)]), 0);
+        push(2, 11, 1_020, words(&[B256::repeat_byte(0x52), u(100), u(100), u(101)]), 0);
+        push(
+            4,
+            12,
+            1_030,
+            words(&[
+                B256::repeat_byte(0x61),
+                u(100),
+                B256::repeat_byte(0x62),
+                B256::repeat_byte(0x63),
+                B256::repeat_byte(0x64),
+                B256::repeat_byte(0x65),
+            ]),
+            3,
+        );
+        push(5, 13, 1_040, words(&[u(7), u(1), B256::repeat_byte(0x71)]), 0);
+        push(
+            3,
+            14,
+            1_050,
+            words(&[
+                B256::repeat_byte(0x81),
+                B256::repeat_byte(0x82),
+                u(100),
+                u(101),
+                u(130),
+                u(130),
+                u(131),
+                u(3),
+                u(3),
+            ]),
+            0,
+        );
+        out
+    }
+
+    fn import_of(entries: &[RecordEntry], target: u64, p: u64, t: u64) -> RecordImport {
+        RecordImport {
+            progress: p,
+            uc_time: t,
+            target_count: target,
+            target_tip: entries.last().map_or(B256::ZERO, |e| e.record_id),
+            entries: entries.to_vec(),
+        }
+    }
+
+    /// Runs vector steps `0..imports.len()`, each importing the given batch, and returns the last
+    /// result with its database.
+    fn run_imports(
+        imports: &[RecordImport],
+        limit: u64,
+    ) -> Result<(ExecutionResult, CacheDB<EmptyDB>), ExecutionError> {
+        let v = vectors();
+        let mut db = testing::genesis_db();
+        let mut last = None;
+        for (step, imp) in v.steps.iter().zip(imports) {
+            let raw = imp.to_bytes();
+            let mut input = RootInputV2::from_canonical_cbor(&hex(&step.root_input)).unwrap();
+            input.root_records_hash = crate::sha256(&raw);
+            let (result, next) = crate::execute_registry_transition(
+                &input,
+                UpdateInput {
+                    bytes: &hex(&step.update),
+                    records: &raw,
+                    parent_number: step.parent_number,
+                },
+                &db,
+                config(limit),
+            )?;
+            db = next;
+            last = Some(result);
+        }
+        Ok((last.unwrap(), db))
+    }
+
+    fn slot_value(db: &CacheDB<EmptyDB>, slot: B256) -> B256 {
+        word(db, slot)
+    }
+
+    #[test]
+    fn a_mixed_log_lands_in_the_registrys_documented_words() {
+        let log = mixed();
+        let imp = import_of(&log, 5, 20, 1_100);
+        let (result, db) = run_imports(&[imp], world().system_gas).unwrap();
+        assert!(result.import_gas_spent > 0);
+        assert_eq!(slot_value(&db, f("records.count")), u(5));
+        assert_eq!(slot_value(&db, f("records.tip")), log[4].record_id);
+        assert_eq!(slot_value(&db, f("records.progress")), u(20));
+        assert_eq!(slot_value(&db, f("records.ucTime")), u(1_100));
+        assert_eq!(slot_value(&db, f("records.targetCount")), u(5));
+        assert_eq!(slot_value(&db, f("records.targetTip")), log[4].record_id);
+        assert_eq!(
+            slot_value(&db, f("records.importedRound")),
+            u(1),
+            "the shard round that imported"
+        );
+        for e in &log {
+            let i = e.index;
+            assert_eq!(slot_value(&db, entry_slot(i, 0)), e.record_id);
+            assert_eq!(slot_value(&db, entry_slot(i, 1)), e.predecessor);
+            assert_eq!(slot_value(&db, entry_slot(i, 2)), u(u64::from(e.kind)));
+            assert_eq!(slot_value(&db, entry_slot(i, 3)), u(e.progress));
+            assert_eq!(slot_value(&db, entry_slot(i, 4)), u(e.uc_time));
+            assert_eq!(slot_value(&db, entry_slot(i, 5)), u(e.data.len() as u64));
+            for j in 0..9u64 {
+                let want = e.data.chunks(32).nth(j as usize).map_or(B256::ZERO, B256::from_slice);
+                assert_eq!(slot_value(&db, entry_slot(i, 6 + j)), want, "record {i} word {j}");
+            }
+            assert_eq!(slot_value(&db, entry_slot(i, 15)), u(e.closed_epoch));
+        }
+        // the closure and the retirement are logged under their keys with first index + 1
+        let h_record = B256::from_slice(&log[2].data[64..96]);
+        assert_eq!(slot_value(&db, closure_key(3, h_record, 100)), u(3));
+        assert_eq!(slot_value(&db, closure_key(4, h_record, 100)), B256::ZERO, "another epoch");
+        assert_eq!(slot_value(&db, retirement_key(7, 1)), u(4));
+        assert_eq!(slot_value(&db, retirement_key(7, 2)), B256::ZERO, "another generation");
+    }
+
+    #[test]
+    fn a_backlog_is_imported_in_the_required_prefixes_across_blocks() {
+        let mut log: Vec<RecordEntry> = Vec::new();
+        for i in 0..40u64 {
+            let pred = log.last().map_or(B256::ZERO, |e| e.record_id);
+            log.push(make(
+                i,
+                pred,
+                1,
+                10 + i,
+                1_000 + i,
+                words(&[B256::repeat_byte(i as u8 + 1)]),
+                0,
+            ));
+        }
+        let first = import_of(&log[..32], 40, 60, 2_000);
+        let mut second = import_of(&log[32..], 40, 61, 2_001);
+        second.target_tip = log[39].record_id;
+        let mut first = first;
+        first.target_tip = log[39].record_id; // the source log's tip as of the origin, not the batch tail
+        let (_, db) = run_imports(&[first.clone()], world().system_gas).unwrap();
+        assert_eq!(slot_value(&db, f("records.count")), u(32));
+        assert_eq!(slot_value(&db, f("records.targetCount")), u(40));
+        assert_eq!(slot_value(&db, f("records.tip")), log[31].record_id);
+        let (_, db) = run_imports(&[first, second], world().system_gas).unwrap();
+        assert_eq!(slot_value(&db, f("records.count")), u(40));
+        assert_eq!(slot_value(&db, f("records.tip")), log[39].record_id);
+        assert_eq!(slot_value(&db, f("records.importedRound")), u(2));
+    }
+
+    #[test]
+    fn an_empty_import_is_accepted_and_changes_no_log_word() {
+        let (_, db) = run_imports(&[import_of(&[], 0, 0, 1_000)], world().system_gas).unwrap();
+        for name in ["records.count", "records.tip", "records.targetCount", "records.targetTip"] {
+            assert_eq!(slot_value(&db, f(name)), B256::ZERO, "{name}");
+        }
+        assert_eq!(slot_value(&db, f("records.importedRound")), u(1));
+        assert_eq!(slot_value(&db, f("records.ucTime")), u(1_000));
+    }
+
+    #[test]
+    fn the_registrys_own_rules_refuse_each_mutation_alone() {
+        let log = mixed();
+        let good = import_of(&log, 5, 20, 1_100);
+        assert!(run_imports(&[good.clone()], world().system_gas).is_ok());
+        let cases: Vec<(&str, Box<dyn Fn(&mut RecordImport)>)> = vec![
+            ("a skipped index", Box::new(|i| i.entries[2].index += 1)),
+            ("a broken link", Box::new(|i| i.entries[3].predecessor.0[0] ^= 1)),
+            ("an identifier that is not content", Box::new(|i| i.entries[1].record_id.0[0] ^= 1)),
+            (
+                "a first record naming a predecessor",
+                Box::new(|i| i.entries[0].predecessor.0[0] = 1),
+            ),
+            (
+                "a decreasing progress",
+                Box::new(|i| {
+                    i.entries[2].progress = 5;
+                    i.entries[2].record_id = record_id(&i.entries[2]);
+                }),
+            ),
+            ("a record time above the supplied time", Box::new(|i| i.uc_time = 1_040)),
+            ("a record progress above the supplied progress", Box::new(|i| i.progress = 13)),
+            (
+                "a supplied time below the genesis time",
+                Box::new(|i| {
+                    i.entries.clear();
+                    i.target_count = 0;
+                    i.target_tip = B256::ZERO;
+                    i.uc_time = world().genesis_uc_time - 1;
+                }),
+            ),
+            ("a target below the imported tail", Box::new(|i| i.target_count = 4)),
+            ("a caught-up tail that is not the target tip", Box::new(|i| i.target_tip.0[0] ^= 1)),
+            (
+                "fewer entries than the required prefix",
+                Box::new(|i| {
+                    i.entries.pop();
+                }),
+            ),
+            (
+                "a payload word above uint64 where the kind requires one",
+                Box::new(|i| {
+                    i.entries[1].data[0] = 1; // the replacedHRound word
+                    i.entries[1].record_id = record_id(&i.entries[1]);
+                }),
+            ),
+        ];
+        for (name, mutate) in cases {
+            let mut bad = good.clone();
+            mutate(&mut bad);
+            assert!(
+                matches!(
+                    run_imports(&[bad], world().system_gas),
+                    Err(ExecutionError::ImportFailed(_))
+                ),
+                "{name}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_second_closure_or_retirement_of_a_key_is_refused_by_the_registry() {
+        let mut log = mixed();
+        // a second retirement of (7, 1) at the next index
+        let pred = log.last().unwrap().record_id;
+        log.push(make(5, pred, 5, 15, 1_060, words(&[u(7), u(1), B256::repeat_byte(0x72)]), 0));
+        assert!(matches!(
+            run_imports(&[import_of(&log, 6, 20, 1_100)], world().system_gas),
+            Err(ExecutionError::ImportFailed(_))
+        ));
+    }
+
+    #[test]
+    fn the_admission_refusals_precede_the_registry() {
+        let log = mixed();
+        let v = vectors();
+        let step = &v.steps[0];
+        let raw = import_of(&log, 5, 20, 1_100).to_bytes();
+        let db = testing::genesis_db();
+        let mut input = RootInputV2::from_canonical_cbor(&hex(&step.root_input)).unwrap();
+        input.root_records_hash = crate::sha256(&raw);
+        let run = |input: &RootInputV2, records: &[u8], limit: u64| {
+            crate::execute_registry_transition(
+                input,
+                UpdateInput {
+                    bytes: &hex(&step.update),
+                    records,
+                    parent_number: step.parent_number,
+                },
+                &db,
+                config(limit),
+            )
+        };
+        assert!(run(&input, &raw, world().system_gas).is_ok());
+        // the bytes must be the committed ones
+        let other = import_of(&log, 5, 21, 1_100).to_bytes();
+        assert!(matches!(
+            run(&input, &other, world().system_gas),
+            Err(ExecutionError::RecordImport(crate::records::ImportError::HashMismatch))
+        ));
+        // garbage under the right hash is a decoding refusal, not a registry one
+        let mut garbage = input.clone();
+        garbage.root_records_hash = crate::sha256(&[0xff; 8]);
+        assert!(matches!(
+            run(&garbage, &[0xff; 8], world().system_gas),
+            Err(ExecutionError::RecordImport(crate::records::ImportError::Encoding(_)))
+        ));
+        // a budget that cannot cover B1 admission plus the import scan
+        let b1_admission = crate::update::admit(
+            &hex(&step.update),
+            &testing::b1_context(),
+            &binding(&input, step.parent_number),
+            world().system_gas,
+        )
+        .unwrap()
+        .gas;
+        let scan = crate::records::scan_gas(raw.len()).unwrap();
+        assert!(matches!(
+            run(&input, &raw, b1_admission + scan - 1),
+            Err(ExecutionError::RecordImport(crate::records::ImportError::ScanBudget))
+        ));
+        assert!(matches!(
+            run(&input, &raw, b1_admission + scan + 5_000 - 1),
+            Err(ExecutionError::RecordImport(crate::records::ImportError::EntryBudget))
+        ));
+        let admitted = b1_admission + scan + 5_000;
+        assert!(
+            matches!(run(&input, &raw, admitted), Err(ExecutionError::OpenFailed(_)),),
+            "exactly the admission leaves open nothing"
+        );
+    }
+
+    /// The most expensive legal import: thirty-two RecoveryAck records (nine payload words each),
+    /// every word nonzero, so each entry writes fifteen fresh words.
+    fn maximal() -> RecordImport {
+        let mut log: Vec<RecordEntry> = Vec::new();
+        for i in 0..32u64 {
+            let pred = log.last().map_or(B256::ZERO, |e| e.record_id);
+            let data: Vec<B256> = (0..9)
+                .map(|j| {
+                    if j < 2 {
+                        B256::repeat_byte((i as u8) * 8 + j as u8 + 1)
+                    } else {
+                        u(i + 100 * j)
+                    }
+                })
+                .collect();
+            log.push(make(i, pred, 3, 10 + i, 1_000 + i, words(&data), 0));
+        }
+        import_of(&log, 32, 100, 2_000)
+    }
+
+    #[test]
+    fn the_maximal_import_stays_inside_the_envelope_bound() {
+        let imp = maximal();
+        let raw = imp.to_bytes();
+        assert!(raw.len() <= crate::records::MAX_IMPORT_BYTES, "{} bytes", raw.len());
+        let (result, db) = run_imports(&[imp.clone()], world().system_gas).unwrap();
+        assert_eq!(slot_value(&db, f("records.count")), u(32));
+        assert!(
+            result.import_gas_spent <= IMPORT_EXECUTION_GAS,
+            "the maximal import spends {} against the bound {IMPORT_EXECUTION_GAS}",
+            result.import_gas_spent
+        );
+        // the bound keeps a real margin: the measured gross is at most two thirds of it
+        assert!(
+            result.import_gas_spent * 3 <= IMPORT_EXECUTION_GAS * 2,
+            "{}",
+            result.import_gas_spent
+        );
+        let total_admission = result.records_admission_gas;
+        assert_eq!(total_admission, crate::records::scan_gas(raw.len()).unwrap() + 32_000);
+        println!(
+            "p85-import: maximal import gross {} admission {}",
+            result.import_gas_spent, total_admission
+        );
+    }
 }

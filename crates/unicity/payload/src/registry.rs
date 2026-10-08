@@ -130,6 +130,15 @@ impl SealJobRegistry {
             .map(|job| alloy_primitives::Bytes::copy_from_slice(job.evm_config.b1_update()))
     }
 
+    /// Returns the exact root-record import bytes the job with `payload_id` executes.
+    pub fn records(&self, payload_id: &PayloadId) -> Option<alloy_primitives::Bytes> {
+        self.lock()
+            .jobs
+            .iter()
+            .find(|job| job.payload_id == *payload_id)
+            .map(|job| alloy_primitives::Bytes::copy_from_slice(job.evm_config.records()))
+    }
+
     /// Returns the verified pair binding the job with `payload_id` was admitted under.
     pub fn pair_binding(&self, payload_id: &PayloadId) -> Option<PairBinding> {
         self.lock()
