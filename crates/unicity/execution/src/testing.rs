@@ -224,46 +224,72 @@ pub fn empty_import() -> Bytes {
     .into()
 }
 
-/// A valid import of `n` linked one-word records (kind 1), the registry's whole log after it, with
-/// anchors inside the world's genesis time. `n` of zero is [`empty_import`].
-pub fn import_of(n: u64) -> Bytes {
+/// One record with its content-derived identifier: `keccak256(abi.encode(index, predecessor, kind,
+/// progress, ucTime, data))`.
+pub fn record_entry(
+    index: u64,
+    predecessor: B256,
+    kind: u8,
+    progress: u64,
+    uc_time: u64,
+    data: Vec<u8>,
+) -> crate::records::RecordEntry {
     use alloy_sol_types::{sol, SolCall};
     sol! {
         function preimage(uint64 index, bytes32 predecessor, uint8 kind, uint64 progress, uint64 ucTime, bytes data) external;
     }
-    let genesis = world().genesis_uc_time;
-    let mut entries: Vec<crate::records::RecordEntry> = Vec::new();
-    for i in 0..n {
-        let predecessor = entries.last().map_or(B256::ZERO, |e| e.record_id);
-        let data = B256::repeat_byte(i as u8 + 1).to_vec();
-        let call = preimageCall {
-            index: i,
-            predecessor,
-            kind: 1,
-            progress: 10 + i,
-            ucTime: genesis + 1 + i,
-            data: data.clone().into(),
-        };
-        entries.push(crate::records::RecordEntry {
-            index: i,
-            record_id: alloy_primitives::keccak256(&call.abi_encode()[4..]),
-            predecessor,
-            kind: 1,
-            progress: 10 + i,
-            uc_time: genesis + 1 + i,
-            data,
-            closed_epoch: 0,
-        });
+    let call = preimageCall {
+        index,
+        predecessor,
+        kind,
+        progress,
+        ucTime: uc_time,
+        data: data.clone().into(),
+    };
+    crate::records::RecordEntry {
+        index,
+        record_id: alloy_primitives::keccak256(&call.abi_encode()[4..]),
+        predecessor,
+        kind,
+        progress,
+        uc_time,
+        data,
+        closed_epoch: 0,
     }
+}
+
+/// An import of exactly `entries` (the registry's whole log after it), as of progress 150 and the
+/// world's genesis time plus 1000.
+pub fn import_of_entries(entries: Vec<crate::records::RecordEntry>) -> Bytes {
     RecordImport {
-        progress: 100,
-        uc_time: genesis + 1000,
-        target_count: n,
+        progress: 150,
+        uc_time: world().genesis_uc_time + 1000,
+        target_count: entries.len() as u64,
         target_tip: entries.last().map_or(B256::ZERO, |e| e.record_id),
         entries,
     }
     .to_bytes()
     .into()
+}
+
+/// A valid import of `n` linked one-word records (kind 1), the registry's whole log after it, with
+/// anchors inside the world's genesis time. `n` of zero is [`empty_import`]. The records are well
+/// formed for the registry; a real custody would not apply them.
+pub fn import_of(n: u64) -> Bytes {
+    let genesis = world().genesis_uc_time;
+    let mut entries: Vec<crate::records::RecordEntry> = Vec::new();
+    for i in 0..n {
+        let predecessor = entries.last().map_or(B256::ZERO, |e| e.record_id);
+        entries.push(record_entry(
+            i,
+            predecessor,
+            1,
+            10 + i,
+            genesis + 1 + i,
+            B256::repeat_byte(i as u8 + 1).to_vec(),
+        ));
+    }
+    import_of_entries(entries)
 }
 
 /// Like [`seal`], committing to `import` instead of the empty one.
@@ -452,16 +478,21 @@ pub fn rotate(input: &mut RootInputV2, assigned: Assignment) -> Assignment {
     Assignment { root_epoch: target, shard_epoch, conf }
 }
 
-/// A custody stand-in with the two entry points the hook uses: `recordCursor()` returns
-/// storage word 0 and `applyRootRecords(uint32 n)` runs `body` (word 0 is the cursor).
+/// A custody stand-in with the entry points the hook uses: `recordCursor()` returns storage word 0,
+/// `limits()` returns `(0, 0, 0, storage word 1)` and `applyRootRecords(uint32 n)` runs `body`
+/// (word 0 is the cursor). Word 1 is `maxBatch`, so a test that leaves it zero pins a custody that
+/// accepts no batch.
 pub fn custody_code(body: &[u8]) -> Bytes {
     let mut c = vec![0x60, 0x00, 0x35, 0x60, 0xe0, 0x1c]; // selector
-    c.extend([0x80, 0x63, 0xca, 0x01, 0xc9, 0x83, 0x14, 0x61, 0x00, 0x20, 0x57]); // -> cursor at 0x20
-    c.extend([0x80, 0x63, 0x1d, 0x2a, 0x00, 0x37, 0x14, 0x61, 0x00, 0x2c, 0x57]); // -> apply at 0x2c
+    c.extend([0x80, 0x63, 0xca, 0x01, 0xc9, 0x83, 0x14, 0x61, 0x00, 0x2b, 0x57]); // recordCursor -> 0x2b
+    c.extend([0x80, 0x63, 0x86, 0x0a, 0xef, 0xcf, 0x14, 0x61, 0x00, 0x37, 0x57]); // limits -> 0x37
+    c.extend([0x80, 0x63, 0x1d, 0x2a, 0x00, 0x37, 0x14, 0x61, 0x00, 0x43, 0x57]); // apply -> 0x43
     c.extend([0x60, 0x00, 0x80, 0xfd]); // unknown selector: revert
-    assert_eq!(c.len(), 0x20);
+    assert_eq!(c.len(), 0x2b);
     c.extend([0x5b, 0x60, 0x00, 0x54, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3]); // cursor
-    assert_eq!(c.len(), 0x2c);
+    assert_eq!(c.len(), 0x37);
+    c.extend([0x5b, 0x60, 0x01, 0x54, 0x60, 0x60, 0x52, 0x60, 0x80, 0x60, 0x00, 0xf3]); // limits
+    assert_eq!(c.len(), 0x43);
     c.push(0x5b);
     c.extend(body);
     c.into()
@@ -469,7 +500,7 @@ pub fn custody_code(body: &[u8]) -> Bytes {
 
 /// cursor += n, and an empty batch reverts as custody's `EmptyBatch` does
 pub const ADVANCE: &[u8] = &[
-    0x60, 0x04, 0x35, 0x80, 0x15, 0x61, 0x00, 0x3e, 0x57, // n = arg; if n == 0 goto revert
+    0x60, 0x04, 0x35, 0x80, 0x15, 0x61, 0x00, 0x55, 0x57, // n = arg; if n == 0 goto revert
     0x60, 0x00, 0x54, 0x01, 0x60, 0x00, 0x55, 0x00, // cursor += n; stop
     0x5b, 0x60, 0x00, 0x80, 0xfd, // revert
 ];
@@ -480,3 +511,9 @@ pub const OVERSHOOT: &[u8] =
 pub const NOTHING: &[u8] = &[0x00];
 /// `applyRootRecords` that always reverts
 pub const REVERT: &[u8] = &[0x60, 0x00, 0x80, 0xfd];
+/// `applyRootRecords` that stores `block.chainid * 1000 + block.number` as the cursor: it shows the
+/// environment the hook runs in.
+pub const ENV_PROBE: &[u8] = &[
+    0x46, 0x61, 0x03, 0xe8, 0x02, 0x43, 0x01, 0x60, 0x00, 0x55,
+    0x00, // chainid * 1000 + number -> cursor
+];

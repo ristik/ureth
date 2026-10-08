@@ -710,8 +710,10 @@ where
             let remaining = bound.profile.system_gas.checked_sub(system).ok_or_else(|| {
                 BlockExecutionError::msg("system gas exhausted before the records hook")
             })?;
-            let outcome = crate::hook::run_records_hook(self.inner.evm.db_mut(), &hook, remaining)
-                .map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
+            let env = crate::hook::HookEnv::from_evm(&self.inner.evm);
+            let outcome =
+                crate::hook::run_records_hook(self.inner.evm.db_mut(), &hook, &env, remaining)
+                    .map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
             system = system.checked_add(outcome.gas_spent).ok_or_else(|| {
                 BlockExecutionError::msg("system gas overflow after the records hook")
             })?;
