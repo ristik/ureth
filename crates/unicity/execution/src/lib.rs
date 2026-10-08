@@ -1016,6 +1016,35 @@ fn sha256(value: &[u8]) -> B256 {
 
 #[cfg(test)]
 mod tests {
+
+    #[derive(Deserialize)]
+    struct TimestampCase {
+        reference_time: u64,
+        parent_timestamp: u64,
+        want: u64,
+        overflow: bool,
+    }
+
+    /// bft-core's `evmroot.DeriveTimestampChecked` vectors: the same `max(reference, parent + 1)`, and a parent at the top of the 64-bit
+    /// range has no successor in either implementation.
+    #[test]
+    fn derive_timestamp_reproduces_the_go_vectors_including_overflow() {
+        #[derive(Deserialize)]
+        struct File {
+            cases: Vec<TimestampCase>,
+        }
+        let file: File =
+            serde_json::from_str(include_str!("../testdata/timestamp-vectors.json")).unwrap();
+        assert!(file.cases.iter().any(|c| c.overflow), "the vectors carry overflow rows");
+        for c in file.cases {
+            let got = derive_timestamp(c.reference_time, c.parent_timestamp);
+            if c.overflow {
+                assert_eq!(got, None, "{} / {}", c.reference_time, c.parent_timestamp);
+            } else {
+                assert_eq!(got, Some(c.want), "{} / {}", c.reference_time, c.parent_timestamp);
+            }
+        }
+    }
     use super::*;
     use alloy_primitives::{address, U256};
     use revm::{database::EmptyDB, state::AccountInfo};
