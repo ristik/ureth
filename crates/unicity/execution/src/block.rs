@@ -41,6 +41,10 @@ pub enum BlockAccountingError {
     ParentGasMismatch,
     /// Parent base fee is absent or outside the bounded profile.
     InvalidParentBaseFee,
+    /// The carried B1 update does not hash to the root input's committed value.
+    UpdateHashMismatch,
+    /// The B1 profile is unmeasured, overflows, or `g_sys` is below its envelope.
+    B1Profile,
 }
 
 impl BlockProfile {

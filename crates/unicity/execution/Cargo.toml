@@ -30,8 +30,24 @@ reth-evm = { workspace = true, features = ["std"] }
 reth-evm-ethereum = { workspace = true, features = ["std"] }
 reth-primitives-traits.workspace = true
 reth-storage-api.workspace = true
+reth-unicity-b1.workspace = true
+secp256k1.workspace = true
 serde = { workspace = true, features = ["derive"] }
+serde_json = { workspace = true, features = ["std"], optional = true }
 sha2.workspace = true
+
+[features]
+# Shared B1 world fixtures for dependents' tests; never part of a node build.
+test-utils = [
+    "dep:serde_json",
+    "reth-chainspec/test-utils",
+    "reth-consensus/test-utils",
+    "reth-ethereum-primitives/test-utils",
+    "reth-evm/test-utils",
+    "reth-evm-ethereum/test-utils",
+    "reth-primitives-traits/test-utils",
+    "reth-trie-common/test-utils",
+]
 
 [dev-dependencies]
 alloy-genesis.workspace = true
@@ -39,3 +55,16 @@ alloy-trie = { workspace = true, features = ["std"] }
 reth-storage-errors.workspace = true
 reth-trie-common = { workspace = true, features = ["std"] }
 serde_json = { workspace = true, features = ["std"] }
+
+# The integration tests share the B1 world fixtures in `testing`, which only exist with the feature.
+[[test]]
+name = "block_adapter"
+required-features = ["test-utils"]
+
+[[test]]
+name = "h3_signer_subsets"
+required-features = ["test-utils"]
+
+[[test]]
+name = "pairing"
+required-features = ["test-utils"]

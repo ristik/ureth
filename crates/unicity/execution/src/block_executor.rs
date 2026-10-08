@@ -3,7 +3,8 @@
 use crate::{
     block::{next_base_fee, BlockGasAccounting, BlockProfile, ParentExecutionOutcome},
     derive_beacon_root, derive_prev_randao, derive_timestamp, execute_registry_transition_on_db,
-    ExecutionConfig, RootInputV2, SYSTEM_CALLER,
+    update::B1Job,
+    ExecutionConfig, RootInputV2, UpdateInput, SYSTEM_CALLER,
 };
 use alloy_consensus::{
     transaction::Recovered, Header, Transaction, TransactionEnvelope, TxReceipt,
@@ -62,6 +63,7 @@ pub struct BoundExecutionInput {
     parent_timestamp: u64,
     parent_execution: ParentExecutionOutcome,
     fee_collector: Address,
+    b1: B1Job,
 }
 
 impl BoundExecutionInput {
@@ -69,6 +71,7 @@ impl BoundExecutionInput {
     /// configured standard JSON. This is the sole numeric parent-accounting bootstrap.
     pub fn from_validated_genesis(
         input: Arc<RootInputV2>,
+        b1: B1Job,
         profile: BlockProfile,
         parent: &SealedHeader<Header>,
         configured_genesis_hash: alloy_primitives::B256,
@@ -83,6 +86,7 @@ impl BoundExecutionInput {
         {
             return Err(crate::block::BlockAccountingError::ParentGasMismatch);
         }
+        b1.check_bound(&input, &profile)?;
         let parent_execution = ParentExecutionOutcome::reconcile(
             profile,
             parent_hash,
@@ -100,12 +104,14 @@ impl BoundExecutionInput {
             parent_timestamp: parent.timestamp,
             parent_execution,
             fee_collector,
+            b1,
         })
     }
 
     /// Binds a job to a parent completed by [`build_complete`] or checked replay.
     pub fn from_completed_parent(
         input: Arc<RootInputV2>,
+        b1: B1Job,
         profile: BlockProfile,
         parent: &SealedHeader<Header>,
         completed: CompletedParent,
@@ -118,6 +124,7 @@ impl BoundExecutionInput {
         {
             return Err(crate::block::BlockAccountingError::ParentGasMismatch);
         }
+        b1.check_bound(&input, &profile)?;
         completed.checked_next_base_fee(parent, profile)?;
         Ok(Self {
             input,
@@ -127,12 +134,18 @@ impl BoundExecutionInput {
             parent_timestamp: parent.timestamp,
             parent_execution: completed.0,
             fee_collector,
+            b1,
         })
     }
 
     /// Returns the authenticated structured input this immutable job is bound to.
     pub fn root_input(&self) -> &RootInputV2 {
         &self.input
+    }
+
+    /// Returns the exact committed update bytes and pinned B1 bindings of this job.
+    pub const fn b1(&self) -> &B1Job {
+        &self.b1
     }
 }
 
@@ -492,6 +505,11 @@ impl UnicityEvmConfig {
         &self.bound.input
     }
 
+    /// Returns the exact committed update bytes this immutable job executes.
+    pub fn b1_update(&self) -> &[u8] {
+        &self.bound.b1.update
+    }
+
     /// Checks that payload-builder inputs select this configuration's exact immutable job.
     ///
     /// This is a structural check only. Authentication of the root input and consistency of the
@@ -663,8 +681,9 @@ where
         bound.profile.validate().map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
         let result = execute_registry_transition_on_db(
             &bound.input,
+            UpdateInput { bytes: &bound.b1.update, parent_number: bound.parent_number },
             self.inner.evm.db_mut(),
-            ExecutionConfig { system_gas_limit: bound.profile.system_gas },
+            ExecutionConfig { system_gas_limit: bound.profile.system_gas, b1: bound.b1.context },
         )
         .map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
 

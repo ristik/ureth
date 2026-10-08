@@ -5,7 +5,7 @@ mod support;
 use alloy_consensus::{transaction::TransactionMeta, Header, SignableTransaction, TxLegacy};
 use alloy_eips::{BlockHashOrNumber, BlockNumHash, BlockNumberOrTag};
 use alloy_genesis::Genesis;
-use alloy_primitives::{b256, Address, BlockNumber, TxHash, TxKind, TxNumber, B256, U256};
+use alloy_primitives::{Address, BlockNumber, TxHash, TxKind, TxNumber, B256, U256};
 use alloy_rpc_types_engine::{
     ExecutionData, ExecutionPayloadV3, ForkchoiceState, PayloadAttributes as EthPayloadAttributes,
     PayloadId, PayloadStatus, PayloadStatusEnum,
@@ -58,7 +58,7 @@ use reth_unicity_execution::{
     },
     technical_record_hash,
     wire::{SealBuildInput, SealCompanion},
-    InputRecordV2, RootInputV2, RootOriginV2, TechnicalRecordV2, SEAL_REGISTRY,
+    InputRecordV2, RootInputV2, SEAL_REGISTRY,
 };
 use reth_unicity_payload::{
     build_seal_companion, prepare_seal_build, recovery::RecoveryError, refusal_response,
@@ -80,29 +80,26 @@ use std::{
         Arc, OnceLock,
     },
 };
-use support::provider::FixtureProvider;
+use support::{b1, provider::FixtureProvider};
 use tempfile::tempdir;
 
-const GENESIS_HASH: B256 =
-    b256!("efbe99d08e86d7e06034bfcb0d48f0f40a92b321fb3f96ca82a58e83d0c62363");
+fn genesis_hash() -> B256 {
+    b1::genesis_hash()
+}
+fn profile() -> BlockProfile {
+    b1::profile()
+}
 const FEE_COLLECTOR: Address = Address::new([0x77; 20]);
-const PROFILE: BlockProfile = BlockProfile {
-    max_gas: 30_000_001,
-    system_gas: 500_001,
-    base_fee_floor: 7,
-    elasticity: 2,
-    change_denominator: 8,
-};
 
 fn next_base_fee(parent: u64, ordinary_used: u64) -> u64 {
-    let target = (PROFILE.max_gas - PROFILE.system_gas) / PROFILE.elasticity;
+    let target = (profile().max_gas - profile().system_gas) / profile().elasticity;
     let delta = u128::from(parent) * u128::from(ordinary_used.abs_diff(target)) /
         u128::from(target) /
-        u128::from(PROFILE.change_denominator);
+        u128::from(profile().change_denominator);
     if ordinary_used > target {
         parent + u64::try_from(delta).unwrap().max(1)
     } else {
-        parent.saturating_sub(u64::try_from(delta).unwrap()).max(PROFILE.base_fee_floor)
+        parent.saturating_sub(u64::try_from(delta).unwrap()).max(profile().base_fee_floor)
     }
 }
 
@@ -279,45 +276,9 @@ impl StateProviderFactory for Client {
 }
 
 fn input(round: u64, root_round: u64, parent_hash: B256) -> RootInputV2 {
-    let technical = TechnicalRecordV2 {
-        round,
-        epoch: 0,
-        leader: "evm-node".into(),
-        stat_hash: B256::repeat_byte(0xe0),
-        fee_hash: B256::repeat_byte(0xf0),
-    };
-    RootInputV2 {
-        version: 2,
-        network_id: 3,
-        partition_id: 8,
-        shard_id: vec![],
-        authorized_round: round,
-        certified_epoch: 0,
-        authorized_epoch: 0,
-        parent_hash,
-        origin: RootOriginV2 {
-            network_id: 3,
-            root_round,
-            root_epoch: 1,
-            reference_time: 1,
-            tree_root: B256::repeat_byte(0xc0),
-            input_record_version: 1,
-            input_record: InputRecordV2 {
-                round: round.saturating_sub(1),
-                epoch: 0,
-                previous_hash: (round > 1).then(|| B256::repeat_byte(0x31)),
-                state_hash: (round > 1).then(|| B256::repeat_byte(0x31)),
-                timestamp: u64::from(round > 1),
-                block_hash: None,
-            },
-            tr_hash: technical_record_hash(&technical),
-            shard_conf_hash: b256!(
-                "002a719ed27ff7b185660ac29fe1f32269b0e3ab3f126716a52c47ec2b8a92dd"
-            ),
-        },
-        technical,
-        transitions: vec![],
-    }
+    let mut root = b1::input(round, root_round, parent_hash);
+    b1::reseal(&mut root);
+    root
 }
 
 fn attributes(input: &RootInputV2, parent_timestamp: u64) -> UnicityPayloadAttributes {
@@ -332,7 +293,7 @@ fn attributes(input: &RootInputV2, parent_timestamp: u64) -> UnicityPayloadAttri
                 input.authorized_round,
             )),
             slot_number: None,
-            target_gas_limit: Some(PROFILE.max_gas),
+            target_gas_limit: Some(profile().max_gas),
         },
         commitment: input.input_commitment().unwrap(),
     }
@@ -349,9 +310,10 @@ fn resolved_job(
     let bound = Arc::new(
         BoundExecutionInput::from_validated_genesis(
             root.clone(),
-            PROFILE,
+            b1::job(root),
+            profile(),
             parent,
-            GENESIS_HASH,
+            genesis_hash(),
             FEE_COLLECTOR,
         )
         .unwrap(),
@@ -409,12 +371,12 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     let genesis: Genesis =
         serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
-    let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH));
+    let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash()));
     let mut state = FixtureProvider::signed_genesis();
-    state.set_block_hash(0, GENESIS_HASH);
+    state.set_block_hash(0, genesis_hash());
     let client = Client {
         chain_spec: chain_spec.clone(),
-        parent_hash: GENESIS_HASH,
+        parent_hash: genesis_hash(),
         state: state.clone(),
         extra_headers: Vec::new(),
         finalized: 0,
@@ -422,17 +384,18 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         persisted_number: 0,
         fail_finalized: false,
     };
-    let root = Arc::new(input(1, 1, GENESIS_HASH));
+    let root = Arc::new(input(1, 1, genesis_hash()));
     let attrs = attributes(&root, parent.timestamp);
     let base = EthereumBuilderConfig::new()
-        .with_gas_limit(PROFILE.max_gas)
+        .with_gas_limit(profile().max_gas)
         .with_await_payload_on_missing(false);
     let bound = Arc::new(
         BoundExecutionInput::from_validated_genesis(
-            root,
-            PROFILE,
+            root.clone(),
+            b1::job(&root),
+            profile(),
             &parent,
-            GENESIS_HASH,
+            genesis_hash(),
             FEE_COLLECTOR,
         )
         .unwrap(),
@@ -451,12 +414,13 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
             price,
             Address::repeat_byte(0x43),
             U256::ZERO,
-            PROFILE.ordinary_capacity().unwrap() + 1,
+            profile().ordinary_capacity().unwrap() + 1,
         ),
     )
     .await;
     let builder = UnicityExecutionPayloadBuilder::new(client.clone(), pool, resolver, base.clone());
-    let config = PayloadConfig::new(parent.clone(), attrs.clone(), attrs.payload_id(&GENESIS_HASH));
+    let config =
+        PayloadConfig::new(parent.clone(), attrs.clone(), attrs.payload_id(&genesis_hash()));
     let args = BuildArguments::new(
         Default::default(),
         None,
@@ -494,8 +458,9 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     let second_attrs = attributes(&second_input, first_header.timestamp);
     let second_bound = Arc::new(
         BoundExecutionInput::from_completed_parent(
-            second_input,
-            PROFILE,
+            second_input.clone(),
+            b1::job(&second_input),
+            profile(),
             &first_header,
             replay.parent,
             FEE_COLLECTOR,
@@ -542,7 +507,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     );
 
     let accounting = UnicityParentAccountings::with_capacity(1);
-    let consensus = UnicityConsensus::new(chain_spec.clone(), PROFILE, accounting.clone());
+    let consensus = UnicityConsensus::new(chain_spec.clone(), profile(), accounting.clone());
     let child = second.block().clone().into_sealed_header();
     let unavailable = consensus.validate_header_against_parent(&child, &second_parent).unwrap_err();
     assert!(consensus.is_validation_unavailable(&unavailable));
@@ -565,7 +530,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         &accounting,
         &second_parent,
         &chain_spec,
-        PROFILE,
+        profile(),
     )
     .unwrap();
     assert_eq!(lease.next_fee(), child.base_fee_per_gas.unwrap());
@@ -580,7 +545,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
             &accounting,
             &second_parent,
             &chain_spec,
-            PROFILE,
+            profile(),
         )
         .is_ok(),
         "an active parent must survive capacity eviction"
@@ -596,7 +561,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         &accounting,
         &second_parent,
         &chain_spec,
-        PROFILE,
+        profile(),
     )
     .is_err());
     accounting.insert_for_chain(
@@ -616,7 +581,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
                     &accounting,
                     &second_parent,
                     &chain_spec,
-                    PROFILE,
+                    profile(),
                 )
                 .unwrap();
                 assert_eq!(lease.next_fee(), expected_fee);
@@ -630,14 +595,14 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         &accounting,
         &forged_parent,
         &chain_spec,
-        PROFILE,
+        profile(),
     )
     .is_err());
     assert!(reth_unicity_payload::ParentAccountingResolver::resolve(
         &accounting,
         &second_parent,
         &chain_spec,
-        BlockProfile { base_fee_floor: PROFILE.base_fee_floor + 1, ..PROFILE },
+        BlockProfile { base_fee_floor: profile().base_fee_floor + 1, ..profile() },
     )
     .is_err());
 
@@ -685,10 +650,10 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
             &branch_accounting,
             header,
             &chain_spec,
-            PROFILE,
+            profile(),
         )
         .unwrap();
-        assert_eq!(lease.next_fee(), token.checked_next_base_fee(header, PROFILE).unwrap(),);
+        assert_eq!(lease.next_fee(), token.checked_next_base_fee(header, profile()).unwrap(),);
     }
     assert!(branch_accounting.get(&second_parent.hash()).is_some());
     assert!(branch_accounting.get(&alternate_parent.hash()).is_some());
@@ -713,9 +678,14 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
         // Cold accounting is found by exact hash, checked against chain, genesis and profile,
         // and held back: it resolves only after recovery admission.
         assert!(
-            cold.restore_exact(header, chain_spec.chain().id(), chain_spec.genesis_hash(), PROFILE)
-                .unwrap()
-                .is_some(),
+            cold.restore_exact(
+                header,
+                chain_spec.chain().id(),
+                chain_spec.genesis_hash(),
+                profile()
+            )
+            .unwrap()
+            .is_some(),
             "cold exact-hash branch accounting"
         );
         assert!(
@@ -723,7 +693,7 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
                 &cold,
                 header,
                 &chain_spec,
-                PROFILE,
+                profile(),
             )
             .is_err(),
             "an unadmitted cold token must not resolve"
@@ -806,16 +776,18 @@ async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     );
     assert!(custom.build_empty_payload(forged_config).is_err());
 
-    let mut alternate_input = input(1, 1, GENESIS_HASH);
+    let mut alternate_input = input(1, 1, genesis_hash());
     alternate_input.origin.tree_root = B256::repeat_byte(0xab);
+    b1::reseal(&mut alternate_input);
     let alternate_input = Arc::new(alternate_input);
     let alternate_attrs = attributes(&alternate_input, parent.timestamp);
     let alternate_bound = Arc::new(
         BoundExecutionInput::from_validated_genesis(
-            alternate_input,
-            PROFILE,
+            alternate_input.clone(),
+            b1::job(&alternate_input),
+            profile(),
             &parent,
-            GENESIS_HASH,
+            genesis_hash(),
             FEE_COLLECTOR,
         )
         .unwrap(),
@@ -858,7 +830,7 @@ fn consensus_rejects_a_block_level_base_fee_mutation_with_a_typed_error() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let consensus =
-        UnicityConsensus::new(client.chain_spec, PROFILE, UnicityParentAccountings::default());
+        UnicityConsensus::new(client.chain_spec, profile(), UnicityParentAccountings::default());
     let header = payload.block().header().clone();
     let unmutated = SealedHeader::new(header.clone(), header.hash_slow());
     consensus.validate_header_against_parent(&unmutated, &parent).unwrap();
@@ -879,7 +851,7 @@ fn consensus_rejects_a_block_level_gas_limit_mutation_with_a_typed_error() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let consensus =
-        UnicityConsensus::new(client.chain_spec, PROFILE, UnicityParentAccountings::default());
+        UnicityConsensus::new(client.chain_spec, profile(), UnicityParentAccountings::default());
     let header = payload.block().header().clone();
     let unmutated = SealedHeader::new(header.clone(), header.hash_slow());
     consensus.validate_header_against_parent(&unmutated, &parent).unwrap();
@@ -900,7 +872,7 @@ fn consensus_rejects_a_block_level_timestamp_mutation_with_a_typed_error() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
     let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
     let consensus =
-        UnicityConsensus::new(client.chain_spec, PROFILE, UnicityParentAccountings::default());
+        UnicityConsensus::new(client.chain_spec, profile(), UnicityParentAccountings::default());
     let header = payload.block().header().clone();
     let unmutated = SealedHeader::new(header.clone(), header.hash_slow());
     consensus.validate_header_against_parent(&unmutated, &parent).unwrap();
@@ -925,19 +897,21 @@ fn seal_job_registry_is_bounded_shared_and_reuses_identical_jobs() {
     let genesis: Genesis =
         serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
-    let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH));
+    let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash()));
     let base = EthereumBuilderConfig::new()
-        .with_gas_limit(PROFILE.max_gas)
+        .with_gas_limit(profile().max_gas)
         .with_await_payload_on_missing(false);
 
     // Three jobs on the same parent that differ only in the committed tree root, so each has a
     // distinct payload id and a matching execution configuration.
-    let root_a = Arc::new(input(1, 1, GENESIS_HASH));
-    let mut root_b = input(1, 1, GENESIS_HASH);
+    let root_a = Arc::new(input(1, 1, genesis_hash()));
+    let mut root_b = input(1, 1, genesis_hash());
     root_b.origin.tree_root = B256::repeat_byte(0xab);
+    b1::reseal(&mut root_b);
     let root_b = Arc::new(root_b);
-    let mut root_c = input(1, 1, GENESIS_HASH);
+    let mut root_c = input(1, 1, genesis_hash());
     root_c.origin.tree_root = B256::repeat_byte(0xcd);
+    b1::reseal(&mut root_c);
     let root_c = Arc::new(root_c);
 
     let (job_a, attrs_a) = resolved_job(&chain_spec, &parent, &root_a, &base);
@@ -1002,12 +976,12 @@ fn seal_fixture() -> (
         serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
     let validator = UnicityEngineValidator::new(chain_spec.clone());
-    let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), GENESIS_HASH));
+    let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash()));
     let mut state = FixtureProvider::signed_genesis();
-    state.set_block_hash(0, GENESIS_HASH);
+    state.set_block_hash(0, genesis_hash());
     let client = Client {
         chain_spec,
-        parent_hash: GENESIS_HASH,
+        parent_hash: genesis_hash(),
         state,
         extra_headers: Vec::new(),
         finalized: 0,
@@ -1015,13 +989,13 @@ fn seal_fixture() -> (
         persisted_number: 0,
         fail_finalized: false,
     };
-    let root = input(1, 1, GENESIS_HASH);
+    let root = input(1, 1, genesis_hash());
     let attrs = attributes(&root, parent.timestamp);
     let builder_config = Arc::new(OnceLock::new());
     builder_config
         .set(
             EthereumBuilderConfig::new()
-                .with_gas_limit(PROFILE.max_gas)
+                .with_gas_limit(profile().max_gas)
                 .with_await_payload_on_missing(false),
         )
         .unwrap();
@@ -1030,9 +1004,10 @@ fn seal_fixture() -> (
             registry: SealJobRegistry::new(),
             builder_config,
             seal: UnicitySealConfig {
-                profile: PROFILE,
+                profile: profile(),
                 fee_collector: FEE_COLLECTOR,
-                pins: PAIR_PINS,
+                pins: pair_pins(),
+                b1: b1::context(),
             },
             parent_accounting: UnicityParentAccountings::default(),
             execution_inputs: UnicityBlockExecutionRegistry::default(),
@@ -1098,7 +1073,12 @@ fn temp_store() -> (tempfile::TempDir, Arc<CompanionStore>) {
     (dir, store)
 }
 
-const PAIR_PINS: PairPins = PairPins { network_id: 3, root_genesis_id: B256::repeat_byte(0x5a) };
+fn pair_pins() -> PairPins {
+    PairPins {
+        network_id: u64::from(b1::world().network),
+        root_genesis_id: b1::world().root_genesis_id,
+    }
+}
 const TEST_ACTIVATION: B256 = B256::repeat_byte(0xac);
 
 /// The binding the local pair's Go verification would hand over for `subject`.
@@ -1107,7 +1087,7 @@ fn pair_binding(
     root: &RootInputV2,
     subject: ExpectedSubject,
 ) -> PairBinding {
-    pair_binding_on(GENESIS_HASH, parent, root, subject)
+    pair_binding_on(genesis_hash(), parent, root, subject)
 }
 
 /// [`pair_binding`] for a chain whose execution genesis is `genesis_hash`.
@@ -1119,7 +1099,7 @@ fn pair_binding_on(
 ) -> PairBinding {
     reference_binding(
         &PairContext {
-            pins: PAIR_PINS,
+            pins: pair_pins(),
             execution_genesis_hash: genesis_hash,
             parent,
             root,
@@ -1150,6 +1130,7 @@ fn seal_input(
     SealBuildInput {
         root_input: root.canonical_cbor().unwrap().into(),
         transitions: root.transitions.iter().cloned().map(Into::into).collect(),
+        b1_update: b1::job(root).update,
         pair_binding: pair_binding(parent, root, build_subject(attrs)).canonical_cbor().into(),
     }
 }
@@ -1159,6 +1140,7 @@ fn import_companion(parent: &SealedHeader, root: &RootInputV2, block_hash: B256)
     let binding = pair_binding(parent, root, ExpectedSubject::Import { block_hash });
     SealCompanion {
         root_input: root.canonical_cbor().unwrap().into(),
+        b1_update: b1::job(root).update,
         pair_binding: binding.canonical_cbor().into(),
         witnesses: Vec::new(),
         provenance: "newPayload".to_owned(),
@@ -1168,10 +1150,11 @@ fn import_companion(parent: &SealedHeader, root: &RootInputV2, block_hash: B256)
 #[test]
 fn seal_build_rejects_non_canonical_root_input_as_invalid() {
     let (client, _parent, _root, attrs, context, validator) = seal_fixture();
-    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let state = ForkchoiceState::same_hash(genesis_hash());
     let bad = SealBuildInput {
         root_input: vec![0x80].into(),
         transitions: vec![],
+        b1_update: Default::default(),
         pair_binding: Default::default(),
     };
 
@@ -1196,7 +1179,7 @@ fn seal_build_rejects_malformed_attributes_as_invalid_before_inserting() {
     // Cancun requires withdrawals in the attributes; ResolvedPayloadJob alone would tolerate a
     // missing list, so this exercises the validator parity.
     attrs.inner.withdrawals = None;
-    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let state = ForkchoiceState::same_hash(genesis_hash());
 
     let error = prepare_seal_build(
         &client,
@@ -1238,7 +1221,7 @@ fn seal_build_reports_an_unknown_parent_as_syncing() {
 #[test]
 fn seal_build_requires_payload_attributes() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
-    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let state = ForkchoiceState::same_hash(genesis_hash());
 
     let error = prepare_seal_build(
         &client,
@@ -1262,7 +1245,7 @@ fn seal_build_requires_payload_attributes() {
 #[test]
 fn seal_build_reuses_an_identical_payload_id() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
-    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let state = ForkchoiceState::same_hash(genesis_hash());
     let input = seal_input(&parent, &root, &attrs);
 
     prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input).unwrap();
@@ -1275,7 +1258,7 @@ fn seal_build_reuses_an_identical_payload_id() {
 #[test]
 fn seal_build_job_resolves_with_the_published_builder_config() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
-    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let state = ForkchoiceState::same_hash(genesis_hash());
 
     let returned = prepare_seal_build(
         &client,
@@ -1321,9 +1304,12 @@ fn get_payload_companion_reencodes_exactly_the_caller_bytes() {
     // The decoder accepts only canonical encodings, so re-encoding the decoded value must equal the
     // bytes the caller supplied to forkchoiceUpdatedWithSealV1.
     let decoded = input.decode_root_input().unwrap();
-    let companion =
-        build_seal_companion(&decoded, &pair_binding(&parent, &decoded, build_subject(&attrs)))
-            .unwrap();
+    let companion = build_seal_companion(
+        &decoded,
+        &b1::job(&decoded).update,
+        &pair_binding(&parent, &decoded, build_subject(&attrs)),
+    )
+    .unwrap();
     assert_eq!(companion.root_input, input.root_input);
     assert_eq!(companion.provenance, "build");
     assert!(companion.witnesses.is_empty(), "the build input carries no witnesses");
@@ -1371,7 +1357,7 @@ async fn serve_resolved_payload(
 #[tokio::test]
 async fn get_payload_with_seal_names_an_evicted_companion() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
-    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let state = ForkchoiceState::same_hash(genesis_hash());
     let payload_id = attrs.payload_id(&parent.hash());
     prepare_seal_build(
         &client,
@@ -1431,7 +1417,7 @@ fn build_genesis_seal_payload(
         client,
         context,
         validator,
-        &ForkchoiceState::same_hash(GENESIS_HASH),
+        &ForkchoiceState::same_hash(genesis_hash()),
         Some(attrs),
         &seal_input(parent, root, attrs),
     )
@@ -1600,6 +1586,7 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
                 parent: parent.hash(),
             })];
         }
+        b1::reseal(&mut root);
         let attrs = attributes(&root, parent.timestamp);
         let client = Client {
             chain_spec: chain_spec.clone(),
@@ -1686,6 +1673,7 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
         .await;
         let companion = build_seal_companion(
             &root,
+            &b1::job(&root).update,
             &pair_binding(&parent_for_block, &root, build_subject(&attrs)),
         )
         .unwrap();
@@ -2105,7 +2093,7 @@ impl BlockReader for ReplayProvider {
 
 impl StateProviderFactory for ReplayProvider {
     fn latest(&self) -> ProviderResult<StateProviderBox> {
-        let hash = self.client.block_hash(self.client.best_number)?.unwrap_or(GENESIS_HASH);
+        let hash = self.client.block_hash(self.client.best_number)?.unwrap_or_else(genesis_hash);
         self.state_by_block_hash(hash)
     }
 
@@ -2119,12 +2107,12 @@ impl StateProviderFactory for ReplayProvider {
             BlockNumberOrTag::Earliest => 0,
             BlockNumberOrTag::Number(number) => number,
         };
-        let hash = self.client.block_hash(number)?.unwrap_or(GENESIS_HASH);
+        let hash = self.client.block_hash(number)?.unwrap_or_else(genesis_hash);
         self.state_by_block_hash(hash)
     }
 
     fn history_by_block_number(&self, number: u64) -> ProviderResult<StateProviderBox> {
-        let hash = self.client.block_hash(number)?.unwrap_or(GENESIS_HASH);
+        let hash = self.client.block_hash(number)?.unwrap_or_else(genesis_hash);
         self.state_by_block_hash(hash)
     }
 
@@ -2155,7 +2143,7 @@ impl CapturedRouteHistory {
         let mut blocks = BTreeMap::new();
         let mut states = BTreeMap::new();
         let mut headers = Vec::new();
-        states.insert(GENESIS_HASH, self.genesis_state.clone());
+        states.insert(genesis_hash(), self.genesis_state.clone());
         for captured in selected {
             let hash = captured.payload.block().hash();
             blocks.insert(hash, captured.payload.block().clone().into_block());
@@ -2166,7 +2154,7 @@ impl CapturedRouteHistory {
         ReplayProvider {
             client: Client {
                 chain_spec: self.chain_spec.clone(),
-                parent_hash: GENESIS_HASH,
+                parent_hash: genesis_hash(),
                 state: selected
                     .last()
                     .map_or_else(|| self.genesis_state.clone(), |block| block.post_state.clone()),
@@ -2279,11 +2267,13 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     let mut wrong_root = first.root.clone();
     wrong_root.network_id = 99;
     wrong_root.origin.network_id = 99;
+    b1::reseal(&mut wrong_root);
     let attrs = attributes(&first.root, first.parent.timestamp);
     // The binding names the original root input, so the substituted one cannot ride under it.
     let wrong_input = SealBuildInput {
         root_input: wrong_root.canonical_cbor().unwrap().into(),
         transitions: vec![],
+        b1_update: b1::job(&wrong_root).update,
         pair_binding: seal_input(&first.parent, &first.root, &attrs).pair_binding,
     };
     let (_, _, _, _, build_context, build_validator) = seal_fixture();
@@ -2319,6 +2309,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
 
     let wrong_context_companion = SealCompanion {
         root_input: wrong_root.canonical_cbor().unwrap().into(),
+        b1_update: b1::job(&wrong_root).update,
         ..first.import_companion.clone()
     };
     let (_, _, _, _, wrong_context, wrong_context_validator) = seal_fixture();
@@ -2367,7 +2358,12 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         &provider,
         &history.store,
         &restored,
-        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
+        UnicitySealConfig {
+            profile: profile(),
+            fee_collector: FEE_COLLECTOR,
+            pins: pair_pins(),
+            b1: b1::context(),
+        },
         &history.blocks[2].import_companion.pair_binding,
         3,
     )
@@ -2381,9 +2377,11 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     let (_wrong_order_dir, wrong_order_store) = temp_store();
     wrong_order_store.put(first.payload.block().hash(), 1, &first.companion).unwrap();
     let mut wrong_order_root = second.root.clone();
-    wrong_order_root.parent_hash = GENESIS_HASH;
+    wrong_order_root.parent_hash = genesis_hash();
+    b1::reseal(&mut wrong_order_root);
     let wrong_order_companion = build_seal_companion(
         &wrong_order_root,
+        &b1::job(&wrong_order_root).update,
         &pair_binding(
             &second.parent,
             &wrong_order_root,
@@ -2405,7 +2403,12 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         &wrong_order_provider,
         &wrong_order_store,
         &boundary_tokens,
-        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
+        UnicitySealConfig {
+            profile: profile(),
+            fee_collector: FEE_COLLECTOR,
+            pins: pair_pins(),
+            b1: b1::context(),
+        },
         &wrong_order_companion.pair_binding,
         2,
     )
@@ -2416,7 +2419,12 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         &wrong_order_provider,
         &wrong_order_store,
         &boundary_tokens,
-        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
+        UnicitySealConfig {
+            profile: profile(),
+            fee_collector: FEE_COLLECTOR,
+            pins: pair_pins(),
+            b1: b1::context(),
+        },
         &second.import_companion.pair_binding,
         2,
     )
@@ -2443,7 +2451,12 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         &reorg_provider,
         &history.store,
         &reorg_tokens,
-        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
+        UnicitySealConfig {
+            profile: profile(),
+            fee_collector: FEE_COLLECTOR,
+            pins: pair_pins(),
+            b1: b1::context(),
+        },
         &second.import_companion.pair_binding,
         2,
     )
@@ -2465,7 +2478,12 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         &boundary_reorg_provider,
         &history.store,
         &boundary_tokens,
-        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
+        UnicitySealConfig {
+            profile: profile(),
+            fee_collector: FEE_COLLECTOR,
+            pins: pair_pins(),
+            b1: b1::context(),
+        },
         &first.import_companion.pair_binding,
         1,
     )
@@ -2510,7 +2528,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     reth_unicity_payload::recovery::hydrate_accounting(
         &genesis_only,
         &restarted_precommit,
-        PROFILE,
+        profile(),
     )
     .unwrap();
     assert!(restarted_precommit.get(&first.payload.block().hash()).is_none());
@@ -2551,7 +2569,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
     reth_unicity_payload::recovery::hydrate_accounting(
         &canonical_first,
         &restarted_postcommit,
-        PROFILE,
+        profile(),
     )
     .unwrap();
     assert!(restarted_postcommit.get(&first.payload.block().hash()).is_some());
@@ -2559,7 +2577,12 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         &canonical_first,
         &postcommit_store_for_replay,
         &UnicityParentAccountings::default(),
-        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
+        UnicitySealConfig {
+            profile: profile(),
+            fee_collector: FEE_COLLECTOR,
+            pins: pair_pins(),
+            b1: b1::context(),
+        },
         &first.import_companion.pair_binding,
         1,
     )
@@ -2575,9 +2598,10 @@ fn bound_input(root: &RootInputV2, parent: &Arc<SealedHeader>) -> Arc<BoundExecu
     Arc::new(
         BoundExecutionInput::from_validated_genesis(
             Arc::new(root.clone()),
-            PROFILE,
+            b1::job(root),
+            profile(),
             parent,
-            GENESIS_HASH,
+            genesis_hash(),
             FEE_COLLECTOR,
         )
         .unwrap(),
@@ -2588,6 +2612,7 @@ fn bound_input(root: &RootInputV2, parent: &Arc<SealedHeader>) -> Arc<BoundExecu
 fn root_with_tree_root(root: &RootInputV2, tree_root: B256) -> RootInputV2 {
     let mut next = root.clone();
     next.origin.tree_root = tree_root;
+    b1::reseal(&mut next);
     next
 }
 
@@ -2737,7 +2762,7 @@ async fn get_payload_with_seal_stores_the_companion_it_returns() {
     let (_dir, store) = temp_store();
     context.store = store.clone();
 
-    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let state = ForkchoiceState::same_hash(genesis_hash());
     let payload_id = attrs.payload_id(&parent.hash());
     prepare_seal_build(
         &client,
@@ -2758,8 +2783,12 @@ async fn get_payload_with_seal_stores_the_companion_it_returns() {
     let payload = builder
         .build_empty_payload(PayloadConfig::new(parent.clone(), attrs.clone(), payload_id))
         .unwrap();
-    let expected =
-        build_seal_companion(&root, &pair_binding(&parent, &root, build_subject(&attrs))).unwrap();
+    let expected = build_seal_companion(
+        &root,
+        &b1::job(&root).update,
+        &pair_binding(&parent, &root, build_subject(&attrs)),
+    )
+    .unwrap();
 
     let (store_tx, store_rx) = tokio::sync::mpsc::unbounded_channel();
     tokio::spawn(serve_resolved_payload(store_rx, payload));
@@ -2787,7 +2816,7 @@ async fn a_failing_store_write_fails_get_payload_instead_of_serving_an_unretaine
     let (client, parent, root, attrs, mut context, validator) = seal_fixture();
     context.store = Arc::new(FailingCompanionSink);
 
-    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let state = ForkchoiceState::same_hash(genesis_hash());
     let payload_id = attrs.payload_id(&parent.hash());
     prepare_seal_build(
         &client,
@@ -2938,6 +2967,7 @@ async fn new_payload_with_seal_rejects_a_malformed_root_input() {
         payload_for_import(&payload, &parent, &root, |_| {});
     let malformed = SealCompanion {
         root_input: vec![0x80].into(),
+        b1_update: Default::default(),
         pair_binding: Default::default(),
         witnesses: vec![],
         provenance: "newPayload".into(),
@@ -3150,17 +3180,22 @@ async fn a_reopened_canonical_token_supports_the_next_build() {
         let store = Arc::new(open_companion_store(dir.path()).unwrap());
         let durable = UnicityParentAccountings::default().require_durability();
         durable.attach_store(store);
-        durable.publish(hash, 1, 1337, GENESIS_HASH, token).unwrap();
+        durable.publish(hash, 1, 1337, genesis_hash(), token).unwrap();
     }
     let restored = UnicityParentAccountings::default().require_durability();
     restored.attach_store(Arc::new(open_companion_store(dir.path()).unwrap()));
     let sealed = SealedHeader::new(header.clone(), hash);
-    assert!(restored.restore_exact(&sealed, 1338, GENESIS_HASH, PROFILE).is_err());
-    assert!(restored.restore_exact(&sealed, 1337, B256::ZERO, PROFILE).is_err());
+    assert!(restored.restore_exact(&sealed, 1338, genesis_hash(), profile()).is_err());
+    assert!(restored.restore_exact(&sealed, 1337, B256::ZERO, profile()).is_err());
     assert!(restored
-        .restore_exact(&sealed, 1337, GENESIS_HASH, BlockProfile { base_fee_floor: 8, ..PROFILE })
+        .restore_exact(
+            &sealed,
+            1337,
+            genesis_hash(),
+            BlockProfile { base_fee_floor: 8, ..profile() }
+        )
         .is_err());
-    assert!(restored.restore_exact(&sealed, 1337, GENESIS_HASH, PROFILE).unwrap().is_some());
+    assert!(restored.restore_exact(&sealed, 1337, genesis_hash(), profile()).unwrap().is_some());
     context.state.parent_accounting = restored;
     let leader_client = Client { parent_hash: hash, extra_headers: vec![header.clone()], ..client };
     let child_root = input(2, 2, hash);
@@ -3199,7 +3234,7 @@ async fn hydration_restores_persisted_head_when_memory_tip_is_ahead() {
     let (_dir, store) = temp_store();
     let durable = UnicityParentAccountings::new().require_durability();
     durable.attach_store(store.clone());
-    durable.publish(hash, 1, 1337, GENESIS_HASH, token).unwrap();
+    durable.publish(hash, 1, 1337, genesis_hash(), token).unwrap();
 
     let mut memory_tip = header.clone();
     memory_tip.number = 2;
@@ -3213,7 +3248,7 @@ async fn hydration_restores_persisted_head_when_memory_tip_is_ahead() {
     };
     let restored = UnicityParentAccountings::new().require_durability();
     restored.attach_store(store);
-    reth_unicity_payload::recovery::hydrate_accounting(&provider, &restored, PROFILE).unwrap();
+    reth_unicity_payload::recovery::hydrate_accounting(&provider, &restored, profile()).unwrap();
     assert!(restored.get(&hash).is_some(), "the persisted DB head must be hydrated");
     assert!(restored.get(&memory_hash).is_none(), "the memory tip has no durable token");
 }
@@ -3257,7 +3292,7 @@ async fn conflicting_durable_write_refuses_import_before_engine_forward() {
     store
         .put_accounting(reth_unicity_store::StoredAccounting {
             chain_id: 42,
-            genesis_hash: GENESIS_HASH,
+            genesis_hash: genesis_hash(),
             block_number: 1,
             accounting: token.for_local_storage(),
         })
@@ -3322,12 +3357,16 @@ fn unicity_capabilities_withhold_stock_new_payload() {
 async fn get_seal_companion_returns_a_stored_companion() {
     let (client, parent, root, attrs, _context, _validator) = seal_fixture();
     let (_dir, store) = temp_store();
-    let companion =
-        build_seal_companion(&root, &pair_binding(&parent, &root, build_subject(&attrs))).unwrap();
-    store.put(GENESIS_HASH, 0, &companion).unwrap();
+    let companion = build_seal_companion(
+        &root,
+        &b1::job(&root).update,
+        &pair_binding(&parent, &root, build_subject(&attrs)),
+    )
+    .unwrap();
+    store.put(genesis_hash(), 0, &companion).unwrap();
 
     let rpc = UnicityRpcModuleImpl::new(client, store);
-    let lookup = rpc.get_seal_companion_v1(GENESIS_HASH).await.unwrap();
+    let lookup = rpc.get_seal_companion_v1(genesis_hash()).await.unwrap();
     assert_eq!(lookup, SealCompanionLookup::Found { companion });
 }
 
@@ -3335,15 +3374,19 @@ async fn get_seal_companion_returns_a_stored_companion() {
 async fn get_seal_companion_reports_unavailable_below_the_horizon() {
     let (client, parent, root, attrs, _context, _validator) = seal_fixture();
     let (_dir, store) = temp_store();
-    let companion =
-        build_seal_companion(&root, &pair_binding(&parent, &root, build_subject(&attrs))).unwrap();
+    let companion = build_seal_companion(
+        &root,
+        &b1::job(&root).update,
+        &pair_binding(&parent, &root, build_subject(&attrs)),
+    )
+    .unwrap();
     // A genuine prune: `prune_below` drops block 0 and raises the horizon to 5.
-    store.put(GENESIS_HASH, 0, &companion).unwrap();
+    store.put(genesis_hash(), 0, &companion).unwrap();
     store.prune_below(5).unwrap();
 
     let rpc = UnicityRpcModuleImpl::new(client, store);
     assert_eq!(
-        rpc.get_seal_companion_v1(GENESIS_HASH).await.unwrap(),
+        rpc.get_seal_companion_v1(genesis_hash()).await.unwrap(),
         SealCompanionLookup::Unavailable { horizon: 5 },
         "a pruned block below the horizon is unavailable"
     );
@@ -3409,7 +3452,12 @@ async fn seal_companion_horizon_is_null_before_pruning_even_with_a_retention_con
     let (client, _parent, _root, _attrs, _context, _validator) = seal_fixture();
     let node = UnicityNode::new(
         SealJobRegistry::new(),
-        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS },
+        UnicitySealConfig {
+            profile: profile(),
+            fee_collector: FEE_COLLECTOR,
+            pins: pair_pins(),
+            b1: b1::context(),
+        },
     )
     .with_retention(UnicityRetentionConfig::retain_last(5));
     assert_eq!(node.retention().depth(), Some(5), "the retention policy is carried");
@@ -3442,8 +3490,12 @@ fn pruner_fixture(
     numbers: &[u64],
 ) -> (Client, Arc<CompanionStore>, tempfile::TempDir, SealCompanion) {
     let (client, parent, root, attrs, _context, _validator) = seal_fixture();
-    let companion =
-        build_seal_companion(&root, &pair_binding(&parent, &root, build_subject(&attrs))).unwrap();
+    let companion = build_seal_companion(
+        &root,
+        &b1::job(&root).update,
+        &pair_binding(&parent, &root, build_subject(&attrs)),
+    )
+    .unwrap();
     let extra_headers = numbers
         .iter()
         .map(|number| {
@@ -3563,21 +3615,21 @@ fn concurrent_accounting_publication_and_retention_keep_recent_block() {
     let client = Client { persisted_number: 100, ..client };
     let mut header = client.chain_spec.genesis_header().clone();
     header.number = 95;
-    header.gas_limit = PROFILE.max_gas;
+    header.gas_limit = profile().max_gas;
     header.gas_used = 0;
-    header.base_fee_per_gas = Some(PROFILE.base_fee_floor);
+    header.base_fee_per_gas = Some(profile().base_fee_floor);
     let hash = header.hash_slow();
     let token = reth_unicity_execution::block_executor::CompletedParent::from_local_storage(
         reth_unicity_execution::block_executor::LocalParentAccounting {
             block_hash: hash,
-            profile: PROFILE,
+            profile: profile(),
             header_gas: 0,
             system_gas: 0,
             ordinary_gas: 0,
-            base_fee: PROFILE.base_fee_floor,
+            base_fee: profile().base_fee_floor,
         },
         &SealedHeader::new(header, hash),
-        PROFILE,
+        profile(),
     )
     .unwrap();
     let tokens = UnicityParentAccountings::new().require_durability();
@@ -3587,7 +3639,7 @@ fn concurrent_accounting_publication_and_retention_keep_recent_block() {
     std::thread::scope(|scope| {
         scope.spawn(|| {
             for _ in 0..10 {
-                tokens.publish(hash, 95, 1337, GENESIS_HASH, token).unwrap();
+                tokens.publish(hash, 95, 1337, genesis_hash(), token).unwrap();
                 store.put(hash, 95, &companion).unwrap();
             }
         });
@@ -3609,15 +3661,15 @@ fn companion_pruning_failure_does_not_skip_accounting_pruning() {
     store
         .put_accounting(reth_unicity_store::StoredAccounting {
             chain_id: 1337,
-            genesis_hash: GENESIS_HASH,
+            genesis_hash: genesis_hash(),
             block_number: 1,
             accounting: reth_unicity_execution::block_executor::LocalParentAccounting {
                 block_hash: hash,
-                profile: PROFILE,
+                profile: profile(),
                 header_gas: 0,
                 system_gas: 0,
                 ordinary_gas: 0,
-                base_fee: PROFILE.base_fee_floor,
+                base_fee: profile().base_fee_floor,
             },
         })
         .unwrap();
@@ -3627,28 +3679,47 @@ fn companion_pruning_failure_does_not_skip_accounting_pruning() {
     assert!(store.get_accounting(hash).unwrap().is_none());
 }
 
-// ---- H3 #20 criterion X2: bft-core's signer-subset vectors through the payload routes
+// ---- H3 #20 criterion X2: signer-subset determinism through the payload routes
 // ----------------------------------------------
 //
-// `testdata` is copied verbatim from bft-core `engineapi/testdata/` (generated by
-// `TestX2NonemptyAssignmentTransitionIsSignerSubsetIndependent`,
-// engineapi/h3_signer_subset_test.go). One nonempty assignment acknowledgement, certified by two
-// distinct valid signer subsets of the old root quorum: the root input, transition body and
-// commitment are what bft-core's builder, follower and replay paths handed the execution client for
-// each; the companion witnesses are the only subset-dependent bytes. The genesis is the
-// registry-bearing genesis of the Go deployment whose block 0 is the acknowledgement's frozen
-// parent, so the bytes apply here unmodified.
+// One nonempty assignment acknowledgement, certified by two distinct valid signer subsets of the
+// old root quorum: the root input, transition body, committed update and commitment are the same
+// bytes for each, and the companion witnesses are the only subset-dependent bytes. The
+// acknowledgement rotates root epoch 1 to 2, so its block also carries the update that closes the
+// genesis interval and inserts epoch 2. The genesis is the B1 genesis whose block 0 is the
+// acknowledgement's frozen parent.
 
-const GO_X2_VECTOR: &str =
-    include_str!("../../execution/testdata/h3-assignment-signer-subsets.json");
-const GO_X2_GENESIS: &str = include_str!("../../execution/testdata/h3-assignment-genesis.json");
+const GO_X2_GENESIS: &str = include_str!("../testdata/signed-beacon-genesis.json");
+
+/// The acknowledgement vector this pair would be handed, built from the B1 world.
+fn go_x2_vector() -> serde_json::Value {
+    let mut root = b1::ack_input(genesis_hash());
+    b1::reseal(&mut root);
+    let hex = |bytes: &[u8]| format!("0x{}", alloy_primitives::hex::encode(bytes));
+    serde_json::json!({
+        "parent_hash": hex(genesis_hash().as_slice()),
+        "root_input": hex(&root.canonical_cbor().unwrap()),
+        "b1_update": hex(&b1::job(&root).update),
+        "transition": hex(&root.transitions[0]),
+        "commitment": hex(root.input_commitment().unwrap().as_slice()),
+        "parent_beacon_block_root": hex(
+            derive_beacon_root(root.origin.root_round, root.authorized_round).as_slice()
+        ),
+        "authorized_round": root.authorized_round,
+        "new_root_epoch": 2,
+        "subsets": [
+            { "witnesses": [hex(&[1; 65]), hex(&[2; 65]), hex(&[3; 65])] },
+            { "witnesses": [hex(&[1; 65]), hex(&[2; 65]), hex(&[4; 65])] },
+        ],
+    })
+}
 
 fn go_hex(value: &serde_json::Value) -> Vec<u8> {
     alloy_primitives::hex::decode(value.as_str().unwrap()).unwrap()
 }
 
 fn go_registry_slot(name: &str) -> U256 {
-    U256::from_be_bytes(alloy_primitives::keccak256(format!("unicity.seal-registry.v1/{name}")).0)
+    U256::from_be_bytes(alloy_primitives::keccak256(format!("unicity.seal-registry/{name}")).0)
 }
 
 fn go_genesis_fixture(
@@ -3675,7 +3746,7 @@ fn go_genesis_fixture(
     builder_config
         .set(
             EthereumBuilderConfig::new()
-                .with_gas_limit(PROFILE.max_gas)
+                .with_gas_limit(profile().max_gas)
                 .with_await_payload_on_missing(false),
         )
         .unwrap();
@@ -3684,9 +3755,10 @@ fn go_genesis_fixture(
             registry: SealJobRegistry::new(),
             builder_config,
             seal: UnicitySealConfig {
-                profile: PROFILE,
+                profile: profile(),
                 fee_collector: FEE_COLLECTOR,
-                pins: PAIR_PINS,
+                pins: pair_pins(),
+                b1: b1::context(),
             },
             parent_accounting: UnicityParentAccountings::default(),
             execution_inputs: UnicityBlockExecutionRegistry::default(),
@@ -3715,21 +3787,26 @@ async fn apply_go_subset(
 ) -> GoSubsetOutcome {
     let genesis_hash = B256::from_slice(&go_hex(&vector["parent_hash"]));
     let mut root_input = go_hex(&vector["root_input"]);
+    let mut b1_update = go_hex(&vector["b1_update"]);
     if leak_signer_into_input {
         // Negative control: a root input that differed per signer subset (here: the unicity tree
         // root) must NOT compare equal.
         let mut leaked = RootInputV2::from_canonical_cbor(&root_input).unwrap();
         leaked.origin.tree_root = B256::repeat_byte(0xee);
+        b1::reseal(&mut leaked);
+        b1_update = b1::job(&leaked).update.to_vec();
         root_input = leaked.canonical_cbor().unwrap();
     }
     let beacon_root = B256::from_slice(&go_hex(&vector["parent_beacon_block_root"]));
     let mut build_input = SealBuildInput {
         root_input: root_input.clone().into(),
         transitions: vec![go_hex(&vector["transition"]).into()],
+        b1_update: b1_update.clone().into(),
         pair_binding: Default::default(),
     };
     let mut companion = SealCompanion {
         root_input: root_input.clone().into(),
+        b1_update: b1_update.into(),
         pair_binding: Default::default(),
         witnesses: subset["witnesses"]
             .as_array()
@@ -3853,7 +3930,7 @@ fn root_timestamp_parent(genesis_hash: B256) -> u64 {
 
 #[tokio::test]
 async fn go_signer_subset_vectors_reach_identical_state_through_builder_follower_and_replay() {
-    let vector: serde_json::Value = serde_json::from_str(GO_X2_VECTOR).unwrap();
+    let vector = go_x2_vector();
     let subsets = vector["subsets"].as_array().unwrap();
     assert!(subsets.len() >= 2);
     assert_ne!(
@@ -3874,7 +3951,7 @@ async fn go_signer_subset_vectors_reach_identical_state_through_builder_follower
     assert_eq!(
         outcomes[0].extra_data,
         go_hex(&vector["commitment"]),
-        "the header commits to bft-core's commitment"
+        "the header commits to the input's commitment"
     );
 
     // The comparison discriminates: a subset-dependent root input is told apart.
@@ -3925,7 +4002,7 @@ fn build_under(
         &client,
         &context,
         &validator,
-        &ForkchoiceState::same_hash(GENESIS_HASH),
+        &ForkchoiceState::same_hash(genesis_hash()),
         Some(&attrs),
         &input,
     );
@@ -3951,9 +4028,9 @@ fn a_build_names_its_pair_binding_and_retains_it_on_the_job() {
     );
     let attrs = outcome.unwrap();
     assert_eq!(context.registry.len(), 1);
-    let retained = context.registry.pair_binding(&attrs.payload_id(&GENESIS_HASH)).unwrap();
-    assert_eq!(retained.network_id, PAIR_PINS.network_id);
-    assert_eq!(retained.parent_hash, GENESIS_HASH);
+    let retained = context.registry.pair_binding(&attrs.payload_id(&genesis_hash())).unwrap();
+    assert_eq!(retained.network_id, pair_pins().network_id);
+    assert_eq!(retained.parent_hash, genesis_hash());
 }
 
 #[test]
@@ -4044,7 +4121,7 @@ fn a_build_under_another_pinned_root_genesis_installs_nothing() {
 #[test]
 fn a_repeated_build_must_carry_the_same_binding() {
     let (client, parent, root, attrs, context, validator) = seal_fixture();
-    let state = ForkchoiceState::same_hash(GENESIS_HASH);
+    let state = ForkchoiceState::same_hash(genesis_hash());
     let first = seal_input(&parent, &root, &attrs);
     prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &first).unwrap();
     // The activation is the one field with no local comparison when no transition is carried, so
@@ -4244,7 +4321,12 @@ async fn recovery_refuses_a_retained_binding_that_no_longer_names_the_canonical_
             &provider,
             &store,
             &UnicityParentAccountings::default(),
-            UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins },
+            UnicitySealConfig {
+                profile: profile(),
+                fee_collector: FEE_COLLECTOR,
+                pins,
+                b1: b1::context(),
+            },
             &presented,
             1,
         )
@@ -4256,8 +4338,8 @@ async fn recovery_refuses_a_retained_binding_that_no_longer_names_the_canonical_
     let attrs = attributes(root, parent.timestamp);
 
     // Both subject kinds the node itself retains replay.
-    repair(&first.companion, PAIR_PINS).unwrap();
-    repair(&first.import_companion, PAIR_PINS).unwrap();
+    repair(&first.companion, pair_pins()).unwrap();
+    repair(&first.import_companion, pair_pins()).unwrap();
 
     let retained_refused = |error: eyre::Report, expected: PairBindingError| match error
         .downcast_ref::<RecoveryError>(
@@ -4267,7 +4349,9 @@ async fn recovery_refuses_a_retained_binding_that_no_longer_names_the_canonical_
         }
         other => panic!("expected RetainedRefused({expected:?}), got {other:?}"),
     };
-    match repair(&with_binding(Vec::new()), PAIR_PINS).unwrap_err().downcast_ref::<RecoveryError>()
+    match repair(&with_binding(Vec::new()), pair_pins())
+        .unwrap_err()
+        .downcast_ref::<RecoveryError>()
     {
         Some(RecoveryError::RetainedUnusable { number: 1, source: PairBindingError::Missing }) => {}
         other => {
@@ -4279,7 +4363,7 @@ async fn recovery_refuses_a_retained_binding_that_no_longer_names_the_canonical_
             &with_binding(binding_bytes(parent, root, build_subject(&attrs), |b| {
                 b.parent_hash = flip(b.parent_hash)
             })),
-            PAIR_PINS,
+            pair_pins(),
         )
         .unwrap_err(),
         PairBindingError::ParentHashMismatch,
@@ -4289,7 +4373,7 @@ async fn recovery_refuses_a_retained_binding_that_no_longer_names_the_canonical_
     retained_refused(
         repair(
             &with_binding(binding_bytes(parent, root, build_subject(&other_job), |_| {})),
-            PAIR_PINS,
+            pair_pins(),
         )
         .unwrap_err(),
         PairBindingError::JobMismatch,
@@ -4302,20 +4386,23 @@ async fn recovery_refuses_a_retained_binding_that_no_longer_names_the_canonical_
                 ExpectedSubject::Import { block_hash: B256::repeat_byte(0x42) },
                 |_| {},
             )),
-            PAIR_PINS,
+            pair_pins(),
         )
         .unwrap_err(),
         PairBindingError::BlockMismatch,
     );
     retained_refused(
-        repair(&first.companion, PairPins { network_id: PAIR_PINS.network_id + 1, ..PAIR_PINS })
-            .unwrap_err(),
+        repair(
+            &first.companion,
+            PairPins { network_id: pair_pins().network_id + 1, ..pair_pins() },
+        )
+        .unwrap_err(),
         PairBindingError::NetworkMismatch,
     );
     retained_refused(
         repair(
             &first.companion,
-            PairPins { root_genesis_id: flip(PAIR_PINS.root_genesis_id), ..PAIR_PINS },
+            PairPins { root_genesis_id: flip(pair_pins().root_genesis_id), ..pair_pins() },
         )
         .unwrap_err(),
         PairBindingError::RootGenesisMismatch,
@@ -4333,8 +4420,12 @@ async fn restored_accounting_resolves_only_after_recovery_admission() {
     let provider = history.recovery_provider(1);
     let chain = history.chain_spec.clone();
     let presented = first.import_companion.pair_binding.clone();
-    let seal =
-        UnicitySealConfig { profile: PROFILE, fee_collector: FEE_COLLECTOR, pins: PAIR_PINS };
+    let seal = UnicitySealConfig {
+        profile: profile(),
+        fee_collector: FEE_COLLECTOR,
+        pins: pair_pins(),
+        b1: b1::context(),
+    };
 
     // A previous process persisted the head's accounting; this one starts with an empty cache,
     // hydrates it from disk, and has the companion `companion` retained.
@@ -4350,11 +4441,11 @@ async fn restored_accounting_resolves_only_after_recovery_admission() {
         }
         let fresh = UnicityParentAccountings::new().require_durability();
         fresh.attach_store(store.clone());
-        reth_unicity_payload::recovery::hydrate_accounting(&provider, &fresh, PROFILE).unwrap();
+        reth_unicity_payload::recovery::hydrate_accounting(&provider, &fresh, profile()).unwrap();
         (dir, store, fresh)
     };
     let resolves =
-        |tokens: &UnicityParentAccountings| tokens.resolve(&head, &chain, PROFILE).is_ok();
+        |tokens: &UnicityParentAccountings| tokens.resolve(&head, &chain, profile()).is_ok();
     let admit =
         |store: &CompanionStore, tokens: &UnicityParentAccountings, seal, presented: &[u8]| {
             reth_unicity_payload::recovery::admit_recovered_head(
@@ -4392,7 +4483,7 @@ async fn restored_accounting_resolves_only_after_recovery_admission() {
     assert!(!resolves(&tokens));
     // Another pair: a changed root-genesis pin.
     let other_pair = UnicitySealConfig {
-        pins: PairPins { root_genesis_id: flip(PAIR_PINS.root_genesis_id), ..PAIR_PINS },
+        pins: PairPins { root_genesis_id: flip(pair_pins().root_genesis_id), ..pair_pins() },
         ..seal
     };
     let (_dir, store, tokens) = restart(Some(&first.companion));

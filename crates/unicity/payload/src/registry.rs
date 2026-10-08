@@ -121,6 +121,15 @@ impl SealJobRegistry {
             .map(|job| job.evm_config.root_input().clone())
     }
 
+    /// Returns the exact committed update bytes the job with `payload_id` executes.
+    pub fn b1_update(&self, payload_id: &PayloadId) -> Option<alloy_primitives::Bytes> {
+        self.lock()
+            .jobs
+            .iter()
+            .find(|job| job.payload_id == *payload_id)
+            .map(|job| alloy_primitives::Bytes::copy_from_slice(job.evm_config.b1_update()))
+    }
+
     /// Returns the verified pair binding the job with `payload_id` was admitted under.
     pub fn pair_binding(&self, payload_id: &PayloadId) -> Option<PairBinding> {
         self.lock()

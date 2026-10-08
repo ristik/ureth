@@ -49,6 +49,7 @@ use reth_unicity_execution::{
     block::BlockProfile,
     node_evm::{UnicityBlockExecutionRegistry, UnicityNodeEvmConfig},
     pairing::PairPins,
+    update::B1Context,
 };
 use reth_unicity_store::CompanionStore;
 
@@ -69,6 +70,8 @@ pub struct UnicitySealConfig {
     pub fee_collector: Address,
     /// Network and root genesis this pair is pinned to. Every pair binding is compared with it.
     pub pins: PairPins,
+    /// B1 profile bindings every committed update is checked against.
+    pub b1: B1Context,
 }
 
 /// Retention policy for the node's companion store.
@@ -623,7 +626,7 @@ mod tests {
     use super::{registry_capacity, UnicityNode, UnicitySealConfig};
     use crate::{SealJobRegistry, DEFAULT_SEAL_JOB_CAPACITY};
     use alloy_primitives::{Address, B256};
-    use reth_unicity_execution::{block::BlockProfile, pairing::PairPins};
+    use reth_unicity_execution::{block::BlockProfile, pairing::PairPins, update::B1Context};
 
     #[test]
     fn registry_capacity_tracks_max_payload_tasks_with_a_floor() {
@@ -648,6 +651,13 @@ mod tests {
                 },
                 fee_collector: Address::ZERO,
                 pins: PairPins { network_id: 1, root_genesis_id: B256::repeat_byte(1) },
+                b1: B1Context {
+                    network: 1,
+                    root_genesis_id: B256::repeat_byte(1),
+                    execution_chain_id: 1337,
+                    profile_hash: B256::repeat_byte(2),
+                    w_cert: 1,
+                },
             },
         );
         assert!(node.proof_source);

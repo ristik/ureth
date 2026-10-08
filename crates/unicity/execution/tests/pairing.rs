@@ -2,8 +2,8 @@
 //!
 //! `testdata/pair-binding-vectors.json` is produced by `generate-pair-binding-vectors.py`, whose
 //! CBOR encoder shares no code with this crate, from the Go-produced `ordinary_successful` root
-//! input in `v2-vectors.json`. `testdata/h3-assignment-signer-subsets.json` is the Go-produced root
-//! input that carries one acknowledged transition. Every negative below changes exactly one field
+//! input in `v2-vectors.json`. Step 3 of `testdata/b1-vectors.json` is the Go-produced root input
+//! that carries one acknowledged transition. Every negative below changes exactly one field
 //! of an otherwise accepted binding and asserts the one variant that field's comparison raises.
 
 use alloy_consensus::Header;
@@ -21,7 +21,7 @@ use reth_unicity_execution::{
 use serde_json::Value;
 
 const VECTORS: &str = include_str!("../testdata/pair-binding-vectors.json");
-const H3: &str = include_str!("../testdata/h3-assignment-signer-subsets.json");
+const B1: &str = include_str!("../testdata/b1-vectors.json");
 
 fn vectors() -> Value {
     serde_json::from_str(VECTORS).unwrap()
@@ -270,10 +270,12 @@ fn the_activation_is_free_without_a_transition_and_pinned_with_one() {
     assert!(verify_pair_binding(&binding.canonical_cbor(), &w.context(w.import())).is_ok());
 
     // One acknowledged transition: the activation must be that transition's commit id.
-    let h3: Value = serde_json::from_str(H3).unwrap();
-    let root = RootInputV2::from_canonical_cbor(&raw(&h3["root_input"])).unwrap();
+    let b1: Value = serde_json::from_str(B1).unwrap();
+    let step = &b1["steps"][2];
+    let root = RootInputV2::from_canonical_cbor(&raw(&step["rootInput"])).unwrap();
     assert_eq!(root.transitions.len(), 1);
-    let parent = parent_with(root.parent_hash, 0);
+    let parent_number = step["parentNumber"].as_u64().unwrap();
+    let parent = parent_with(root.parent_hash, parent_number);
     let pins = PairPins { network_id: root.network_id, root_genesis_id: B256::repeat_byte(0x51) };
     let genesis = parent.hash();
     let subject = ExpectedSubject::Import { block_hash: B256::repeat_byte(0x63) };
@@ -289,7 +291,7 @@ fn the_activation_is_free_without_a_transition_and_pinned_with_one() {
         root_genesis_id: pins.root_genesis_id,
         execution_genesis_hash: genesis,
         parent_hash: parent.hash(),
-        parent_number: 0,
+        parent_number,
         origin_root_epoch: root.origin.root_epoch,
         origin_root_round: root.origin.root_round,
         configuration_id: root.origin.shard_conf_hash,
