@@ -150,8 +150,9 @@ impl SealJobRegistry {
 
     /// Installs `job`, accepting an identical retry without replacing the existing job.
     ///
-    /// If the registry is full, the oldest insertion is evicted first. Eviction happens only when
-    /// the incoming job is new, so a retry or collision does not displace the held job.
+    /// If the registry is full, the entry of the lowest block number is evicted first. Eviction
+    /// happens only when the incoming job is new, so a retry or collision does not displace the
+    /// held job.
     pub fn insert(&self, job: ResolvedPayloadJob) -> Result<(), PayloadJobResolutionError> {
         let mut inner = self.lock();
         if let Some(existing) =
@@ -221,6 +222,10 @@ struct ParentAccountingInner {
 #[derive(Debug)]
 struct ParentAccountingEntry {
     hash: B256,
+    /// The block's number: eviction takes the lowest first, because the tokens a node needs are
+    /// those of the blocks nearest its tip. Zero for a token inserted without one (fixtures);
+    /// ties go to the oldest insertion.
+    number: u64,
     token: CompletedParent,
     identity: Option<(u64, B256)>,
     pins: usize,
@@ -282,30 +287,42 @@ fn unpin(inner: &Arc<Mutex<ParentAccountingInner>>, hash: &B256) {
         entry.pins -= 1;
     }
     while inner.tokens.len() > inner.capacity {
-        if let Some(index) = inner.tokens.iter().position(|entry| entry.pins == 0) {
-            inner.tokens.remove(index);
-        } else {
+        if !evict_lowest(&mut inner) {
             break;
         }
     }
 }
 
-/// Moves the entry at `index` to the back of the store, which evicts from the front: the least
-/// recently admitted or resolved entry goes first. Without it a head admitted before the window
-/// behind it was restored is the oldest entry, and the first publication after the admission evicts
-/// it; the restored copy is not admitted, so the head's children could no longer be built or
-/// imported (ureth#60).
-fn touch(inner: &mut ParentAccountingInner, index: usize) {
-    if let Some(entry) = inner.tokens.remove(index) {
-        inner.tokens.push_back(entry);
+/// Removes the unpinned entry of the lowest block number (the oldest insertion among equals); false
+/// when every entry is pinned.
+///
+/// The order is by block number, not by insertion or use. A node can hold the token of an imported
+/// block ABOVE its canonical head (it stopped between the import and the forkchoice update that
+/// makes it canonical), and recovery admission restores the window BEHIND the head, inserting older
+/// tokens. Evicting by insertion or use order let those insertions run on until they evicted the
+/// newer block's token, whose copy restored from disk is not admitted: every child of that block
+/// was then answered SYNCING for good (ureth#60).
+fn evict_lowest(inner: &mut ParentAccountingInner) -> bool {
+    let mut lowest: Option<(usize, u64)> = None;
+    for (index, entry) in inner.tokens.iter().enumerate() {
+        if entry.pins == 0 && lowest.is_none_or(|(_, number)| entry.number < number) {
+            lowest = Some((index, entry.number));
+        }
+    }
+    match lowest {
+        Some((index, _)) => {
+            inner.tokens.remove(index);
+            true
+        }
+        None => false,
     }
 }
 
 /// Keeps the token of the head that recovery admission is admitting in the store while the
 /// admission restores the tokens of the window behind it. Restoring a token inserts it, and an
-/// insertion into a full store evicts the oldest unpinned entry: without the pin, a store that
-/// also holds tokens newer than the head (a build in flight) evicts the head itself before it is
-/// admitted.
+/// insertion into a full store evicts the lowest-numbered unpinned entry: without the pin, a store
+/// that also holds tokens newer than the head (a build in flight) evicts the head itself before it
+/// is admitted.
 #[derive(Debug)]
 pub(crate) struct AdmissionPin {
     hash: B256,
@@ -414,7 +431,7 @@ impl UnicityParentAccountings {
         } else if self.durability_required {
             return Err(reth_unicity_store::StoreError::Corrupt("accounting store unavailable"));
         }
-        self.insert_for_chain(block_hash, token, chain_id, genesis_hash);
+        self.insert_inner(block_hash, block_number, token, Some((chain_id, genesis_hash)), true);
         Ok(())
     }
 
@@ -455,16 +472,22 @@ impl UnicityParentAccountings {
         token
             .checked_next_base_fee(header, profile)
             .map_err(|_| reth_unicity_store::StoreError::Corrupt("accounting fee mismatch"))?;
-        self.insert_inner(header.hash(), token, Some((chain_id, genesis_hash)), false);
+        self.insert_inner(
+            header.hash(),
+            header.number,
+            token,
+            Some((chain_id, genesis_hash)),
+            false,
+        );
         Ok(Some(token))
     }
 
     /// Publishes the token for the block whose hash is `block_hash`.
     ///
     /// A repeated hash replaces the existing entry rather than adding a second one. If the store is
-    /// full, the oldest insertion is evicted first.
+    /// full, the entry of the lowest block number is evicted first.
     pub fn insert(&self, block_hash: B256, token: CompletedParent) {
-        self.insert_inner(block_hash, token, None, true);
+        self.insert_inner(block_hash, 0, token, None, true);
     }
 
     /// Publishes a token bound to the node's chain identity.
@@ -475,7 +498,7 @@ impl UnicityParentAccountings {
         chain_id: u64,
         genesis_hash: B256,
     ) {
-        self.insert_inner(block_hash, token, Some((chain_id, genesis_hash)), true);
+        self.insert_inner(block_hash, 0, token, Some((chain_id, genesis_hash)), true);
     }
 
     /// Pins the cached token of `block_hash` against eviction until the pin is dropped, or returns
@@ -490,13 +513,10 @@ impl UnicityParentAccountings {
     /// Admits the cached token of `block_hash` for resolution. Only recovery admission calls this,
     /// after the retained binding was re-checked and the local Go side presented its own.
     pub(crate) fn admit(&self, block_hash: &B256) -> bool {
-        let mut inner = self.lock();
-        let Some(index) = inner.tokens.iter().position(|entry| entry.hash == *block_hash) else {
-            return false;
-        };
-        inner.tokens[index].admitted = true;
-        touch(&mut inner, index);
-        true
+        self.lock().tokens.iter_mut().find(|entry| entry.hash == *block_hash).is_some_and(|entry| {
+            entry.admitted = true;
+            true
+        })
     }
 
     /// Whether the cached token of `block_hash` is admitted.
@@ -507,6 +527,7 @@ impl UnicityParentAccountings {
     fn insert_inner(
         &self,
         block_hash: B256,
+        number: u64,
         token: CompletedParent,
         identity: Option<(u64, B256)>,
         admitted: bool,
@@ -519,18 +540,18 @@ impl UnicityParentAccountings {
                 return;
             }
             entry.token = token;
+            entry.number = entry.number.max(number);
             entry.identity = identity;
             // A restored read never lowers an admitted entry, and a live publication admits.
             entry.admitted = entry.admitted || admitted;
             return;
         }
-        if inner.tokens.len() >= inner.capacity &&
-            let Some(index) = inner.tokens.iter().position(|entry| entry.pins == 0)
-        {
-            inner.tokens.remove(index);
+        if inner.tokens.len() >= inner.capacity {
+            evict_lowest(&mut inner);
         }
         inner.tokens.push_back(ParentAccountingEntry {
             hash: block_hash,
+            number,
             token,
             identity,
             pins: 0,
@@ -574,16 +595,11 @@ impl ParentAccountingResolver for UnicityParentAccountings {
                 .map_err(|_| ParentAccountingUnavailable(parent.hash()))?;
         }
         let mut inner = self.lock();
-        let index = inner
+        let entry = inner
             .tokens
-            .iter()
-            .position(|entry| entry.hash == parent.hash())
+            .iter_mut()
+            .find(|entry| entry.hash == parent.hash())
             .ok_or_else(|| ParentAccountingUnavailable(parent.hash()))?;
-        // The parent being built on or imported onto is the most recently used entry: the next
-        // publication evicts older ones first.
-        touch(&mut inner, index);
-        let last = inner.tokens.len() - 1;
-        let entry = &mut inner.tokens[last];
         if !entry.admitted ||
             entry.identity != Some((chain_spec.chain().id(), chain_spec.genesis_hash()))
         {

@@ -4544,23 +4544,23 @@ async fn restored_accounting_resolves_only_after_recovery_admission() {
     assert!(!resolves(&tokens), "no refused admission leaves a usable token behind");
 }
 
-/// Regression of ureth#60: a recovery admission refused the head with "no token for the admitted
-/// head" when the store, at its capacity, also held a token newer than the head (the token of a
-/// build in flight). Restoring the window behind the head inserted older tokens, each evicting the
-/// oldest unpinned entry, and the cascade ended by evicting the head itself.
-///
-/// The store here is the shape of a running node whose shard node restarts: the tokens of the
-/// canonical window are cached and admitted, one token newer than the head is cached too, and
-/// every older token is on disk. The twenty blocks exceed the window and the capacity.
+/// Regression of the third mechanism of ureth#60: a shard node that stopped between importing a
+/// block and the forkchoice update that makes it canonical comes back with the block imported (its
+/// token published, admitted) and the canonical head one below it. Recovery admission of the head
+/// restores the window behind it, each restore inserts, and a store at capacity evicted the OLDEST
+/// entries first by insertion order: the pinned head protected itself only, and the cascade ran on
+/// to the newer, imported block's token. Its restored copy is not admitted, so every child of the
+/// imported block was answered SYNCING ("parent accounting token is not retained") for good.
 #[tokio::test]
-async fn recovery_admission_keeps_the_head_when_a_newer_token_crowds_the_store() {
-    const HEAD: u64 = 20;
+async fn recovery_admission_keeps_the_token_of_an_imported_block_above_the_head() {
+    const IMPORTED: u64 = 22;
     let mut schedule = vec![(1, 1, true)];
-    schedule.extend((2..HEAD).map(|round| (round, 1, false)));
-    schedule.push((HEAD, 2, false));
+    schedule.extend((2..IMPORTED).map(|round| (round, 1, false)));
+    schedule.push((IMPORTED, 2, false));
     let history = capture_route_history(&schedule).await;
-    let provider = history.recovery_provider(history.blocks.len());
-    let seal = || UnicitySealConfig {
+    // the execution client's canonical chain stops two blocks below the last imported one
+    let provider = history.recovery_provider(history.blocks.len() - 2);
+    let seal = UnicitySealConfig {
         profile: profile(),
         fee_collector: FEE_COLLECTOR,
         pins: pair_pins(),
@@ -4568,54 +4568,105 @@ async fn recovery_admission_keeps_the_head_when_a_newer_token_crowds_the_store()
     };
     let chain_id = history.chain_spec.chain().id();
     let genesis = history.chain_spec.genesis_hash();
-    let head = history.blocks.last().unwrap();
-    let head_hash = head.payload.block().hash();
-    let presented = &head.import_companion.pair_binding;
+    let head = &history.blocks[history.blocks.len() - 3];
+    let imported = &history.blocks[history.blocks.len() - 2..];
+    let publish = |tokens: &UnicityParentAccountings, captured: &CapturedRouteBlock| {
+        let block = captured.payload.block();
+        tokens
+            .publish(block.hash(), block.header().number, chain_id, genesis, captured.completed)
+            .unwrap();
+    };
 
-    // Every block's accounting is on disk, as a running node leaves it.
+    // every block's accounting is on disk, as a running node leaves it
     let writer = UnicityParentAccountings::default().require_durability();
     writer.attach_store(history.store.clone());
     for captured in &history.blocks {
-        let block = captured.payload.block();
-        writer
-            .publish(block.hash(), block.header().number, chain_id, genesis, captured.completed)
-            .unwrap();
+        publish(&writer, captured);
     }
 
-    // The running node's cache: the window behind the head and the head, admitted, and one token
-    // newer than the head.
+    // the running node's cache: the window behind the head, the head and the two imported blocks
+    // (16 entries, all admitted by their publication)
     let live = UnicityParentAccountings::default().require_durability();
     live.attach_store(history.store.clone());
-    for captured in &history.blocks[history.blocks.len() - 15..] {
-        let block = captured.payload.block();
-        live.insert_for_chain(block.hash(), captured.completed, chain_id, genesis);
+    for captured in &history.blocks[history.blocks.len() - 16..] {
+        publish(&live, captured);
     }
-    live.insert_for_chain(B256::repeat_byte(0xEE), head.completed, chain_id, genesis);
     assert_eq!(live.len(), 16, "the store is at its capacity");
+    assert!(imported.iter().all(|captured| live.is_admitted(&captured.payload.block().hash())));
 
     reth_unicity_payload::recovery::admit_recovered_head(
         &provider,
         &history.store,
         &live,
-        seal(),
-        presented,
+        seal,
+        &head.import_companion.pair_binding,
         64,
     )
-    .expect("the head must survive the restoration of its window");
-    assert!(live.is_admitted(&head_hash), "the admitted head resolves");
+    .expect("the head is admitted");
+    assert!(live.is_admitted(&head.payload.block().hash()), "the admitted head resolves");
+    for captured in imported {
+        let block = captured.payload.block();
+        assert!(
+            live.is_admitted(&block.hash()),
+            "the imported block {} above the head is still admitted",
+            block.header().number
+        );
+        live.resolve(&block.clone().into_sealed_header(), &history.chain_spec, profile())
+            .expect("the children of an imported block can still be built and imported");
+    }
+}
 
-    // The first publication after the admission is the token of the next build. It evicts the least
-    // recently used entry, which must not be the head just admitted: an evicted head comes back
-    // unadmitted and its children could no longer be built or imported (the SYNCING of
-    // ureth#60's second symptom).
-    live.insert_for_chain(B256::repeat_byte(0xEF), head.completed, chain_id, genesis);
-    live.insert_for_chain(B256::repeat_byte(0xF0), head.completed, chain_id, genesis);
+/// The store evicts by block number: the entry of the lowest number goes first whatever its
+/// insertion or use, an entry that is pinned never goes, and a newer publication never evicts a
+/// newer entry while an older one is held.
+#[tokio::test]
+async fn parent_accounting_is_evicted_lowest_block_number_first() {
+    let history = capture_route_history(&[
+        (1, 1, true),
+        (2, 1, false),
+        (3, 1, false),
+        (4, 1, false),
+        (5, 1, false),
+    ])
+    .await;
+    let chain_id = history.chain_spec.chain().id();
+    let genesis = history.chain_spec.genesis_hash();
+    let tokens = UnicityParentAccountings::with_capacity(3);
+    let hash = |i: usize| history.blocks[i].payload.block().hash();
+    let publish = |i: usize| {
+        let block = history.blocks[i].payload.block();
+        tokens
+            .publish(
+                block.hash(),
+                block.header().number,
+                chain_id,
+                genesis,
+                history.blocks[i].completed,
+            )
+            .unwrap();
+    };
+    // published out of order: 3, 1, 2 (numbers), then 4 evicts number 1, not the oldest insertion
+    // (number 3)
+    publish(2);
+    publish(0);
+    publish(1);
+    publish(3);
+    assert!(tokens.get(&hash(0)).is_none(), "the lowest number goes first");
     assert!(
-        live.is_admitted(&head_hash),
-        "the head survives the publications that follow its admission"
+        tokens.get(&hash(1)).is_some() &&
+            tokens.get(&hash(2)).is_some() &&
+            tokens.get(&hash(3)).is_some()
     );
-    let head_header = provider.sealed_header_by_hash(head_hash).unwrap().unwrap();
-    live.resolve(&head_header, &history.chain_spec, profile())
-        .expect("the head's children can still be built on it");
-    assert!(live.len() <= 17, "the pin released: the store is back within a pin of its capacity");
+    // a pinned entry is never taken: hold number 2 and publish 5; number 3 is the lowest unpinned
+    let lease = reth_unicity_payload::ParentAccountingResolver::resolve(
+        &tokens,
+        &history.blocks[1].payload.block().clone().into_sealed_header(),
+        &history.chain_spec,
+        profile(),
+    )
+    .expect("block 2 resolves");
+    publish(4);
+    assert!(tokens.get(&hash(1)).is_some(), "the held entry stays");
+    assert!(tokens.get(&hash(2)).is_none(), "the lowest unpinned entry goes");
+    drop(lease);
 }
