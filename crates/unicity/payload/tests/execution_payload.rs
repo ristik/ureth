@@ -1544,6 +1544,11 @@ struct CapturedRouteHistory {
 /// builder and getPayload-with-seal response path. The third block is an ack-only EVM assignment
 /// transition on the frozen parent; follower import and restore replay consume the same bytes.
 async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
+    capture_route_history(&[(1, 1, true), (2, 1, false), (3, 2, false)]).await
+}
+
+/// The same capture for an arbitrary schedule of `(round, root epoch, paid)` blocks.
+async fn capture_route_history(schedule: &[(u64, u64, bool)]) -> CapturedRouteHistory {
     let (genesis_client, mut parent, _, _, mut context, validator) = seal_fixture();
     let chain_spec = genesis_client.chain_spec.clone();
     let genesis_state = genesis_client.state.clone();
@@ -1553,7 +1558,7 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
     let mut state = genesis_state.clone();
     let mut prior_headers = Vec::new();
     let mut blocks = Vec::new();
-    for (round, root_epoch, paid) in [(1, 1, true), (2, 1, false), (3, 2, false)] {
+    for &(round, root_epoch, paid) in schedule {
         let parent_for_block = parent.clone();
         let mut root = input(round, round, parent.hash());
         root.origin.root_epoch = root_epoch;
@@ -4537,4 +4542,66 @@ async fn restored_accounting_resolves_only_after_recovery_admission() {
         RecoveryError::PresentedDiffers(1)
     ));
     assert!(!resolves(&tokens), "no refused admission leaves a usable token behind");
+}
+
+/// Regression of ureth#60: a recovery admission refused the head with "no token for the admitted
+/// head" when the store, at its capacity, also held a token newer than the head (the token of a
+/// build in flight). Restoring the window behind the head inserted older tokens, each evicting the
+/// oldest unpinned entry, and the cascade ended by evicting the head itself.
+///
+/// The store here is the shape of a running node whose shard node restarts: the tokens of the
+/// canonical window are cached and admitted, one token newer than the head is cached too, and
+/// every older token is on disk. The twenty blocks exceed the window and the capacity.
+#[tokio::test]
+async fn recovery_admission_keeps_the_head_when_a_newer_token_crowds_the_store() {
+    const HEAD: u64 = 20;
+    let mut schedule = vec![(1, 1, true)];
+    schedule.extend((2..HEAD).map(|round| (round, 1, false)));
+    schedule.push((HEAD, 2, false));
+    let history = capture_route_history(&schedule).await;
+    let provider = history.recovery_provider(history.blocks.len());
+    let seal = || UnicitySealConfig {
+        profile: profile(),
+        fee_collector: FEE_COLLECTOR,
+        pins: pair_pins(),
+        b1: b1::context(),
+    };
+    let chain_id = history.chain_spec.chain().id();
+    let genesis = history.chain_spec.genesis_hash();
+    let head = history.blocks.last().unwrap();
+    let head_hash = head.payload.block().hash();
+    let presented = &head.import_companion.pair_binding;
+
+    // Every block's accounting is on disk, as a running node leaves it.
+    let writer = UnicityParentAccountings::default().require_durability();
+    writer.attach_store(history.store.clone());
+    for captured in &history.blocks {
+        let block = captured.payload.block();
+        writer
+            .publish(block.hash(), block.header().number, chain_id, genesis, captured.completed)
+            .unwrap();
+    }
+
+    // The running node's cache: the window behind the head and the head, admitted, and one token
+    // newer than the head.
+    let live = UnicityParentAccountings::default().require_durability();
+    live.attach_store(history.store.clone());
+    for captured in &history.blocks[history.blocks.len() - 15..] {
+        let block = captured.payload.block();
+        live.insert_for_chain(block.hash(), captured.completed, chain_id, genesis);
+    }
+    live.insert_for_chain(B256::repeat_byte(0xEE), head.completed, chain_id, genesis);
+    assert_eq!(live.len(), 16, "the store is at its capacity");
+
+    reth_unicity_payload::recovery::admit_recovered_head(
+        &provider,
+        &history.store,
+        &live,
+        seal(),
+        presented,
+        64,
+    )
+    .expect("the head must survive the restoration of its window");
+    assert!(live.is_admitted(&head_hash), "the admitted head resolves");
+    assert!(live.len() <= 17, "the pin released: the store is back within a pin of its capacity");
 }

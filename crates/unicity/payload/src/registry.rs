@@ -271,17 +271,39 @@ impl ParentAccountingLease {
 
 impl Drop for ParentAccountingLease {
     fn drop(&mut self) {
-        let mut inner = self.inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-        if let Some(entry) = inner.tokens.iter_mut().find(|entry| entry.hash == self.hash) {
-            entry.pins -= 1;
+        unpin(&self.inner, &self.hash);
+    }
+}
+
+/// Releases one pin of `hash` and evicts down to capacity what the pin kept over it.
+fn unpin(inner: &Arc<Mutex<ParentAccountingInner>>, hash: &B256) {
+    let mut inner = inner.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+    if let Some(entry) = inner.tokens.iter_mut().find(|entry| entry.hash == *hash) {
+        entry.pins -= 1;
+    }
+    while inner.tokens.len() > inner.capacity {
+        if let Some(index) = inner.tokens.iter().position(|entry| entry.pins == 0) {
+            inner.tokens.remove(index);
+        } else {
+            break;
         }
-        while inner.tokens.len() > inner.capacity {
-            if let Some(index) = inner.tokens.iter().position(|entry| entry.pins == 0) {
-                inner.tokens.remove(index);
-            } else {
-                break;
-            }
-        }
+    }
+}
+
+/// Keeps the token of the head that recovery admission is admitting in the store while the
+/// admission restores the tokens of the window behind it. Restoring a token inserts it, and an
+/// insertion into a full store evicts the oldest unpinned entry: without the pin, a store that
+/// also holds tokens newer than the head (a build in flight) evicts the head itself before it is
+/// admitted.
+#[derive(Debug)]
+pub(crate) struct AdmissionPin {
+    hash: B256,
+    inner: Arc<Mutex<ParentAccountingInner>>,
+}
+
+impl Drop for AdmissionPin {
+    fn drop(&mut self) {
+        unpin(&self.inner, &self.hash);
     }
 }
 
@@ -443,6 +465,15 @@ impl UnicityParentAccountings {
         genesis_hash: B256,
     ) {
         self.insert_inner(block_hash, token, Some((chain_id, genesis_hash)), true);
+    }
+
+    /// Pins the cached token of `block_hash` against eviction until the pin is dropped, or returns
+    /// `None` when no token is cached for it.
+    pub(crate) fn pin(&self, block_hash: &B256) -> Option<AdmissionPin> {
+        let mut inner = self.lock();
+        let entry = inner.tokens.iter_mut().find(|entry| entry.hash == *block_hash)?;
+        entry.pins += 1;
+        Some(AdmissionPin { hash: *block_hash, inner: self.inner.clone() })
     }
 
     /// Admits the cached token of `block_hash` for resolution. Only recovery admission calls this,

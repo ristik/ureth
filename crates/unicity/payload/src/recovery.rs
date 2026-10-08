@@ -227,6 +227,12 @@ where
     if cached.is_none() {
         repair_accounting(provider, store, tokens, seal, head, limit)?;
     }
+    // The head's own token must outlive the restoration of the window behind it: every restore
+    // inserts, and a store that already holds newer tokens (a build in flight) would evict the
+    // head to make room for the older blocks.
+    let Some(_head_pin) = tokens.pin(&retained.hash) else {
+        eyre::bail!("parent accounting unavailable: no token for the admitted head {head}");
+    };
     for number in head.saturating_sub(ACCOUNTING_WINDOW.saturating_sub(1)).max(1)..head {
         let hash = canonical_hash(provider, number)?;
         let header = canonical_header(provider, hash)?;
