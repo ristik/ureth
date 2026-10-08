@@ -1025,8 +1025,8 @@ mod tests {
         overflow: bool,
     }
 
-    /// bft-core's `evmroot.DeriveTimestampChecked` vectors: the same `max(reference, parent + 1)`, and a parent at the top of the 64-bit
-    /// range has no successor in either implementation.
+    /// bft-core's `evmroot.DeriveTimestampChecked` vectors: the same `max(reference, parent + 1)`,
+    /// and a parent at the top of the 64-bit range has no successor in either implementation.
     #[test]
     fn derive_timestamp_reproduces_the_go_vectors_including_overflow() {
         #[derive(Deserialize)]
