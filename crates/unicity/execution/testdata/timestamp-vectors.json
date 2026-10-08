@@ -1,0 +1,47 @@
+{
+ "source": "bft-core evmroot/testdata/vectors.json, field timestamps (evmroot.DeriveTimestampChecked)",
+ "cases": [
+  {
+   "reference_time": 1726000000,
+   "parent_timestamp": 1725999999,
+   "want": 1726000000,
+   "overflow": false
+  },
+  {
+   "reference_time": 1726000000,
+   "parent_timestamp": 1726000000,
+   "want": 1726000001,
+   "overflow": false
+  },
+  {
+   "reference_time": 1726000000,
+   "parent_timestamp": 1726000005,
+   "want": 1726000006,
+   "overflow": false
+  },
+  {
+   "reference_time": 18446744073709551615,
+   "parent_timestamp": 18446744073709551614,
+   "want": 18446744073709551615,
+   "overflow": false
+  },
+  {
+   "reference_time": 18446744073709551615,
+   "parent_timestamp": 0,
+   "want": 18446744073709551615,
+   "overflow": false
+  },
+  {
+   "reference_time": 1726000000,
+   "parent_timestamp": 18446744073709551615,
+   "want": 0,
+   "overflow": true
+  },
+  {
+   "reference_time": 18446744073709551615,
+   "parent_timestamp": 18446744073709551615,
+   "want": 0,
+   "overflow": true
+  }
+ ]
+}
