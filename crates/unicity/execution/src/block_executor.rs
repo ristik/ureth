@@ -711,8 +711,13 @@ where
                 BlockExecutionError::msg("system gas exhausted before the records hook")
             })?;
             let env = crate::hook::HookEnv::from_evm(&self.inner.evm);
+            // the election is called with the identity of the block's authenticated root origin
+            let origin = bound
+                .input
+                .origin_identity()
+                .map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
             let outcome =
-                crate::hook::run_records_hook(self.inner.evm.db_mut(), &hook, &env, remaining)
+                crate::hook::run_hooks(self.inner.evm.db_mut(), &hook, &env, origin, remaining)
                     .map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
             system = system.checked_add(outcome.gas_spent).ok_or_else(|| {
                 BlockExecutionError::msg("system gas overflow after the records hook")

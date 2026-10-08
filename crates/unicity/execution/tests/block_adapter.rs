@@ -844,6 +844,8 @@ struct HookWorld {
     chain_spec: Arc<ChainSpec>,
     import: Vec<u8>,
     update: Bytes,
+    /// System gas reserved beyond the records hook's, for a world whose profile pins an election.
+    extra_gas: u64,
 }
 
 fn hook_world(import: &[u8], custody: Address) -> HookWorld {
@@ -867,7 +869,7 @@ fn hook_world_with(import: &[u8], install: impl FnOnce(&mut FixtureProvider)) ->
     install(&mut provider);
     let mut root = input(1, 1, genesis_hash());
     let update = testing::seal_with_import(&mut root, 0, GENESIS_TAIL, import);
-    HookWorld { provider, parent, root, chain_spec, import: import.to_vec(), update }
+    HookWorld { provider, parent, root, chain_spec, import: import.to_vec(), update, extra_gas: 0 }
 }
 
 impl HookWorld {
@@ -875,9 +877,13 @@ impl HookWorld {
     /// the hooked and unhooked blocks differ in nothing but the hook.
     fn profile(&self) -> BlockProfile {
         let base = profile();
-        let hook =
-            RecordsHook { custody: Address::repeat_byte(1), h_records: 3, record_gas: 3_000_000 };
-        let system_gas = base.system_gas + hook.envelope_gas().unwrap();
+        let hook = RecordsHook {
+            custody: Address::repeat_byte(1),
+            h_records: 3,
+            record_gas: 3_000_000,
+            ..Default::default()
+        };
+        let system_gas = base.system_gas + hook.envelope_gas().unwrap() + self.extra_gas;
         BlockProfile { system_gas, max_gas: base.max_gas + (system_gas - base.system_gas), ..base }
     }
 
@@ -939,7 +945,7 @@ fn the_records_hook_runs_after_eip_4788_and_its_gas_joins_the_system_total_only(
     let custody = Address::repeat_byte(0xc5);
     let world = hook_world(&testing::import_of(3), custody);
     let off = RecordsHook::default();
-    let on = RecordsHook { custody, h_records: 2, record_gas: 1_000_000 };
+    let on = RecordsHook { custody, h_records: 2, record_gas: 1_000_000, ..Default::default() };
 
     let (plain, plain_state) = world.build(off);
     let (hooked, hooked_state) = world.build(on);
@@ -986,7 +992,12 @@ fn a_hook_that_cannot_run_invalidates_the_block() {
     let world = hook_world(&testing::import_of(3), custody);
     let genesis_config = |hook| world.config(hook);
     // no code at the pinned custody: the cursor read returns nothing
-    let missing = RecordsHook { custody: Address::repeat_byte(0xee), h_records: 1, record_gas: 1 };
+    let missing = RecordsHook {
+        custody: Address::repeat_byte(0xee),
+        h_records: 1,
+        record_gas: 1,
+        ..Default::default()
+    };
     let mut state =
         State::builder().with_database(world.provider.clone()).with_bundle_update().build();
     let Err(err) = build_complete(
@@ -1014,6 +1025,9 @@ use std::collections::BTreeMap;
 struct Real {
     world: HookWorld,
     custody: Address,
+    election: Address,
+    pre: Vec<(Address, BTreeMap<U256, U256>)>,
+    extra: serde_json::Value,
     post: Vec<(Address, BTreeMap<U256, U256>)>,
     records: Vec<reth_unicity_execution::records::RecordEntry>,
 }
@@ -1029,6 +1043,7 @@ fn real(
     let raw = match name {
         "ack" => include_str!("../testdata/hook-ack.json"),
         "recovery" => include_str!("../testdata/hook-recovery.json"),
+        "elect" => include_str!("../testdata/hook-elect.json"),
         other => panic!("no fixture {other}"),
     };
     let mut fixture: serde_json::Value = serde_json::from_str(raw).unwrap();
@@ -1053,9 +1068,11 @@ fn real(
     }
     edit(&mut records, &mut fixture);
     let custody: Address = fixture["modules"]["custody"].as_str().unwrap().parse().unwrap();
+    let election: Address = fixture["modules"]["election"].as_str().unwrap().parse().unwrap();
+    let extra = fixture.get("extra").cloned().unwrap_or(serde_json::Value::Null);
     let import = testing::import_of_entries(records.clone());
     let pre = fixture["pre"].as_object().unwrap().clone();
-    let world = hook_world_with(&import, |provider| {
+    let mut world = hook_world_with(&import, |provider| {
         for (address, account) in &pre {
             let storage: Vec<(U256, U256)> = account["storage"]
                 .as_object()
@@ -1076,6 +1093,23 @@ fn real(
             );
         }
     });
+    let pre_state = fixture["pre"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(address, account)| {
+            let slots = account["storage"]
+                .as_object()
+                .unwrap()
+                .iter()
+                .map(|(k, v)| (word(k), word(v.as_str().unwrap())))
+                .collect();
+            (address.parse().unwrap(), slots)
+        })
+        .collect();
+    if extra.is_object() {
+        world.extra_gas = 80_000_000;
+    }
     let post = fixture["post"]
         .as_object()
         .unwrap()
@@ -1090,11 +1124,17 @@ fn real(
             (address.parse().unwrap(), slots)
         })
         .collect();
-    Real { world, custody, post, records }
+    Real { world, custody, election, pre: pre_state, extra, post, records }
 }
 
 const fn pinned(custody: Address, h: u32) -> RecordsHook {
-    RecordsHook { custody, h_records: h, record_gas: 3_000_000 }
+    RecordsHook {
+        custody,
+        h_records: h,
+        record_gas: 3_000_000,
+        election: Address::ZERO,
+        elect_gas: 0,
+    }
 }
 
 #[test]
@@ -1200,4 +1240,95 @@ fn h_above_the_deployed_custodys_max_batch_invalidates_the_block() {
     assert!(err.to_string().contains("HExceedsMaxBatch"), "{err}");
     // within the limit the same state applies
     assert!(!r.world.build(pinned(r.custody, 1)).1.storage_of(r.custody).is_empty());
+}
+
+// ---- the real ElectionPolicy in the hook
+// ---------------------------------------------------------
+
+fn elected(r: &Real, elect_gas: u64) -> RecordsHook {
+    RecordsHook {
+        custody: r.custody,
+        h_records: 1,
+        record_gas: 3_000_000,
+        election: r.election,
+        elect_gas,
+    }
+}
+
+fn diff(got: &BTreeMap<U256, U256>, expected: &BTreeMap<U256, U256>) -> Vec<String> {
+    got.keys()
+        .chain(expected.keys())
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .filter(|k| got.get(*k) != expected.get(*k))
+        .map(|k| format!("slot {k:#x}: hook {:?} forge {:?}", got.get(k), expected.get(k)))
+        .collect()
+}
+
+#[test]
+fn the_real_election_runs_in_the_hook_and_reproduces_the_state_forge_computed() {
+    let r = real("elect", |_, _| {});
+    let origin = r.world.root.origin_identity().unwrap();
+    assert_eq!(
+        origin,
+        r.extra["origin"].as_str().unwrap().parse::<B256>().unwrap(),
+        "forge elected under the origin identity this block carries"
+    );
+    let hook = elected(&r, 60_000_000);
+    let (plain, _) = r.world.build(RecordsHook { election: Address::ZERO, elect_gas: 0, ..hook });
+    let (hooked, after) = r.world.build(hook);
+    for (address, expected) in &r.post {
+        let d = diff(&after.storage_of(*address), expected);
+        assert!(
+            d.is_empty(),
+            "storage of {address} after the hook differs from what the contracts computed:\n{}",
+            d.join("\n")
+        );
+    }
+    let result = r.extra["resultId"].as_str().unwrap().parse::<B256>().unwrap();
+    let open = after.storage_of(r.election).get(&U256::from(12)).copied().unwrap_or_default();
+    assert_eq!(open, U256::from_be_bytes(result.0), "the election opened the result forge named");
+    let spent = hooked.outcome.execution_result.gas_used - plain.outcome.execution_result.gas_used;
+    println!("p85-hook: election hook gross gas {spent} (4 members)");
+    assert!(spent > 500_000 && spent < 60_000_000, "{spent}");
+    let replay = replay_complete(
+        &r.world.config(hook),
+        r.world.provider.clone(),
+        &r.world.provider,
+        &hooked.outcome.block,
+    )
+    .unwrap();
+    assert_eq!(replay.output.result, hooked.outcome.execution_result);
+}
+
+#[test]
+fn an_election_that_is_not_due_changes_nothing() {
+    let mut r = real("elect", |_, _| {});
+    // the election's anchorProgress (slot 10, low 8 bytes) is 100: the threshold is 100 + 100 =
+    // 200, beyond the registry's 150
+    r.world.provider.set_storage(r.election, U256::from(10), U256::from(100u64));
+    let (hooked, after) = r.world.build(elected(&r, 60_000_000));
+    let (_, mut expected) = r.pre.iter().find(|(a, _)| *a == r.election).unwrap().clone();
+    expected.insert(U256::from(10), U256::from(100u64));
+    let d = diff(&after.storage_of(r.election), &expected);
+    assert!(d.is_empty(), "nothing is stored before the threshold:\n{}", d.join("\n"));
+    assert!(hooked.outcome.execution_result.gas_used > 0);
+}
+
+#[test]
+fn an_election_priced_below_its_cost_invalidates_the_block() {
+    let r = real("elect", |_, _| {});
+    let mut state =
+        State::builder().with_database(r.world.provider.clone()).with_bundle_update().build();
+    let Err(err) = build_complete(
+        &r.world.config(elected(&r, 1_000_000)),
+        &r.world.parent,
+        r.world.attributes(),
+        &mut state,
+        r.world.provider.clone(),
+        vec![],
+    ) else {
+        panic!("an election that cannot finish inside its reserved gas must invalidate the block")
+    };
+    assert!(err.to_string().contains("elect"), "{err}");
 }

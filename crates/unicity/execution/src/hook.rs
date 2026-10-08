@@ -12,7 +12,7 @@
 //! never loops and never retries with a smaller batch.
 
 use crate::{ExecutionError, SEAL_REGISTRY, SYSTEM_CALLER};
-use alloy_primitives::{Address, Bytes, U256};
+use alloy_primitives::{Address, Bytes, B256, U256};
 use revm::{
     context::{BlockEnv, TxEnv},
     context_interface::{Block, ContextSetters, ContextTr, JournalTr},
@@ -31,6 +31,9 @@ pub const RECORD_TARGET_COUNT: [u8; 4] = [0x99, 0xa1, 0xd3, 0x76];
 pub const APPLY_ROOT_RECORDS: [u8; 4] = [0x1d, 0x2a, 0x00, 0x37];
 /// `limits()` of custody: `(vMax, lMax, rMax, maxBatch)`.
 pub const LIMITS: [u8; 4] = [0x86, 0x0a, 0xef, 0xcf];
+/// `elect(bytes32)` of the election module (checked against the keccak of the signature in the
+/// tests).
+pub const ELECT: [u8; 4] = [0x45, 0xb7, 0xff, 0xa0];
 
 /// The most records one hook call may apply: custody's own `maxBatch` ceiling.
 pub const MAX_H_RECORDS: u32 = 32;
@@ -79,8 +82,10 @@ impl HookEnv {
     }
 }
 
-/// The records hook a profile pins: the custody contract, `H_records` and the gross gas reserved
-/// for applying one record. Zero custody means a chain without the hook.
+/// The mandatory hooks a profile pins: the records hook (the custody contract, `H_records` and the
+/// gross gas reserved for applying one record; zero custody means a chain without it) and the
+/// election hook (the election module and the gross gas reserved for one `elect` call; zero
+/// election means a chain without it).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct RecordsHook {
     /// The custody contract the records are applied to.
@@ -89,6 +94,12 @@ pub struct RecordsHook {
     pub h_records: u32,
     /// Gross gas reserved for applying one record.
     pub record_gas: u64,
+    /// The election module whose `elect(origin)` the block's hook calls after the records are
+    /// applied.
+    pub election: Address,
+    /// Gross gas reserved for the `elect` call, sized for the profile's worst case on a threshold
+    /// block.
+    pub elect_gas: u64,
 }
 
 /// Why the hook invalidated the block.
@@ -100,6 +111,8 @@ pub enum HookError {
     Call(&'static str, String),
     /// A call returned something other than one uint64 word.
     BadReturn(&'static str),
+    /// `elect` returned an outcome the module does not define.
+    BadOutcome(u64),
     /// `c <= r <= q` does not hold.
     Inconsistent {
         /// Custody's cursor.
@@ -138,6 +151,9 @@ pub struct HookOutcome {
     pub gas_spent: u64,
     /// Records applied (zero when custody was caught up).
     pub applied: u64,
+    /// What the election call reported (`0` disabled, `1` not due, `2` reserved, `3` no candidate
+    /// recorded), `None` on a chain without the election hook.
+    pub elected: Option<u8>,
 }
 
 impl RecordsHook {
@@ -155,11 +171,26 @@ impl RecordsHook {
         u64::from(self.h_records)
             .checked_mul(self.record_gas)
             .and_then(|records| records.checked_add(HOOK_READS_GAS))
+            .and_then(|records| records.checked_add(self.elect_gas))
             .ok_or(HookError::Profile("hook envelope overflows"))
     }
 
-    /// Checks the combination: all three zero, or a custody with `1 <= H <= 32` and a price.
+    /// Whether the profile carries the election hook.
+    pub fn election_enabled(&self) -> bool {
+        self.election != Address::ZERO
+    }
+
+    /// Checks the combination: all three zero, or a custody with `1 <= H <= 32` and a price; the
+    /// election hook, when pinned, needs the records hook and a price.
     pub fn validate(&self) -> Result<(), HookError> {
+        if !self.election_enabled() && self.elect_gas != 0 {
+            return Err(HookError::Profile("the elect gas without an election contract"));
+        }
+        if self.election_enabled() && (!self.enabled() || self.elect_gas == 0) {
+            return Err(HookError::Profile(
+                "the election hook needs the records hook and a positive elect gas",
+            ));
+        }
         if !self.enabled() {
             return if self.h_records == 0 && self.record_gas == 0 {
                 Ok(())
@@ -177,11 +208,33 @@ impl RecordsHook {
     }
 }
 
-/// Runs the hook on `db` within `budget` gross gas (the system budget import and finalize left).
+/// Runs the records hook alone (a profile without the election hook) within `budget` gross gas.
 pub fn run_records_hook<DB>(
     db: &mut DB,
     hook: &RecordsHook,
     env: &HookEnv,
+    budget: u64,
+) -> Result<HookOutcome, ExecutionError>
+where
+    DB: Database + DatabaseCommit,
+{
+    if hook.election_enabled() {
+        return Err(ExecutionError::Hook(HookError::Profile(
+            "the election hook needs the block's origin: use run_hooks",
+        )));
+    }
+    run_hooks(db, hook, env, B256::ZERO, budget)
+}
+
+/// Runs the mandatory hooks on `db` within `budget` gross gas (the system budget import and
+/// finalize left), in the approved order: the records hook (step 1), then the election (step 4)
+/// with the block's authenticated root origin identity. Activation (step 3) has no module until
+/// governance exists: a profile without one makes no call.
+pub fn run_hooks<DB>(
+    db: &mut DB,
+    hook: &RecordsHook,
+    env: &HookEnv,
+    origin: B256,
     budget: u64,
 ) -> Result<HookOutcome, ExecutionError>
 where
@@ -201,11 +254,13 @@ where
         .with_db(db)
         .build_mainnet();
     let mut spent = 0u64;
+    // The gas the next call may use is what the budget has left, further capped for the election.
+    let mut limit = budget;
     // One system call within what the budget has left; `commit` keeps its state (the apply call),
     // a read discards the journal.
     macro_rules! call {
         ($what:expr, $to:expr, $data:expr, $commit:expr) => {{
-            let remaining = budget
+            let remaining = limit
                 .checked_sub(spent)
                 .filter(|r| *r > 0)
                 .ok_or(ExecutionError::Hook(HookError::Budget))?;
@@ -240,39 +295,63 @@ where
         Ok(u64::from_be_bytes(out[24..].try_into().expect("eight bytes")))
     };
 
-    let out = call!("recordCursor", hook.custody, &RECORD_CURSOR, false);
-    let before = word("recordCursor", out).map_err(hook_err)?;
-    let out = call!("recordCount", SEAL_REGISTRY, &RECORD_COUNT, false);
-    let count = word("recordCount", out).map_err(hook_err)?;
-    let out = call!("recordTargetCount", SEAL_REGISTRY, &RECORD_TARGET_COUNT, false);
-    let target = word("recordTargetCount", out).map_err(hook_err)?;
-    if before > count || count > target {
-        return Err(hook_err(HookError::Inconsistent { cursor: before, count, target }));
+    let applied = 'records: {
+        let out = call!("recordCursor", hook.custody, &RECORD_CURSOR, false);
+        let before = word("recordCursor", out).map_err(hook_err)?;
+        let out = call!("recordCount", SEAL_REGISTRY, &RECORD_COUNT, false);
+        let count = word("recordCount", out).map_err(hook_err)?;
+        let out = call!("recordTargetCount", SEAL_REGISTRY, &RECORD_TARGET_COUNT, false);
+        let target = word("recordTargetCount", out).map_err(hook_err)?;
+        if before > count || count > target {
+            return Err(hook_err(HookError::Inconsistent { cursor: before, count, target }));
+        }
+        let available = count - before;
+        if available == 0 {
+            break 'records 0;
+        }
+        // The pinned H must fit the deployed custody: checked against its own limits before every
+        // call.
+        let out = call!("limits", hook.custody, &LIMITS, false);
+        if out.len() != 128 {
+            return Err(hook_err(HookError::BadReturn("limits")));
+        }
+        let max_batch = word("limits", Bytes::copy_from_slice(&out[96..128])).map_err(hook_err)?;
+        if u64::from(hook.h_records) > max_batch {
+            return Err(hook_err(HookError::HExceedsMaxBatch {
+                h_records: hook.h_records,
+                max_batch,
+            }));
+        }
+        let n = available.min(u64::from(hook.h_records));
+        let mut data = APPLY_ROOT_RECORDS.to_vec();
+        data.extend_from_slice(&[0u8; 28]);
+        data.extend_from_slice(&(n as u32).to_be_bytes());
+        let _ = call!("applyRootRecords", hook.custody, &data, true);
+        let out = call!("recordCursor", hook.custody, &RECORD_CURSOR, false);
+        let after = word("recordCursor", out).map_err(hook_err)?;
+        if after != before + n {
+            return Err(hook_err(HookError::CursorMoved { before, applied: n, after }));
+        }
+        n
+    };
+
+    // Step 4: the threshold election, with exactly the gas the profile reserved for it. The module
+    // never reverts for a chain-state reason (a failed election is a stored NoCandidate); a call
+    // that errors, reverts or runs out of the reserved gas invalidates the block, as for the
+    // records.
+    let mut elected = None;
+    if hook.election_enabled() {
+        limit = budget.min(spent.saturating_add(hook.elect_gas));
+        let mut data = ELECT.to_vec();
+        data.extend_from_slice(origin.as_slice());
+        let out = call!("elect", hook.election, &data, true);
+        let outcome = word("elect", out).map_err(hook_err)?;
+        if outcome > 3 {
+            return Err(hook_err(HookError::BadOutcome(outcome)));
+        }
+        elected = Some(outcome as u8);
     }
-    let available = count - before;
-    if available == 0 {
-        return Ok(HookOutcome { gas_spent: spent, applied: 0 });
-    }
-    // The pinned H must fit the deployed custody: checked against its own limits before every call.
-    let out = call!("limits", hook.custody, &LIMITS, false);
-    if out.len() != 128 {
-        return Err(hook_err(HookError::BadReturn("limits")));
-    }
-    let max_batch = word("limits", Bytes::copy_from_slice(&out[96..128])).map_err(hook_err)?;
-    if u64::from(hook.h_records) > max_batch {
-        return Err(hook_err(HookError::HExceedsMaxBatch { h_records: hook.h_records, max_batch }));
-    }
-    let n = available.min(u64::from(hook.h_records));
-    let mut data = APPLY_ROOT_RECORDS.to_vec();
-    data.extend_from_slice(&[0u8; 28]);
-    data.extend_from_slice(&(n as u32).to_be_bytes());
-    let _ = call!("applyRootRecords", hook.custody, &data, true);
-    let out = call!("recordCursor", hook.custody, &RECORD_CURSOR, false);
-    let after = word("recordCursor", out).map_err(hook_err)?;
-    if after != before + n {
-        return Err(hook_err(HookError::CursorMoved { before, applied: n, after }));
-    }
-    Ok(HookOutcome { gas_spent: spent, applied: n })
+    Ok(HookOutcome { gas_spent: spent, applied, elected })
 }
 
 #[cfg(test)]
@@ -312,7 +391,7 @@ mod tests {
     }
 
     fn hook(h: u32) -> RecordsHook {
-        RecordsHook { custody: CUSTODY, h_records: h, record_gas: 1_000_000 }
+        RecordsHook { custody: CUSTODY, h_records: h, record_gas: 1_000_000, ..Default::default() }
     }
 
     fn env() -> HookEnv {
@@ -508,5 +587,192 @@ mod tests {
         let mut idle = db(ADVANCE, U256::from(5), 5, 5);
         idle.insert_account_storage(CUSTODY, U256::from(1), U256::ZERO).unwrap();
         assert_eq!(run_records_hook(&mut idle, &hook(1), &env(), 20_000_000).unwrap().applied, 0);
+    }
+
+    // --- the election hook -----------------------------------------------------------------------
+
+    const ELECTION: Address = address!("00000000000000000000000000000000e1ec7100");
+    const ORIGIN: B256 = B256::repeat_byte(0x5a);
+
+    /// An election stand-in: reverts unless called with `elect(bytes32)`, then runs `body`.
+    fn election_code(body: &[u8]) -> Bytes {
+        let mut c = vec![0x60, 0x00, 0x35, 0x60, 0xe0, 0x1c]; // selector
+        c.extend([0x63, 0x45, 0xb7, 0xff, 0xa0, 0x14, 0x61, 0x00, 0x14, 0x57]); // == elect -> 0x14
+        c.extend([0x60, 0x00, 0x80, 0xfd]); // otherwise revert
+        assert_eq!(c.len(), 0x14);
+        c.push(0x5b);
+        c.extend(body);
+        Bytes::from(c)
+    }
+
+    /// Stores the first argument in slot 0 and reports outcome `n`.
+    fn elects(n: u8) -> Vec<u8> {
+        vec![
+            0x60, 0x04, 0x35, 0x60, 0x00, 0x55, 0x60, n, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00,
+            0xf3,
+        ]
+    }
+
+    fn with_election(mut db: CacheDB<EmptyDB>, body: &[u8]) -> CacheDB<EmptyDB> {
+        db.insert_account_info(
+            ELECTION,
+            AccountInfo {
+                code_hash: keccak256(election_code(body)),
+                code: Some(Bytecode::new_raw(election_code(body))),
+                ..Default::default()
+            },
+        );
+        db
+    }
+
+    fn elected(h: u32, elect_gas: u64) -> RecordsHook {
+        RecordsHook { election: ELECTION, elect_gas, ..hook(h) }
+    }
+
+    fn origin_stored(db: &CacheDB<EmptyDB>) -> U256 {
+        db.storage_ref(ELECTION, U256::ZERO).unwrap()
+    }
+
+    #[test]
+    fn the_election_hook_needs_the_records_hook_and_a_price() {
+        assert!(elected(1, 5_000_000).validate().is_ok());
+        for (name, h) in [
+            ("election without a price", RecordsHook { elect_gas: 0, ..elected(1, 1) }),
+            ("a price without an election", RecordsHook { elect_gas: 1, ..hook(1) }),
+            (
+                "election without custody",
+                RecordsHook { election: ELECTION, elect_gas: 1, ..RecordsHook::default() },
+            ),
+        ] {
+            assert!(matches!(h.validate(), Err(HookError::Profile(_))), "{name}");
+        }
+        // the election's price joins the envelope Go's profile reserves
+        assert_eq!(
+            elected(3, 7_000_000).envelope_gas().unwrap(),
+            HOOK_READS_GAS + 3_000_000 + 7_000_000
+        );
+        assert!(RecordsHook { elect_gas: u64::MAX, ..elected(2, 1) }.envelope_gas().is_err());
+    }
+
+    #[test]
+    fn the_records_hook_alone_refuses_a_profile_with_an_election() {
+        let mut d = db(ADVANCE, U256::ZERO, 0, 0);
+        assert!(matches!(
+            refused(
+                run_records_hook(&mut d, &elected(1, 5_000_000), &env(), 50_000_000).unwrap_err()
+            ),
+            HookError::Profile(_)
+        ));
+    }
+
+    #[test]
+    fn the_election_runs_after_the_records_with_the_blocks_origin() {
+        let mut d = with_election(db(ADVANCE, U256::ZERO, 2, 2), &elects(2));
+        let out = run_hooks(&mut d, &elected(2, 5_000_000), &env(), ORIGIN, 50_000_000).unwrap();
+        assert_eq!(out.applied, 2);
+        assert_eq!(out.elected, Some(2));
+        assert_eq!(cursor(&d), U256::from(2));
+        assert_eq!(origin_stored(&d), U256::from_be_bytes(ORIGIN.0), "elect(origin)");
+        assert!(out.gas_spent > 0 && out.gas_spent < elected(2, 5_000_000).envelope_gas().unwrap());
+    }
+
+    #[test]
+    fn the_election_is_called_on_a_caught_up_chain_too() {
+        let mut d = with_election(db(ADVANCE, U256::from(4), 4, 4), &elects(1));
+        let out = run_hooks(&mut d, &elected(1, 5_000_000), &env(), ORIGIN, 50_000_000).unwrap();
+        assert_eq!((out.applied, out.elected), (0, Some(1)));
+        assert_eq!(origin_stored(&d), U256::from_be_bytes(ORIGIN.0));
+    }
+
+    #[test]
+    fn a_chain_without_the_election_hook_makes_no_call() {
+        let mut d = with_election(db(ADVANCE, U256::from(4), 4, 4), &elects(2));
+        let out = run_hooks(&mut d, &hook(1), &env(), ORIGIN, 50_000_000).unwrap();
+        assert_eq!(out.elected, None);
+        assert_eq!(origin_stored(&d), U256::ZERO, "the election was never called");
+    }
+
+    #[test]
+    fn every_defined_outcome_is_accepted_and_no_other() {
+        for n in 0..=3u8 {
+            let mut d = with_election(db(ADVANCE, U256::ZERO, 0, 0), &elects(n));
+            let out =
+                run_hooks(&mut d, &elected(1, 5_000_000), &env(), ORIGIN, 50_000_000).unwrap();
+            assert_eq!(out.elected, Some(n));
+        }
+        let mut d = with_election(db(ADVANCE, U256::ZERO, 0, 0), &elects(4));
+        assert!(matches!(
+            refused(
+                run_hooks(&mut d, &elected(1, 5_000_000), &env(), ORIGIN, 50_000_000).unwrap_err()
+            ),
+            HookError::BadOutcome(4)
+        ));
+    }
+
+    #[test]
+    fn an_election_that_reverts_or_returns_the_wrong_shape_invalidates_the_block() {
+        // reverts
+        let mut d = with_election(db(ADVANCE, U256::ZERO, 0, 0), &[0x60, 0x00, 0x80, 0xfd]);
+        assert!(matches!(
+            refused(
+                run_hooks(&mut d, &elected(1, 5_000_000), &env(), ORIGIN, 50_000_000).unwrap_err()
+            ),
+            HookError::Call("elect", _)
+        ));
+        // returns nothing
+        let mut none = with_election(db(ADVANCE, U256::ZERO, 0, 0), &[0x00]);
+        assert!(matches!(
+            refused(
+                run_hooks(&mut none, &elected(1, 5_000_000), &env(), ORIGIN, 50_000_000)
+                    .unwrap_err()
+            ),
+            HookError::BadReturn("elect")
+        ));
+        // a high byte set in the word
+        let mut wide = with_election(
+            db(ADVANCE, U256::ZERO, 0, 0),
+            &[0x60, 0x01, 0x60, 0xf8, 0x1b, 0x60, 0x00, 0x52, 0x60, 0x20, 0x60, 0x00, 0xf3],
+        );
+        assert!(matches!(
+            refused(
+                run_hooks(&mut wide, &elected(1, 5_000_000), &env(), ORIGIN, 50_000_000)
+                    .unwrap_err()
+            ),
+            HookError::BadReturn("elect")
+        ));
+    }
+
+    #[test]
+    fn an_election_cannot_use_more_gas_than_its_reserved_price() {
+        // an election that spins until it runs out of gas
+        let spin = [0x5b, 0x60, 0x00, 0x56];
+        let mut d = with_election(db(ADVANCE, U256::ZERO, 0, 0), &spin);
+        // the whole budget is large, but the call gets only the price: it halts, the block is
+        // invalid
+        let err = run_hooks(&mut d, &elected(1, 200_000), &env(), ORIGIN, 50_000_000).unwrap_err();
+        assert!(matches!(refused(err), HookError::Call("elect", _)));
+        // and the budget bounds it when it is smaller than the price
+        let mut small = with_election(db(ADVANCE, U256::ZERO, 0, 0), &spin);
+        let err =
+            run_hooks(&mut small, &elected(1, 40_000_000), &env(), ORIGIN, 1_000_000).unwrap_err();
+        assert!(matches!(refused(err), HookError::Call("elect", _) | HookError::Budget));
+    }
+
+    #[test]
+    fn a_failed_record_application_stops_before_the_election() {
+        let mut d = with_election(db(REVERT, U256::ZERO, 3, 3), &elects(2));
+        assert!(matches!(
+            refused(
+                run_hooks(&mut d, &elected(1, 5_000_000), &env(), ORIGIN, 50_000_000).unwrap_err()
+            ),
+            HookError::Call("applyRootRecords", _)
+        ));
+        assert_eq!(origin_stored(&d), U256::ZERO, "the election was not called");
+    }
+
+    #[test]
+    fn the_selector_is_elect_bytes32() {
+        assert_eq!(ELECT, keccak256("elect(bytes32)").0[..4]);
+        assert_eq!(APPLY_ROOT_RECORDS, keccak256("applyRootRecords(uint32)").0[..4]);
     }
 }
