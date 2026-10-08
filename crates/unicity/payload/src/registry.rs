@@ -290,6 +290,17 @@ fn unpin(inner: &Arc<Mutex<ParentAccountingInner>>, hash: &B256) {
     }
 }
 
+/// Moves the entry at `index` to the back of the store, which evicts from the front: the least
+/// recently admitted or resolved entry goes first. Without it a head admitted before the window
+/// behind it was restored is the oldest entry, and the first publication after the admission evicts
+/// it; the restored copy is not admitted, so the head's children could no longer be built or
+/// imported (ureth#60).
+fn touch(inner: &mut ParentAccountingInner, index: usize) {
+    if let Some(entry) = inner.tokens.remove(index) {
+        inner.tokens.push_back(entry);
+    }
+}
+
 /// Keeps the token of the head that recovery admission is admitting in the store while the
 /// admission restores the tokens of the window behind it. Restoring a token inserts it, and an
 /// insertion into a full store evicts the oldest unpinned entry: without the pin, a store that
@@ -479,10 +490,13 @@ impl UnicityParentAccountings {
     /// Admits the cached token of `block_hash` for resolution. Only recovery admission calls this,
     /// after the retained binding was re-checked and the local Go side presented its own.
     pub(crate) fn admit(&self, block_hash: &B256) -> bool {
-        self.lock().tokens.iter_mut().find(|entry| entry.hash == *block_hash).is_some_and(|entry| {
-            entry.admitted = true;
-            true
-        })
+        let mut inner = self.lock();
+        let Some(index) = inner.tokens.iter().position(|entry| entry.hash == *block_hash) else {
+            return false;
+        };
+        inner.tokens[index].admitted = true;
+        touch(&mut inner, index);
+        true
     }
 
     /// Whether the cached token of `block_hash` is admitted.
@@ -560,11 +574,16 @@ impl ParentAccountingResolver for UnicityParentAccountings {
                 .map_err(|_| ParentAccountingUnavailable(parent.hash()))?;
         }
         let mut inner = self.lock();
-        let entry = inner
+        let index = inner
             .tokens
-            .iter_mut()
-            .find(|entry| entry.hash == parent.hash())
+            .iter()
+            .position(|entry| entry.hash == parent.hash())
             .ok_or_else(|| ParentAccountingUnavailable(parent.hash()))?;
+        // The parent being built on or imported onto is the most recently used entry: the next
+        // publication evicts older ones first.
+        touch(&mut inner, index);
+        let last = inner.tokens.len() - 1;
+        let entry = &mut inner.tokens[last];
         if !entry.admitted ||
             entry.identity != Some((chain_spec.chain().id(), chain_spec.genesis_hash()))
         {
