@@ -103,6 +103,17 @@ impl FixtureProvider {
         self.storage.get(&address).cloned().unwrap_or_default()
     }
 
+    /// Sets one storage word of an existing account (zero clears it).
+    #[allow(dead_code)]
+    pub(crate) fn set_storage(&mut self, address: Address, key: U256, value: U256) {
+        let slots = self.storage.entry(address).or_default();
+        if value == U256::ZERO {
+            slots.remove(&key);
+        } else {
+            slots.insert(key, value);
+        }
+    }
+
     pub(crate) fn set_block_hash(&mut self, number: u64, hash: B256) {
         self.hashes.insert(number, hash);
     }
