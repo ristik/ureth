@@ -31,6 +31,7 @@ reth-evm-ethereum = { workspace = true, features = ["std"] }
 reth-primitives-traits.workspace = true
 reth-storage-api.workspace = true
 reth-unicity-b1.workspace = true
+reth-unicity-b2.workspace = true
 secp256k1.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true, features = ["std"], optional = true }

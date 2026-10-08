@@ -10825,6 +10825,7 @@ dependencies = [
  "reth-storage-errors",
  "reth-trie-common",
  "reth-unicity-b1",
+ "reth-unicity-b2",
  "revm",
  "secp256k1 0.30.0",
  "serde",

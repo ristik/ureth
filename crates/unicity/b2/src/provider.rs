@@ -1,4 +1,4 @@
-//! Explicit opt-in provider object. No production map imports or installs it.
+//! Provider object. The Unicity EVM factory installs it; nothing else does.
 use crate::{run, Error};
 use alloy_evm::precompiles::{DynPrecompile, Precompile, PrecompileInput};
 use revm::precompile::{PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult};
