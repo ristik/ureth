@@ -1245,7 +1245,7 @@ fn h_above_the_deployed_custodys_max_batch_invalidates_the_block() {
 // ---- the real ElectionPolicy in the hook
 // ---------------------------------------------------------
 
-fn elected(r: &Real, elect_gas: u64) -> RecordsHook {
+const fn elected(r: &Real, elect_gas: u64) -> RecordsHook {
     RecordsHook {
         custody: r.custody,
         h_records: 1,

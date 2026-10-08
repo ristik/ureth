@@ -77,6 +77,17 @@ struct UnicityArgs {
     #[arg(long = "unicity.hook-record-gas", default_value_t = 0, value_name = "GAS")]
     hook_record_gas: u64,
 
+    /// The election module whose `elect(origin)` the mandatory hook calls after the records.
+    /// Absent: the chain has no election. Needs the records hook. It is part of the profile
+    /// hash.
+    #[arg(long = "unicity.election", value_name = "ADDRESS")]
+    election: Option<Address>,
+
+    /// Gross gas the profile reserves for one `elect` call (the genesis-measured worst case with
+    /// its margin; `ubft engine-api check-elect-gas` prints it).
+    #[arg(long = "unicity.elect-gas", default_value_t = 0, value_name = "GAS")]
+    elect_gas: u64,
+
     /// Header gas limit (`g_max`), retained as the real EVM block gas limit.
     #[arg(long = "unicity.max-gas")]
     max_gas: u64,
@@ -143,6 +154,8 @@ impl UnicityArgs {
                 custody: self.records_custody.unwrap_or(Address::ZERO),
                 h_records: self.h_records,
                 record_gas: self.hook_record_gas,
+                election: self.election.unwrap_or(Address::ZERO),
+                elect_gas: self.elect_gas,
             },
         };
         context.hook.validate().map_err(|err| eyre::eyre!("invalid records hook: {err:?}"))?;
@@ -324,6 +337,8 @@ mod tests {
             records_custody: None,
             h_records: 0,
             hook_record_gas: 0,
+            election: None,
+            elect_gas: 0,
             max_gas: 50_000_000,
             system_gas: 43_000_000,
             base_fee_floor: 1_000_000,
@@ -349,6 +364,8 @@ mod tests {
             records_custody: None,
             h_records: 0,
             hook_record_gas: 0,
+            election: None,
+            elect_gas: 0,
             max_gas: 50_000_000,
             system_gas: 43_000_000,
             base_fee_floor: 1_000_000,
@@ -465,6 +482,26 @@ mod tests {
             UnicityArgs { hook_record_gas: 0, ..hooked },
         ] {
             assert!(bad.b1(&exact).is_err());
+        }
+        // The election adds its reserved `elect` price to the envelope and is part of the pinned
+        // hook: 55_287_468 + 5_000_000 = 60_287_468.
+        let elected = UnicityArgs {
+            election: Some(Address::repeat_byte(0xe1)),
+            elect_gas: 5_000_000,
+            ..hooked
+        };
+        let exact_elect = BlockProfile { system_gas: 60_287_468, max_gas: 67_287_468, ..profile };
+        let context = elected.b1(&exact_elect).unwrap();
+        assert_eq!(context.hook.election, Address::repeat_byte(0xe1));
+        assert_eq!(context.hook.elect_gas, 5_000_000);
+        let short_elect = BlockProfile { system_gas: 60_287_467, max_gas: 67_287_468, ..profile };
+        assert!(elected.b1(&short_elect).is_err());
+        for bad in [
+            UnicityArgs { elect_gas: 0, ..elected },
+            UnicityArgs { election: None, ..elected },
+            UnicityArgs { records_custody: None, h_records: 0, hook_record_gas: 0, ..elected },
+        ] {
+            assert!(bad.b1(&exact_elect).is_err());
         }
         let unmeasured = UnicityArgs { w_cert: 16, ..args };
         assert!(unmeasured.b1(&profile).is_err());

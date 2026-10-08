@@ -339,8 +339,7 @@ where
     // never reverts for a chain-state reason (a failed election is a stored NoCandidate); a call
     // that errors, reverts or runs out of the reserved gas invalidates the block, as for the
     // records.
-    let mut elected = None;
-    if hook.election_enabled() {
+    let elected = if hook.election_enabled() {
         limit = budget.min(spent.saturating_add(hook.elect_gas));
         let mut data = ELECT.to_vec();
         data.extend_from_slice(origin.as_slice());
@@ -349,8 +348,10 @@ where
         if outcome > 3 {
             return Err(hook_err(HookError::BadOutcome(outcome)));
         }
-        elected = Some(outcome as u8);
-    }
+        Some(outcome as u8)
+    } else {
+        None
+    };
     Ok(HookOutcome { gas_spent: spent, applied, elected })
 }
 
