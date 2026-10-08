@@ -4603,5 +4603,19 @@ async fn recovery_admission_keeps_the_head_when_a_newer_token_crowds_the_store()
     )
     .expect("the head must survive the restoration of its window");
     assert!(live.is_admitted(&head_hash), "the admitted head resolves");
+
+    // The first publication after the admission is the token of the next build. It evicts the least
+    // recently used entry, which must not be the head just admitted: an evicted head comes back
+    // unadmitted and its children could no longer be built or imported (the SYNCING of
+    // ureth#60's second symptom).
+    live.insert_for_chain(B256::repeat_byte(0xEF), head.completed, chain_id, genesis);
+    live.insert_for_chain(B256::repeat_byte(0xF0), head.completed, chain_id, genesis);
+    assert!(
+        live.is_admitted(&head_hash),
+        "the head survives the publications that follow its admission"
+    );
+    let head_header = provider.sealed_header_by_hash(head_hash).unwrap().unwrap();
+    live.resolve(&head_header, &history.chain_spec, profile())
+        .expect("the head's children can still be built on it");
     assert!(live.len() <= 17, "the pin released: the store is back within a pin of its capacity");
 }

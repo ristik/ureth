@@ -618,7 +618,9 @@ impl std::ops::Deref for SealBuildContext {
 /// in `validationError`.
 pub fn refusal_response(error: SealBuildError) -> Result<ForkchoiceUpdated, EngineApiError> {
     match error {
-        SealBuildError::UnknownParent | SealBuildError::ParentAccountingUnavailable => {
+        error @ (SealBuildError::UnknownParent | SealBuildError::ParentAccountingUnavailable) => {
+            // A recoverable refusal is invisible to the caller (it only sees SYNCING): record why.
+            tracing::warn!(target: "unicity::seal", cause = %error, "seal build answered SYNCING");
             Ok(ForkchoiceUpdated::from_status(PayloadStatusEnum::Syncing))
         }
         error => Ok(ForkchoiceUpdated::from_status(PayloadStatusEnum::Invalid {
@@ -636,7 +638,8 @@ pub fn refusal_response(error: SealBuildError) -> Result<ForkchoiceUpdated, Engi
 /// internal state and returns an RPC error. Nothing here ever produces `ACCEPTED`.
 pub fn import_response(error: SealImportError) -> Result<PayloadStatus, EngineApiError> {
     match error {
-        SealImportError::UnknownParent | SealImportError::ParentAccountingMissing => {
+        error @ (SealImportError::UnknownParent | SealImportError::ParentAccountingMissing) => {
+            tracing::warn!(target: "unicity::seal", cause = %error, "seal import answered SYNCING");
             Ok(PayloadStatus::from_status(PayloadStatusEnum::Syncing))
         }
         error @ (SealImportError::Provider(_) | SealImportError::CompanionNotDurable(_)) => {
