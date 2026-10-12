@@ -26,8 +26,8 @@ under the supplied root and provides no authentication of that root.
 `run` checks the outer cap and reserves base+16*bytes before scanning. It
 reserves the full candidate charge before storage reads, member allocation,
 point parsing, signatures or hashing. All shaped false calls pay the full
-charge. UC/shared include 64 member allowances and the fixed 1,117,700 source
-allowance; RSMT retains its stateless formula. These are candidate prices,
+charge. UC/shared include 16 member allowances (the profile's committee ceiling) and a fixed
+14,700 registry-read allowance (147 words at 100 gas, priced warm; owner-decisions §22); RSMT retains its stateless formula. These are candidate prices,
 not measured production pricing.
 
 The provider reads the eight common words, all eleven selected epoch words
@@ -64,7 +64,7 @@ and seed `b1-oracle-v1`. Tests compare every shared generated request byte,
 signing preimage/digest, pre-state, status, returndata and charge against Go.
 The entire 144-case Go manifest runs as individually named tests. Additional
 Rust required-null cases, exact error variants, staged debit precedence,
-registry invariants, all 531 source reads, epoch-zero/member storage words,
+registry invariants, all 147 source reads, epoch-zero/member storage words,
 journal overrides, warmth rollback, host failures and actual STATICCALL
 followed by measured cold/warm SLOAD cover the provider boundary.
 

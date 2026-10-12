@@ -133,13 +133,21 @@ pub(crate) fn scan(input: &[u8], shared: bool) -> Result<Call<'_>, Malformed> {
         claims,
         gas: 60000 +
             16 * input.len() as u64 +
-            64000 +
+            MEMBER_ALLOWANCE +
             6000 * max_sigs +
             2000 * count as u64 +
             250 * paths +
-            1117700,
+            READ_ALLOWANCE,
     })
 }
+
+/// 1,000 gas per member of the ceiling-sized committee (owner-decisions section 22).
+const MEMBER_ALLOWANCE: u64 = 1000 * registry::MAX_MEMBERS;
+/// The registry words a ceiling-sized call may read (8 common, 11 epoch, 8 per member), every one
+/// priced warm at 100 gas: the registry is system state that every block reads, so its reads are
+/// subsidised. The call's price depends on the request alone, never on the journal's warmth, the
+/// verdict or any parsed-entry cache.
+const READ_ALLOWANCE: u64 = 100 * (8 + 11 + 8 * registry::MAX_MEMBERS);
 
 pub(crate) fn evaluate<R: RegistryRead>(
     call: Call<'_>,

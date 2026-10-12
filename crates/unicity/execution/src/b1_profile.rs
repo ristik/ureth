@@ -331,7 +331,7 @@ fn check(measurements: &[Measurement]) {
 #[test]
 fn gross_gas_stays_within_the_profile_envelope_and_the_frozen_allowance() {
     let mut all = Vec::new();
-    for w_cert in [0, 1, 3, 7, 15] {
+    for w_cert in [0, 1, 3, 7, 15, 30] {
         let mut world = World::new(w_cert);
         world.ladder();
         check(&world.results);

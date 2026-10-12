@@ -34,7 +34,7 @@ impl RegistryRead for NeverRead {
 #[test]
 fn complete_scan_has_zero_allocations_before_second_debit() {
     let manifest: serde_json::Value =
-        serde_json::from_str(include_str!("testdata/go-4ba487e.json")).unwrap();
+        serde_json::from_str(include_str!("testdata/go-b3reprice.json")).unwrap();
     for id in [
         "cert.single.ok",
         "cert.shared.max-8.ok",

@@ -86,7 +86,7 @@ for expr in [
     "w.iter().any(|v| !v.is_zero())", "w[0] != U256::from(1)",
     "!(1..=3).contains(&kind)", "w[2].is_zero() ||", "w[8].is_zero()",
     "(kind == 1) != w[3].is_zero()", "!matches!(scheme, 1 | 2)",
-    "!(1..=64).contains(&count)", "has_end > 1",
+    "!(1..=MAX_MEMBERS).contains(&count)", "has_end > 1",
     "(has_end == 0 && end != 0)", "(has_end == 1 && end <= start)",
     "!(1..=128).contains(&len)", "id_bytes[len..].iter().any(|b| *b != 0)",
     "m[6][1..].iter().any(|b| *b != 0)", "weight == 0",

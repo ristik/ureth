@@ -102,7 +102,8 @@ fn key(epoch: u64, index: u64) -> [u8; 33] {
 pub enum Members {
     /// Three short identifiers.
     Small,
-    /// The registry maximum: 64 members whose identifiers are 128 bytes sharing a 96-byte prefix.
+    /// The registry maximum: `MAX_MEMBERS` (16) members whose identifiers are 128 bytes sharing a
+    /// 96-byte prefix.
     Maximal,
 }
 
@@ -115,7 +116,7 @@ fn members(shape: Members, epoch: u64) -> Vec<Member> {
                 weight: 1 + i,
             })
             .collect(),
-        Members::Maximal => (0..64)
+        Members::Maximal => (0..reth_unicity_b1::MAX_MEMBERS)
             .map(|i| Member {
                 node_id: format!("{}{i:032}", "p".repeat(96)),
                 key: key(epoch, i),
@@ -127,7 +128,9 @@ fn members(shape: Members, epoch: u64) -> Vec<Member> {
 
 fn entry(epoch: u64, start: u64, end: Option<u64>, shape: Members) -> Entry {
     let id = |tag: u8| B256::from([tag; 32]);
-    let byte = (epoch % 200) as u8 + 1;
+    // 1..=60: a byte of 64 or 128 would zero `byte ^ 0x40` or `byte ^ 0x80`, which an entry refuses
+    // (W_cert 30 reaches epoch 63).
+    let byte = (epoch % 60) as u8 + 1;
     Entry {
         epoch,
         body_kind: 3,

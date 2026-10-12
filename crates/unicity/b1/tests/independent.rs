@@ -6,7 +6,7 @@ use serde_json::Value;
 #[test]
 fn independent_rust_bytes_signatures_gas_and_prestate_match_go() {
     let generated = generator::generate();
-    let oracle: Value = serde_json::from_str(include_str!("testdata/go-4ba487e.json")).unwrap();
+    let oracle: Value = serde_json::from_str(include_str!("testdata/go-b3reprice.json")).unwrap();
     for v in generated["vectors"].as_array().unwrap() {
         let id = v["id"].as_str().unwrap();
         let go = oracle["vectors"].as_array().unwrap().iter().find(|g| g["id"] == id);

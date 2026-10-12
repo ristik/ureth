@@ -378,7 +378,7 @@ the acceptance and benchmark work follow in 4b.
   outcome commitment covers admission plus open, and refunds never lower the total.
 - **Profile.** `--unicity.chain-id`, `--unicity.profile-hash` and `--unicity.w-cert` pin the B1
   bindings; `--unicity.max-gas` and `--unicity.system-gas` have no default, and a reservation below
-  `155936 + 15626944*K + G_rest(K)` or a ring above the measured cap of 16 is refused at startup and
+  `155936 + 15626944*K + G_rest(K)` or a ring above the measured cap of 31 is refused at startup and
   at job binding.
 
 The Go vector generator (`crates/unicity/execution/testdata/generate-b1-vectors_test.go`) emits the
@@ -407,17 +407,18 @@ the real registry runtime against them. `tools/mutate_b1_guards.py` disables eac
   pruning reach identical headers, state roots, gas and registry words; a restart from the
   persisted token record continues identically; a reorg applies the other branch to the common
   parent only; a swapped update is refused at binding.
-- **G_rest re-measurement.** `b1_profile` drives the real registry runtime at ring sizes 1, 2, 4,
-  8 and 16 with maximal entries (64 members, 128-byte identifiers) through baseline, insertion,
+- **G_rest re-measurement.** `b1_profile` drives the real registry runtime at W_cert 0, 1, 3, 7, 15
+  and 30 (rings of 1 to 31) with maximal entries (16 members, the committee ceiling of owner-decisions §22, 128-byte identifiers) through baseline, insertion,
   rotation, pruning, refill and a two-epoch supersession over a full ring. Every gross total fits the profile envelope and
   the measured non-history gas (gross minus the exact Cancun price of the history writes) is
-  2.05x to 3.8x below the frozen `G_rest(a, p)` allowance, so the constants stand. The result is
+  3.9x to 8.5x below the frozen `G_rest(a, p)` allowance, so the constants stand (the history write rectangle and the allowance are still sized for 64-member entries and over-reserve; a worst gross of 28.8M at W_cert 30 sits under a 539.6M reservation). The result is
   frozen in `testdata/b1-gas-profile.json`; the test fails if gas changes.
 - **CPU.** `cargo run --release -p reth-unicity-b1 --example bench` (1000 warmups, 10000
   iterations) times the maximal requests against same-binary ecrecover and SHA-256 references and
   requires twice the slower reference's gas per nanosecond. x86-64 result:
-  `crates/unicity/b1/testdata/cpu-x86_64.json`, all five kernels pass (worst: maximal quorum at
-  0.296 gas/ns against a 0.101 requirement), measured on a loaded host. **arm64 has not been
+  `crates/unicity/b1/testdata/cpu-x86_64.json`, all five kernels pass after the repricing of owner-decisions §22
+  (price `90,700 + 16B + 6000S + 2000N + 250P`; worst: the 16-member, 16-signature quorum at
+  0.187 gas/ns against a 0.132 requirement), measured on a loaded host. **arm64 has not been
   measured**: no arm64 host was available, and activation needs that run.
 
 ## B2 0x0104 registration, inactive

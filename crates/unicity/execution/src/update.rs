@@ -21,8 +21,10 @@ use secp256k1::PublicKey;
 
 /// Domain string that opens every canonical update.
 pub const UPDATE_DOMAIN: &str = "UNICITY_B1_UPDATE";
-/// Most members one entry carries.
-pub const MAX_MEMBERS: u64 = 64;
+/// Most members one entry carries: the profile's committee ceiling (owner-decisions section 22),
+/// the same constant the certificate call is priced for. The history write allowance and `G_rest`
+/// stay sized for 64 members, so they over-reserve.
+pub const MAX_MEMBERS: u64 = reth_unicity_b1::MAX_MEMBERS;
 /// Longest node identifier in bytes.
 pub const MAX_NODE_ID_BYTES: u64 = 128;
 /// Largest encoded entry in bytes.
@@ -37,8 +39,8 @@ pub const MEMBER_GAS: u64 = 1000;
 pub const REST_GAS_BASE: u64 = 1_136_500;
 /// Measured-plus-margin `G_rest` term per ring slot.
 pub const REST_GAS_PER_ENTRY: u64 = 1_147_500;
-/// Largest measured ring size. A larger profile is refused, never truncated.
-pub const MAX_MEASURED_K: u64 = 16;
+/// Largest measured ring size (W_cert 30). A larger profile is refused, never truncated.
+pub const MAX_MEASURED_K: u64 = 31;
 
 /// Local profile bindings every update must carry. All values come from the node's pinned genesis
 /// profile, never from the update itself.
