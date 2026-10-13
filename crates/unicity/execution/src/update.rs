@@ -39,7 +39,7 @@ pub const MEMBER_GAS: u64 = 1000;
 pub const REST_GAS_BASE: u64 = 1_136_500;
 /// Measured-plus-margin `G_rest` term per ring slot.
 pub const REST_GAS_PER_ENTRY: u64 = 1_147_500;
-/// Largest measured ring size (W_cert 30). A larger profile is refused, never truncated.
+/// Largest measured ring size (`W_cert` 30). A larger profile is refused, never truncated.
 pub const MAX_MEASURED_K: u64 = 31;
 
 /// Local profile bindings every update must carry. All values come from the node's pinned genesis
