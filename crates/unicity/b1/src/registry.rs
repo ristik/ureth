@@ -38,45 +38,11 @@ pub fn member_slot(epoch: u64, index: u64, field: u64) -> U256 {
     derived("b1.member", &[epoch, index, field])
 }
 
-#[derive(Debug)]
-pub(crate) struct Common {
-    pub phase: u64,
-    pub network: u64,
-    pub window: u64,
-    pub round: u64,
-    pub origin: u64,
-}
 fn small<E>(v: U256) -> Result<u64, Error<E>> {
     u64::try_from(v).map_err(|_| Error::Registry)
 }
 fn read<R: RegistryRead>(r: &mut R, k: U256) -> Result<U256, Error<R::Error>> {
     r.sload(k).map_err(Error::Host)
-}
-pub(crate) fn common<R: RegistryRead>(r: &mut R) -> Result<Common, Error<R::Error>> {
-    let mut w = [U256::ZERO; 8];
-    for (dst, name) in w.iter_mut().zip([
-        "genesisCommitment",
-        "phase",
-        "b1.initialized",
-        "b1.network",
-        "b1.wCert",
-        "b1.profileHash",
-        "clock.rootRound",
-        "origin.rootEpoch",
-    ]) {
-        *dst = read(r, fixed_slot(name))?;
-    }
-    let phase = small(w[1])?;
-    let network = small(w[3])?;
-    if w[0].is_zero() ||
-        w[5].is_zero() ||
-        w[2] != U256::from(1) ||
-        !matches!(phase, 1 | 2) ||
-        network > u64::from(u16::MAX)
-    {
-        return Err(Error::Registry);
-    }
-    Ok(Common { phase, network, window: small(w[4])?, round: small(w[6])?, origin: small(w[7])? })
 }
 #[derive(Debug)]
 pub(crate) struct Entry {

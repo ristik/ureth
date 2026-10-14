@@ -11,6 +11,7 @@
 //! the selected block's journal), so they are never result-cached; only the stateless RSMT
 //! membership check and the stateless B2 relation may be.
 
+use crate::update::B1Context;
 use alloy_evm::{
     eth::EthEvmFactory,
     precompiles::{DynPrecompile, PrecompilesMap},
@@ -19,15 +20,22 @@ use alloy_evm::{
 use alloy_primitives::Address;
 use reth_chainspec::ChainSpec;
 use reth_evm_ethereum::EthEvmConfig;
-use reth_unicity_b1::{provider::B1Precompile, Operation};
+use reth_unicity_b1::{
+    provider::{CertBatchPrecompile, MembershipPrecompile},
+    Operation, Pins,
+};
 use reth_unicity_b2::provider::B2Precompile;
 use revm::{inspector::NoOpInspector, Inspector};
 use std::sync::Arc;
 
-/// The B1 precompile set, keyed by its reserved addresses.
-pub fn b1_precompiles() -> [(Address, DynPrecompile); 3] {
-    [Operation::Uc, Operation::Shared, Operation::Member]
-        .map(|op| (op.address(), B1Precompile::new(op).into_dyn()))
+/// The B1 precompile set, keyed by its reserved addresses: `CERT_BATCH_V2` at `0x0100` (the sole
+/// certificate operation; `0x0101` stays unregistered) checked against the deployment `pins`, and
+/// the stateless RSMT membership check at `0x0102`.
+pub fn b1_precompiles(pins: Pins) -> [(Address, DynPrecompile); 2] {
+    [
+        (Operation::CertBatch.address(), CertBatchPrecompile::new(pins).into_dyn()),
+        (Operation::Member.address(), MembershipPrecompile::default().into_dyn()),
+    ]
 }
 
 /// The B2 (SDK 3.0.1 native bridge relation) precompile, keyed by its reserved address.
@@ -36,8 +44,18 @@ pub fn b2_precompile() -> (Address, DynPrecompile) {
 }
 
 /// [`EthEvmFactory`] with the B1 and B2 precompiles installed in every EVM it creates.
-#[derive(Clone, Copy, Debug, Default)]
-pub struct UnicityEvmFactory(EthEvmFactory);
+#[derive(Clone, Copy, Debug)]
+pub struct UnicityEvmFactory {
+    inner: EthEvmFactory,
+    pins: Pins,
+}
+
+impl UnicityEvmFactory {
+    /// A factory whose certificate batch compares the registry with `pins`.
+    pub fn new(pins: Pins) -> Self {
+        Self { inner: EthEvmFactory::default(), pins }
+    }
+}
 
 impl EvmFactory for UnicityEvmFactory {
     type Evm<DB: Database, I: Inspector<Self::Context<DB>>> =
@@ -56,8 +74,8 @@ impl EvmFactory for UnicityEvmFactory {
         db: DB,
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
     ) -> Self::Evm<DB, NoOpInspector> {
-        let mut evm = self.0.create_evm(db, input);
-        evm.precompiles_mut().extend_precompiles(b1_precompiles());
+        let mut evm = self.inner.create_evm(db, input);
+        evm.precompiles_mut().extend_precompiles(b1_precompiles(self.pins));
         evm.precompiles_mut().extend_precompiles([b2_precompile()]);
         evm
     }
@@ -68,8 +86,8 @@ impl EvmFactory for UnicityEvmFactory {
         input: EvmEnv<Self::Spec, Self::BlockEnv>,
         inspector: I,
     ) -> Self::Evm<DB, I> {
-        let mut evm = self.0.create_evm_with_inspector(db, input, inspector);
-        evm.precompiles_mut().extend_precompiles(b1_precompiles());
+        let mut evm = self.inner.create_evm_with_inspector(db, input, inspector);
+        evm.precompiles_mut().extend_precompiles(b1_precompiles(self.pins));
         evm.precompiles_mut().extend_precompiles([b2_precompile()]);
         evm
     }
@@ -78,7 +96,8 @@ impl EvmFactory for UnicityEvmFactory {
 /// The Ethereum EVM configuration every Unicity route starts from.
 pub type UnicityInnerEvmConfig = EthEvmConfig<ChainSpec, UnicityEvmFactory>;
 
-/// Builds [`UnicityInnerEvmConfig`] for `chain_spec`.
-pub fn unicity_eth_config(chain_spec: Arc<ChainSpec>) -> UnicityInnerEvmConfig {
-    EthEvmConfig::new_with_evm_factory(chain_spec, UnicityEvmFactory::default())
+/// Builds [`UnicityInnerEvmConfig`] for `chain_spec`; the certificate batch checks the registry
+/// against the pins `b1` carries.
+pub fn unicity_eth_config(chain_spec: Arc<ChainSpec>, b1: &B1Context) -> UnicityInnerEvmConfig {
+    EthEvmConfig::new_with_evm_factory(chain_spec, UnicityEvmFactory::new(b1.cert_batch_pins()))
 }

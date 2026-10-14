@@ -90,7 +90,10 @@ fn apply(witnesses: Vec<Vec<u8>>) -> Outcome {
         )
         .expect("the acknowledgement binds to the genesis parent"),
     );
-    let config = UnicityEvmConfig::new(unicity_eth_config(chain_spec), bound);
+    let config = UnicityEvmConfig::new(
+        unicity_eth_config(chain_spec, &reth_unicity_execution::testing::b1_context()),
+        bound,
+    );
     let attrs = NextBlockEnvAttributes {
         timestamp: derive_timestamp(root.origin.reference_time, parent.timestamp).unwrap(),
         suggested_fee_recipient: FEE_COLLECTOR,
@@ -152,5 +155,5 @@ fn distinct_signer_subsets_of_a_nonempty_assignment_transition_reach_identical_s
     assert_eq!(registry[&slot("assignment.epoch")], U256::from(1));
     assert_eq!(registry[&slot("transition.cursor")], U256::from(1));
     assert_eq!(registry[&slot("round.authorized")], U256::from(root.authorized_round));
-    assert_eq!(registry[&slot("b1.count")], U256::from(2));
+    assert_eq!(registry[&slot("b1.importedTipEpoch")], U256::from(2));
 }

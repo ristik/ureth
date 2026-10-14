@@ -125,7 +125,13 @@ impl Pair {
             ),
         }
         .expect("the pair binds its own derivation to its own head");
-        UnicityEvmConfig::new(unicity_eth_config(self.chain_spec.clone()), Arc::new(bound))
+        UnicityEvmConfig::new(
+            unicity_eth_config(
+                self.chain_spec.clone(),
+                &reth_unicity_execution::testing::b1_context(),
+            ),
+            Arc::new(bound),
+        )
     }
 
     fn attributes(&self, input: &RootInputV2) -> NextBlockEnvAttributes {

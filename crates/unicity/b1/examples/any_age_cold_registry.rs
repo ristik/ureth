@@ -52,7 +52,7 @@ impl RegistryRead for State {
         Ok(self.words.get(&k).copied().unwrap_or_default())
     }
 }
-/// Epochs `1..=epochs` of 16 members each, the last open; root round 10_000.
+/// Epochs `1..=epochs` of 16 members each, the last open; root round `10_000`.
 fn registry(epochs: u64, signers: &[uc::Signer]) -> State {
     let mut s = State::default();
     for (n, v) in [

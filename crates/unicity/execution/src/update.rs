@@ -16,7 +16,7 @@ use crate::{
     block::{BlockAccountingError, BlockProfile},
     sha256, ExecutionError, RootInputV2,
 };
-use alloy_primitives::{Bytes, B256};
+use alloy_primitives::{Bytes, B256, U256};
 use secp256k1::PublicKey;
 
 /// Domain string that opens every canonical update.
@@ -70,6 +70,9 @@ pub struct B1Context {
     pub execution_chain_id: u64,
     /// `SHA-256` of the complete execution profile, equal to the registry's `b1.profileHash`.
     pub profile_hash: B256,
+    /// The registry's `genesisCommitment`, a deployment pin kept outside the profile hash
+    /// preimage. The certificate batch compares the registry word with it.
+    pub genesis_commitment: B256,
     /// `B`: the most validator epochs one execution block may install, across all update calls.
     pub max_epochs: u64,
     /// The mandatory records hook the profile pins (no custody: no hook).
@@ -77,8 +80,16 @@ pub struct B1Context {
 }
 
 impl B1Context {
+    /// The pins the certificate batch compares the registry against.
+    pub const fn cert_batch_pins(&self) -> reth_unicity_b1::Pins {
+        reth_unicity_b1::Pins {
+            genesis_commitment: U256::from_be_bytes(self.genesis_commitment.0),
+            profile_hash: U256::from_be_bytes(self.profile_hash.0),
+        }
+    }
+
     /// `B`, refused outside the measured envelope `[MIN_EPOCHS_PER_UPDATE, MAX_MEASURED_B]`.
-    pub fn b(&self) -> Result<u64, UpdateError> {
+    pub const fn b(&self) -> Result<u64, UpdateError> {
         if self.max_epochs < MIN_EPOCHS_PER_UPDATE {
             return Err(UpdateError::EpochsBelowSpan(self.max_epochs));
         }

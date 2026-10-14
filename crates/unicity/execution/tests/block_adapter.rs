@@ -129,7 +129,10 @@ fn acknowledgement_replays_before_a_paid_successor_transaction() {
         )
         .unwrap(),
     );
-    let config = UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), bound);
+    let config = UnicityEvmConfig::new(
+        unicity_eth_config(chain_spec.clone(), &reth_unicity_execution::testing::b1_context()),
+        bound,
+    );
     let mut refused_state =
         State::builder().with_database(provider.clone()).with_bundle_update().build();
     let transfer = signed_call(
@@ -207,7 +210,10 @@ fn acknowledgement_replays_before_a_paid_successor_transaction() {
         )
         .unwrap(),
     );
-    let next_config = UnicityEvmConfig::new(unicity_eth_config(chain_spec), next_bound);
+    let next_config = UnicityEvmConfig::new(
+        unicity_eth_config(chain_spec, &reth_unicity_execution::testing::b1_context()),
+        next_bound,
+    );
     let mut next_state =
         State::builder().with_database(post_ack.clone()).with_bundle_update().build();
     let paid = build_complete(
@@ -244,7 +250,10 @@ fn payload_job_binding_names_gas_and_fee_mismatches() {
         )
         .unwrap(),
     );
-    let config = UnicityEvmConfig::new(unicity_eth_config(chain_spec), bound);
+    let config = UnicityEvmConfig::new(
+        unicity_eth_config(chain_spec, &reth_unicity_execution::testing::b1_context()),
+        bound,
+    );
     let mut attrs = attributes(&root, parent.timestamp);
 
     attrs.gas_limit += 1;
@@ -288,7 +297,10 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
         )
         .unwrap(),
     );
-    let config = UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), bound);
+    let config = UnicityEvmConfig::new(
+        unicity_eth_config(chain_spec.clone(), &reth_unicity_execution::testing::b1_context()),
+        bound,
+    );
     let over_capacity = signed_call(
         chain_spec.chain.id(),
         0,
@@ -545,7 +557,10 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     .try_into_recovered()
     .unwrap();
     let block_a = build_complete(
-        &UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), build_bound),
+        &UnicityEvmConfig::new(
+            unicity_eth_config(chain_spec.clone(), &reth_unicity_execution::testing::b1_context()),
+            build_bound,
+        ),
         &first_header,
         attrs.clone(),
         &mut state_a,
@@ -554,7 +569,10 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
     )
     .unwrap();
     let block_b = build_complete(
-        &UnicityEvmConfig::new(unicity_eth_config(chain_spec), replay_bound),
+        &UnicityEvmConfig::new(
+            unicity_eth_config(chain_spec, &reth_unicity_execution::testing::b1_context()),
+            replay_bound,
+        ),
         &first_header,
         attrs,
         &mut state_b,
@@ -628,7 +646,10 @@ fn import_fixture() -> ImportFixture {
         )
         .unwrap(),
     );
-    let config = UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), bound);
+    let config = UnicityEvmConfig::new(
+        unicity_eth_config(chain_spec.clone(), &reth_unicity_execution::testing::b1_context()),
+        bound,
+    );
     let mut build_state =
         State::builder().with_database(provider.clone()).with_bundle_update().build();
     let transfer = signed_call(
@@ -912,7 +933,13 @@ impl HookWorld {
             )
             .unwrap(),
         );
-        UnicityEvmConfig::new(unicity_eth_config(self.chain_spec.clone()), bound)
+        UnicityEvmConfig::new(
+            unicity_eth_config(
+                self.chain_spec.clone(),
+                &reth_unicity_execution::testing::b1_context(),
+            ),
+            bound,
+        )
     }
 
     /// Builds the block and returns it with the state after it.

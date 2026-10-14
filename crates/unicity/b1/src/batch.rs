@@ -14,7 +14,7 @@ use secp256k1::{ecdsa::Signature, Message, Secp256k1};
 pub use crate::Output;
 
 /// The reserved call address of `CERT_BATCH_V2`.
-pub const ADDRESS: alloy_primitives::Address = crate::Operation::Uc.address();
+pub const ADDRESS: alloy_primitives::Address = crate::Operation::CertBatch.address();
 use crate::Output as Out;
 
 /// Largest accepted request, in bytes.
@@ -211,7 +211,7 @@ pub fn run<R: RegistryRead>(
     Ok(Out::versioned(charge, 2, valid))
 }
 
-fn widen<E>(e: Error<core::convert::Infallible>) -> Error<E> {
+const fn widen<E>(e: Error<core::convert::Infallible>) -> Error<E> {
     match e {
         Error::Malformed(m) => Error::Malformed(m),
         Error::OutOfGas => Error::OutOfGas,

@@ -5,7 +5,7 @@
 use secp256k1::{Message, PublicKey, Secp256k1, SecretKey};
 use sha2::{Digest, Sha256};
 
-pub fn head(major: u8, v: u64) -> Vec<u8> {
+pub(crate) fn head(major: u8, v: u64) -> Vec<u8> {
     let m = major << 5;
     match v {
         0..=23 => vec![m | v as u8],
@@ -28,7 +28,7 @@ fn read_head(d: &[u8]) -> (u8, u64, usize) {
     (d[0] >> 5, n, len)
 }
 /// Byte length of the first CBOR item of `d`.
-pub fn skip(d: &[u8]) -> usize {
+pub(crate) fn skip(d: &[u8]) -> usize {
     let (m, n, h) = read_head(d);
     match m {
         0 | 1 | 7 => h,
@@ -53,26 +53,26 @@ fn array_items(d: &[u8], mut at: usize) -> Vec<(usize, usize)> {
         .collect()
 }
 
-pub struct Signer {
-    pub id: String,
-    pub secret: SecretKey,
+pub(crate) struct Signer {
+    pub(crate) id: String,
+    pub(crate) secret: SecretKey,
 }
 impl Signer {
-    pub fn new(id: &str, seed: u64) -> Self {
+    pub(crate) fn new(id: &str, seed: u64) -> Self {
         let mut s = [0u8; 32];
         s[..8].copy_from_slice(&seed.to_be_bytes());
         s[31] = 1;
         let secret = SecretKey::from_slice(&Sha256::digest(s)).unwrap();
         Self { id: id.to_owned(), secret }
     }
-    pub fn public(&self) -> [u8; 33] {
+    pub(crate) fn public(&self) -> [u8; 33] {
         PublicKey::from_secret_key(&Secp256k1::new(), &self.secret).serialize()
     }
 }
 
 /// A claim re-sealed under `epoch` and `round`, signed by `signers` (sorted by id). `tamper`
 /// receives the signatures to damage them after signing.
-pub fn reseal(
+pub(crate) fn reseal(
     base: &[u8],
     epoch: u64,
     round: u64,
@@ -86,7 +86,7 @@ pub fn reseal(
     assert_eq!(prefix_len + 4 + uc_len, base.len());
     // uc = tag(39001) array[7]: version, ir, tr, conf, shard cert, tree cert, seal.
     let (_, _, tag_head) = read_head(uc);
-    let items = array_items(uc, 0 + tag_head);
+    let items = array_items(uc, tag_head);
     let (seal_at, seal_end) = items[6];
     assert_eq!(seal_end, uc.len());
     let seal = &uc[seal_at..seal_end];

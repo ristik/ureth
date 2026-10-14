@@ -492,7 +492,7 @@ fn a_seal_outside_its_epochs_interval_or_with_a_short_quorum_is_false_at_the_sam
     let sg = signers(4);
     let all: Vec<&uc::Signer> = sg.iter().collect();
     let good = uc::reseal(&base, 5, 905, &all, |_| {});
-    let (ok_out, _) = ok(&[good.clone()], &mut own_registry(5, 6, &sg, 1000));
+    let (ok_out, _) = ok(std::slice::from_ref(&good), &mut own_registry(5, 6, &sg, 1000));
     assert!(verdict(&ok_out));
     // Round 912 is past epoch 5's end (910).
     let late = uc::reseal(&base, 5, 912, &all, |_| {});

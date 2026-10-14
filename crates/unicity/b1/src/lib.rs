@@ -1,4 +1,4 @@
-//! Inactive B1 A′ kernel. No node factory installs these precompiles.
+//! B1 A′ kernel: the `CERT_BATCH_V2` certificate batch and the RSMT membership check.
 //!
 //! Authority comes exclusively from the current EVM journal after authenticated
 //! block admission. This crate neither authenticates history nor enables a fork.
@@ -61,13 +61,12 @@ impl<E> From<Malformed> for Error<E> {
     }
 }
 
-/// Reserved operation; no operation activates itself.
+/// A reserved B1 call address.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Operation {
-    /// One certificate.
-    Uc,
-    /// One common complete seal for up to eight claims.
-    Shared,
+    /// `CERT_BATCH_V2`: the sole certificate operation (1..16 claim occurrences). `0x0101` is
+    /// reserved and inactive.
+    CertBatch,
     /// Stateless RSMT membership under a caller-supplied root.
     Member,
 }
@@ -77,8 +76,7 @@ impl Operation {
         let mut bytes = [0u8; 20];
         bytes[18] = 1;
         bytes[19] = match self {
-            Self::Uc => 0,
-            Self::Shared => 1,
+            Self::CertBatch => 0,
             Self::Member => 2,
         };
         alloy_primitives::Address::new(bytes)
@@ -106,29 +104,15 @@ impl Output {
     }
 }
 
-/// Scan the complete request and reserve its entire charge before journal reads,
-/// point parsing, signatures or hashing. Infrastructure errors have no EVM result.
-pub fn run<R: RegistryRead>(
-    op: Operation,
-    input: &[u8],
-    gas: u64,
-    state: &mut R,
-) -> Result<Output, Error<R::Error>> {
-    let (cap, base) = if op == Operation::Member { (12392, 2000) } else { (262144, 60000) };
-    if input.len() > cap {
+/// Stateless RSMT membership. The charge is reserved against the request alone, before any hashing.
+pub fn membership<E>(input: &[u8], gas: u64) -> Result<Output, Error<E>> {
+    if input.len() > 12392 {
         return Err(Malformed::Limit.into());
     }
-    if gas < base + 16 * input.len() as u64 {
+    if gas < 2000 + 16 * input.len() as u64 {
         return Err(Error::OutOfGas);
     }
-    if op == Operation::Member {
-        return rsmt::run(input, gas);
-    }
-    let call = certificate::scan(input, op == Operation::Shared)?;
-    if gas < call.gas {
-        return Err(Error::OutOfGas);
-    }
-    certificate::evaluate(call, state)
+    rsmt::run(input, gas)
 }
 
 fn hash(parts: &[&[u8]]) -> [u8; 32] {

@@ -65,10 +65,23 @@ pub fn world() -> &'static World {
     WORLD.get_or_init(|| serde_json::from_str::<Vectors>(VECTORS).expect("vectors parse").world)
 }
 
+/// The registry's `genesisCommitment`, as the checked-in execution genesis allocates it.
+fn genesis_commitment() -> B256 {
+    static WORD: OnceLock<B256> = OnceLock::new();
+    *WORD.get_or_init(|| {
+        let word = genesis_db()
+            .storage(crate::SEAL_REGISTRY, reth_unicity_b1::fixed_slot("genesisCommitment"))
+            .expect("genesis storage");
+        assert!(!word.is_zero(), "the genesis allocates no genesis commitment");
+        B256::from(word.to_be_bytes::<32>())
+    })
+}
+
 /// The pinned bindings of the vector world.
 pub fn b1_context() -> B1Context {
     let w = world();
     B1Context {
+        genesis_commitment: genesis_commitment(),
         network: w.network,
         root_genesis_id: w.root_genesis_id,
         execution_chain_id: w.execution_chain_id,

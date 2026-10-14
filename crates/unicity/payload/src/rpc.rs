@@ -457,7 +457,8 @@ where
 
     let builder_config =
         context.builder_config.get().ok_or(SealBuildError::BuilderConfigUnavailable)?;
-    let evm_config = UnicityEvmConfig::new(unicity_eth_config(chain_spec), Arc::new(bound));
+    let evm_config =
+        UnicityEvmConfig::new(unicity_eth_config(chain_spec, &context.seal.b1), Arc::new(bound));
     let job =
         ResolvedPayloadJob::new(Arc::new(parent), attributes.clone(), evm_config, builder_config)
             .map_err(SealBuildError::Job)?
@@ -954,7 +955,10 @@ where
             .map_err(SealImportError::Binding)?
         };
         let input = Arc::new(bound);
-        let config = UnicityEvmConfig::new(unicity_eth_config(chain_spec.clone()), input.clone());
+        let config = UnicityEvmConfig::new(
+            unicity_eth_config(chain_spec.clone(), &self.context.seal.b1),
+            input.clone(),
+        );
 
         // 6. Re-use the shared replay rather than a second execution or comparison path.
         let state_provider = self
@@ -1534,6 +1538,7 @@ mod tests {
                 root_genesis_id: B256::repeat_byte(0x44),
                 execution_chain_id: 1337,
                 profile_hash: B256::repeat_byte(2),
+                genesis_commitment: B256::repeat_byte(3),
                 max_epochs: 2,
                 hook: Default::default(),
             },

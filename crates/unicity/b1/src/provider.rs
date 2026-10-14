@@ -1,6 +1,6 @@
-//! Explicit provider objects for PR4 integration. No automatic registration,
-//! fork activation, ambient authority, or stateful result cache.
-use crate::{batch, run, Error, Operation, Pins, RegistryRead, REGISTRY};
+//! Provider objects for the B1 precompiles. The node factory installs them; the certificate batch
+//! is never result-cached.
+use crate::{batch, membership, Error, Pins, RegistryRead, REGISTRY};
 use alloy_evm::{
     precompiles::{DynPrecompile, Precompile, PrecompileInput},
     EvmInternals,
@@ -10,28 +10,22 @@ use revm::precompile::{
     PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
 };
 
-/// Native provider for one reserved B1 operation. Merely constructing one does
-/// not add it to any production factory or precompile map.
+/// Native provider for the stateless RSMT membership check. Its verdict depends on the request
+/// alone, so it may be result-cached.
 #[derive(Debug)]
-pub struct B1Precompile {
-    op: Operation,
+pub struct MembershipPrecompile {
     id: PrecompileId,
 }
-impl B1Precompile {
-    /// Construct an inactive provider. Integration must separately install it
-    /// under the accepted profile after all PR1–4 activation gates pass.
-    pub fn new(op: Operation) -> Self {
-        Self { op, id: PrecompileId::Custom(format!("unicity-b1-{op:?}").into()) }
+impl Default for MembershipPrecompile {
+    fn default() -> Self {
+        Self { id: PrecompileId::Custom("unicity-b1-membership".into()) }
     }
-    /// Wrap for an explicitly supplied map, preserving the stateful cache ban.
-    /// This method does not modify or install any production map.
+}
+impl MembershipPrecompile {
+    /// Wrap for an explicitly supplied map.
     pub fn into_dyn(self) -> DynPrecompile {
         let id = self.id.clone();
-        if self.op == Operation::Member {
-            DynPrecompile::new(id, move |input| self.call(input))
-        } else {
-            DynPrecompile::new_stateful(id, move |input| self.call(input))
-        }
+        DynPrecompile::new(id, move |input| self.call(input))
     }
 }
 struct Journal<'a, 'b>(&'a mut EvmInternals<'b>);
@@ -41,30 +35,25 @@ impl RegistryRead for Journal<'_, '_> {
         self.0.sload(REGISTRY, key).map(|v| v.data)
     }
 }
-impl Precompile for B1Precompile {
+impl Precompile for MembershipPrecompile {
     fn precompile_id(&self) -> &PrecompileId {
         &self.id
     }
     fn supports_caching(&self) -> bool {
-        self.op == Operation::Member
+        true
     }
-    fn call(&self, mut input: PrecompileInput<'_>) -> PrecompileResult {
-        let result = run(self.op, input.data, input.gas, &mut Journal(&mut input.internals));
-        match result {
+    fn call(&self, input: PrecompileInput<'_>) -> PrecompileResult {
+        match membership::<core::convert::Infallible>(input.data, input.gas) {
             Ok(out) => {
                 Ok(PrecompileOutput::new(out.gas, out.bytes.to_vec().into(), input.reservoir))
             }
             Err(Error::OutOfGas) => {
                 Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, input.reservoir))
             }
-            Err(Error::Malformed(_)) => Ok(PrecompileOutput::halt(
+            Err(_) => Ok(PrecompileOutput::halt(
                 PrecompileHalt::Other("malformed B1 request".into()),
                 input.reservoir,
             )),
-            Err(Error::Host(e)) => Err(PrecompileError::Fatal(e.to_string())),
-            Err(Error::Registry) => {
-                Err(PrecompileError::Fatal("impossible admitted B1 registry".into()))
-            }
         }
     }
 }

@@ -704,6 +704,11 @@ where
             U256::from_be_bytes(config.b1.profile_hash.0),
             "B1 profile hash differs from the profile",
         ),
+        (
+            B256::from(reth_unicity_b1::fixed_slot("genesisCommitment").to_be_bytes::<32>()),
+            U256::from_be_bytes(config.b1.genesis_commitment.0),
+            "B1 genesis commitment differs from the deployment pin",
+        ),
     ] {
         if storage(slot)? != expected {
             return Err(ExecutionError::B1ProfileMismatch(what));

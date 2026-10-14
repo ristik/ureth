@@ -1,8 +1,7 @@
 use crate::{
     cbor::{self, Item},
-    hash, registry, Error, Malformed, Output, Reader, RegistryRead,
+    hash, Malformed, Reader,
 };
-use secp256k1::{ecdsa::Signature, Message, Secp256k1};
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Claim<'a> {
@@ -19,12 +18,6 @@ pub(crate) struct Claim<'a> {
     pub seal: Item<'a>,
     pub seal_fields: [Item<'a>; 8],
 }
-#[derive(Debug)]
-pub(crate) struct Call<'a> {
-    claims: [Option<Claim<'a>>; 8],
-    pub gas: u64,
-}
-
 pub(crate) fn shard_depth(b: &[u8]) -> Result<usize, Malformed> {
     let last = *b.last().ok_or(Malformed::Shard)?;
     if last == 0 {
@@ -134,69 +127,6 @@ pub(crate) fn parse_claim<'a>(
         sigs: max_sigs,
     })
 }
-pub(crate) fn scan(input: &[u8], shared: bool) -> Result<Call<'_>, Malformed> {
-    let mut r = Reader { data: input };
-    let count = r.header()?;
-    if count == 0 || count > 8 || (!shared && count != 1) {
-        return Err(Malformed::Count);
-    }
-    let mut claims = [None; 8];
-    let mut tokens = 0;
-    let mut max_sigs = 0;
-    let mut paths = 0;
-    for dst in claims.iter_mut().take(count) {
-        let p = parse_claim(&mut r, &mut tokens)?;
-        paths += p.paths;
-        max_sigs = max_sigs.max(p.sigs);
-        *dst = Some(p.claim);
-    }
-    if !r.data.is_empty() {
-        return Err(Malformed::Trailing);
-    }
-    Ok(Call {
-        claims,
-        gas: 60000 +
-            16 * input.len() as u64 +
-            MEMBER_ALLOWANCE +
-            6000 * max_sigs +
-            2000 * count as u64 +
-            250 * paths +
-            READ_ALLOWANCE,
-    })
-}
-
-/// 1,000 gas per member of the ceiling-sized committee (owner-decisions section 22).
-const MEMBER_ALLOWANCE: u64 = 1000 * registry::MAX_MEMBERS;
-/// The registry words a ceiling-sized call may read (8 common, 11 epoch, 8 per member), every one
-/// priced warm at 100 gas: the registry is system state that every block reads, so its reads are
-/// subsidised. The call's price depends on the request alone, never on the journal's warmth, the
-/// verdict or any parsed-entry cache.
-const READ_ALLOWANCE: u64 = 100 * (8 + 11 + 8 * registry::MAX_MEMBERS);
-
-pub(crate) fn evaluate<R: RegistryRead>(
-    call: Call<'_>,
-    state: &mut R,
-) -> Result<Output, Error<R::Error>> {
-    let common = registry::common(state)?;
-    let claims: [_; 8] = call.claims;
-    let first = claims[0].expect("nonempty scanned call");
-    let same_seal = claims.iter().flatten().all(|c| c.seal.raw == first.seal.raw);
-    // Common words are always read. A common seal additionally selects exactly
-    // one epoch, including all metadata and every populated member word.
-    let entry = if same_seal { registry::entry(state, first.seal_fields[3].arg)? } else { None };
-    let valid = if common.phase != 2 || !same_seal {
-        false
-    } else {
-        let ordered = claims
-            .iter()
-            .flatten()
-            .zip(claims.iter().flatten().skip(1))
-            .all(|(a, b)| (a.partition, a.shard) < (b.partition, b.shard));
-        ordered && claims.iter().flatten().all(folds) && seal_valid(first, &common, entry.as_ref())
-    };
-    Ok(Output::new(call.gas, valid))
-}
-
 pub(crate) fn folds(c: &Claim<'_>) -> bool {
     let ir = c.ir.tagged::<10>(39002).expect("scanned IR");
     let sf = c.seal_fields;
@@ -245,50 +175,4 @@ pub(crate) fn folds(c: &Claim<'_>) -> bool {
         };
     }
     h == sf[6].data
-}
-fn seal_valid(c: Claim<'_>, common: &registry::Common, entry: Option<&registry::Entry>) -> bool {
-    let s = c.seal_fields;
-    let Some(e) = entry else {
-        return false;
-    };
-    let r = s[2].arg;
-    if s[1].arg != common.network ||
-        s[3].arg > common.origin ||
-        r < e.start ||
-        e.end.is_some_and(|end| r >= end) ||
-        (e.end.is_none() && s[3].arg != common.origin) ||
-        r > common.round ||
-        common.round - r > common.window
-    {
-        return false;
-    }
-    // Canonical tagged seal prefix is preserved verbatim; only signatures is
-    // replaced with the native null item. No domain/prefix or second digest.
-    let sig_map = s[7];
-    let prefix = &c.seal.raw[..c.seal.raw.len() - sig_map.raw.len()];
-    let digest = hash(&[prefix, &[0xf6]]);
-    let message = Message::from_digest(digest);
-    let secp = Secp256k1::verification_only();
-    let mut good = 0u64;
-    let mut valid = true;
-    let mut sigs = sig_map.children();
-    while let Some(id) = sigs.next() {
-        let sig = sigs.next().expect("scanned signature pair");
-        let Some(member) = e.members.iter().find(|m| m.id.as_bytes() == id.data) else {
-            valid = false;
-            continue;
-        };
-        let Ok(signature) = Signature::from_compact(&sig.data[..64]) else {
-            valid = false;
-            continue;
-        };
-        let mut low = signature;
-        low.normalize_s();
-        if low != signature || secp.verify_ecdsa(&message, &signature, &member.key).is_err() {
-            valid = false;
-            continue;
-        }
-        good += member.weight;
-    }
-    valid && good >= e.total - (e.total - 1) / 3
 }
