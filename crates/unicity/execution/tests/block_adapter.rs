@@ -461,7 +461,7 @@ fn build_replay_and_opaque_parent_token_agree_across_two_blocks() {
         BlockAccountingError::RecordsHashMismatch
     );
     let unmeasured =
-        B1Job { context: B1Context { w_cert: 16, ..second_job.context }, ..second_job.clone() };
+        B1Job { context: B1Context { max_epochs: 1, ..second_job.context }, ..second_job.clone() };
     assert_eq!(
         bind_completed_parent(
             (*second_input).clone(),

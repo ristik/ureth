@@ -71,7 +71,7 @@ async fn unicity_node_serves_eth_config() -> eyre::Result<()> {
                     root_genesis_id: B256::repeat_byte(0x5a),
                     execution_chain_id: 1337,
                     profile_hash: B256::repeat_byte(2),
-                    w_cert: 1,
+                    max_epochs: 2,
                     hook: Default::default(),
                 },
             },

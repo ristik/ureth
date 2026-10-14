@@ -5,9 +5,11 @@ package b1paired_test
 //	B1PR4_OUT=/path/to/dir go test -count=1 -run TestGenerateUrethPR4Vectors ./b1paired
 //
 // It writes b1-genesis.json (a funded, beacon-equipped variant of the B1 genesis), its oracle,
-// and b1-vectors.json: a K=2 scenario whose Updates, root inputs and expected registry words
+// and b1-vectors.json: a scenario whose Updates, root inputs and expected registry words
 // come from bft-core's own b1state model and evmroot encoder. Rust executes the real registry
-// runtime and must reproduce every addressed word.
+// runtime and must reproduce every addressed word. The registry keeps every installed epoch
+// (permanent layout, no window): steps install zero, one or two entries (B = 2) and move the
+// usable origin onto the new imported tip in the same update.
 
 import (
 	"crypto/sha256"
@@ -75,11 +77,9 @@ type stepOut struct {
 	UpdateHash    string            `json:"updateHash"`
 	AdmissionGas  uint64            `json:"admissionGas"`
 	Inserts       int               `json:"insertWrites"`
-	Clears        int               `json:"clearWrites"`
 	WriteAllow    uint64            `json:"writeAllowance"`
 	Final         map[string]string `json:"final"`
-	LiveEpochs    []uint64          `json:"liveEpochs"`
-	Head          uint64            `json:"head"`
+	Tip           uint64            `json:"importedTip"`
 	OriginIdentity string           `json:"originIdentity"`
 	RecordsImport  string           `json:"recordsImport"`
 	RecordsHash    string           `json:"rootRecordsHash"`
@@ -91,9 +91,9 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 	if out == "" {
 		t.Skip("B1PR4_OUT not set")
 	}
-	const w = 1
-	f := b1fixture.New(t, w)
+	f := b1fixture.New(t)
 	p := f.Pair.Profile
+	b := p.MaxEpochsPerUpdate
 	profileHash, err := p.Hash()
 	require.NoError(t, err)
 
@@ -115,7 +115,7 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 	block := final.ToBlock()
 	header, err := rlp.EncodeToBytes(block.Header())
 	require.NoError(t, err)
-	oracle := map[string]any{"generator": "bft-core b1paired TestGenerateUrethPR4Vectors; go-ethereum core.Genesis.ToBlock", "source": "bft-core ce9cad819 registrygenesis.GenerateB1 + b1fixture.New(W=1)", "sourceGenesisHash": f.Genesis.EVMGenesisHash().Hex(), "genesisHash": block.Hash().Hex(), "stateRoot": block.Root().Hex(), "headerRLP": hx(header), "testSigner": "public secp256k1 scalar 1", "fundedAddress": sender, "beaconAddress": beacon, "beaconCodeHash": crypto.Keccak256Hash(params.BeaconRootsCode).Hex()}
+	oracle := map[string]any{"generator": "bft-core b1paired TestGenerateUrethPR4Vectors; go-ethereum core.Genesis.ToBlock", "source": "bft-core registrygenesis.GenerateB1 + b1fixture.New (permanent registry)", "sourceGenesisHash": f.Genesis.EVMGenesisHash().Hex(), "genesisHash": block.Hash().Hex(), "stateRoot": block.Root().Hex(), "headerRLP": hx(header), "testSigner": "public secp256k1 scalar 1", "fundedAddress": sender, "beaconAddress": beacon, "beaconCodeHash": crypto.Keccak256Hash(params.BeaconRootsCode).Hex()}
 	oracleJSON, err := json.MarshalIndent(oracle, "", "  ")
 	require.NoError(t, err)
 
@@ -144,15 +144,15 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 	specs := []spec{
 		{"quiet-at-genesis-epoch", 5, 1},
 		{"repeated-origin-no-op", 5, 1},
-		{"rotation-expires-genesis-without-closure", 12, 2},
+		{"rotation-installs-one-and-closes-genesis", 12, 2},
 		{"quiet-in-new-epoch", 15, 2},
-		{"rotation-closes-survivor-and-inserts", 20, 3},
-		{"evicts-oldest-keeps-closed-survivor-and-wraps-ring", 21, 4},
-		{"repeated-origin-keeps-moved-head", 21, 4},
-		{"quiet-origin-prunes-end-equal-floor-and-wraps-head-back", 22, 4},
-		{"quiet-after-prune", 24, 4},
-		{"skips-expired-intermediate-epoch", 45, 6},
-		{"closes-survivor-and-inserts-wide-entry", 60, 7},
+		{"rotation-installs-one", 20, 3},
+		{"rotation-installs-one-after-close-at-origin", 21, 4},
+		{"repeated-origin-keeps-the-tip", 21, 4},
+		{"quiet-origin-advances-the-round", 22, 4},
+		{"quiet-after-advance", 24, 4},
+		{"supersession-installs-two", 45, 6},
+		{"installs-the-wide-entry", 60, 7},
 	}
 	genesisWords, err := b1state.GenesisWords(p, genesis[0])
 	require.NoError(t, err)
@@ -167,14 +167,12 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 		require.NoError(t, err)
 		mark(m)
 	}
-	for i := uint64(0); i <= w; i++ {
-		universe[b1state.QueueSlot(i)] = true
+	for _, n := range []string{"b1.format", "b1.genesisEpoch", "b1.importedTipEpoch", "b1.originReady", "origin.rootEpoch", "clock.rootRound"} {
+		universe[b1state.FixedSlot(n)] = true
 	}
-	universe[b1state.FixedSlot("b1.head")] = true
-	universe[b1state.FixedSlot("b1.count")] = true
 
-	parentOrigin := genesis[0].Start
-	ring := b1state.Ring{Head: 0, OriginRound: parentOrigin, GenesisStart: genesis[0].Start, Entries: mustSelect(t, history, parentOrigin, w)}
+	reg, err := b1state.NewRegistry(genesis[0])
+	require.NoError(t, err)
 	var steps []stepOut
 	// The registry's assignment as the previous block left it.
 	assignedRoot, assignedShard := uint64(1), uint64(0)
@@ -205,16 +203,26 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 		origin := evmroot.RootOriginV2{NetworkID: uint64(p.Network), RootRound: s.round, RootEpoch: s.epoch, ReferenceTime: n, UnicityTreeRoot: tree[:], InputVersion: 1, IR: ir, TRHash: trHash[:], ShardConfHash: newConf}
 		identity := origin.Identity()
 
-		expected := mustSelect(t, history, parentOrigin, w)
-		end, entries, err := b1state.Delta(history, expected, parentOrigin, s.round, w)
-		require.NoError(t, err)
-		u := b1state.Update{Network: p.Network, RootGenesisID: p.RootGenesisID, ExecutionChainID: p.ExecutionChainID, ProfileHash: profileHash, ParentHash: parent, BlockNumber: n, OriginEpoch: s.epoch, OriginRound: s.round, OriginIdentity: identity, PriorTipEpoch: expected[len(expected)-1].Epoch, OldTipEnd: end, NewEntries: entries}
+		// The entries after the imported tip up to the origin epoch, contiguous, only the last open.
+		entries := b1state.NextEntries(history, reg.Tip, s.epoch, b)
+		var end *uint64
+		for k := range entries {
+			entries[k].End = nil
+			if k+1 < len(entries) {
+				e := entries[k+1].Start
+				entries[k].End = &e
+			}
+		}
+		if len(entries) > 0 {
+			e := entries[0].Start
+			end = &e
+		}
+		u := b1state.Update{Network: p.Network, RootGenesisID: p.RootGenesisID, ExecutionChainID: p.ExecutionChainID, ProfileHash: profileHash, ParentHash: parent, BlockNumber: n, OriginEpoch: s.epoch, OriginRound: s.round, OriginIdentity: identity, PriorTipEpoch: reg.Tip, OldTipEnd: end, NewEntries: entries}
 		raw := u.Bytes()
 		_, gas, err := b1state.Admit(raw, p, p.SystemGas)
 		require.NoError(t, err)
-		next, changes, err := ring.Apply(u, w)
+		next, changes, err := reg.Apply(u, b)
 		require.NoError(t, err)
-		require.Equal(t, mustSelect(t, history, s.round, w), next.Entries, "Apply and Select agree")
 		updateHash := u.Hash()
 		// The mandatory root-record import of an empty source log: no entries, the pinned genesis UC time, a zero target.
 		imp := rootrecords.Import{Progress: 0, UCTime: p.GenesisUCTime}
@@ -227,25 +235,14 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 		require.NoError(t, input.Validate())
 		allow, err := changes.WriteAllowance()
 		require.NoError(t, err)
-		ins, clr := 0, 0
-		for _, wr := range changes.Trace {
-			if wr.Clear {
-				clr++
-			} else {
-				ins++
-			}
-		}
+		ins := len(changes.Trace)
 		final := map[string]string{}
 		for k, v := range changes.Final {
 			final[hx32(k)] = hx32(v)
 			universe[k] = true
 		}
-		var live []uint64
-		for _, e := range next.Entries {
-			live = append(live, e.Epoch)
-		}
-		steps = append(steps, stepOut{Name: s.name, N: n, OriginRound: s.round, OriginEpoch: s.epoch, ParentHash: hx32(parent), ParentNumber: n - 1, RootInput: hx(input.Encode()), Update: hx(raw), UpdateHash: hx32(u.Hash()), AdmissionGas: gas, Inserts: ins, Clears: clr, WriteAllow: allow, Final: final, LiveEpochs: live, Head: next.Head, OriginIdentity: hx32(identity), RecordsImport: hx(impRaw), RecordsHash: hx32(impHash), RecordsGas: impGas})
-		ring, parentOrigin = next, s.round
+		steps = append(steps, stepOut{Name: s.name, N: n, OriginRound: s.round, OriginEpoch: s.epoch, ParentHash: hx32(parent), ParentNumber: n - 1, RootInput: hx(input.Encode()), Update: hx(raw), UpdateHash: hx32(u.Hash()), AdmissionGas: gas, Inserts: ins, WriteAllow: allow, Final: final, Tip: next.Tip, OriginIdentity: hx32(identity), RecordsImport: hx(impRaw), RecordsHash: hx32(impHash), RecordsGas: impGas})
+		reg = next
 		assignedRoot, assignedShard, assignedConf = s.epoch, newShard, newConf
 	}
 	words := map[string]string{}
@@ -261,7 +258,7 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 		"format": "unicity-b1-pr4-vectors",
 		"source": "bft-core p85/pr1c-pin b1state model, evmroot encoder, rootrecords import, registrygenesis.GenerateB1; contracts 30bc153",
 		"world": map[string]any{
-			"network": p.Network, "executionChainId": p.ExecutionChainID, "wCert": p.WCert, "rootGenesisId": hx32(p.RootGenesisID),
+			"network": p.Network, "executionChainId": p.ExecutionChainID, "maxEpochsPerUpdate": b, "rootGenesisId": hx32(p.RootGenesisID),
 			"runtimeHash": hx32(p.RuntimeHash), "profileHash": hx32(profileHash), "systemGas": p.SystemGas, "maxGas": p.MaxGas,
 			"ordinaryCapacity": p.OrdinaryCapacity, "restGas": p.RestGas, "genesisUcTime": p.GenesisUCTime, "genesisHash": block.Hash().Hex(), "shardConfHash": hx(f.Genesis.FullShardConfHash().Bytes()),
 		},
@@ -277,11 +274,6 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 	}
 }
 
-func mustSelect(t *testing.T, history []b1state.Entry, origin, w uint64) []b1state.Entry {
-	got, err := b1state.Select(history, origin, w)
-	require.NoError(t, err)
-	return got
-}
 func cborHead(b []byte, major byte, v uint64) []byte {
 	switch {
 	case v < 24:

@@ -58,7 +58,7 @@ MUTANTS = [
     ("genesis-kind", UPDATE, "if e.body_kind == 1 {", DISABLE, B1),
     ("epoch-newer", UPDATE, "if e.epoch <= u.prior_tip_epoch {", DISABLE, B1),
     ("start-after-origin", UPDATE, "if e.start > u.origin_round {", DISABLE, B1),
-    ("end-window", UPDATE, "if e.end.is_some_and(|end| end <= floor || end > u.origin_round) {", DISABLE, B1),
+    ("end-after-origin", UPDATE, "if e.end.is_some_and(|end| end > u.origin_round) {", DISABLE, B1),
     ("end-floor", UPDATE, "end <= floor || end > u.origin_round", "end > u.origin_round", B1),
     ("end-origin", UPDATE, "end <= floor || end > u.origin_round", "end <= floor", B1),
     ("contiguous", UPDATE, "if prev.epoch.checked_add(1) != Some(e.epoch) || prev.end != Some(e.start) {", DISABLE, B1),
