@@ -369,7 +369,8 @@ async fn add(pool: &TestPool, tx: TransactionSigned) {
 #[tokio::test]
 async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     let genesis: Genesis =
-        serde_json::from_str(include_str!("../../execution/testdata/signed-beacon-genesis.json")).unwrap();
+        serde_json::from_str(include_str!("../../execution/testdata/signed-beacon-genesis.json"))
+            .unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
     let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash()));
     let mut state = FixtureProvider::signed_genesis();
@@ -902,7 +903,8 @@ fn consensus_rejects_a_block_level_timestamp_mutation_with_a_typed_error() {
 #[test]
 fn seal_job_registry_is_bounded_shared_and_reuses_identical_jobs() {
     let genesis: Genesis =
-        serde_json::from_str(include_str!("../../execution/testdata/signed-beacon-genesis.json")).unwrap();
+        serde_json::from_str(include_str!("../../execution/testdata/signed-beacon-genesis.json"))
+            .unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
     let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash()));
     let base = EthereumBuilderConfig::new()
@@ -980,7 +982,8 @@ fn seal_fixture() -> (
     UnicityEngineValidator,
 ) {
     let genesis: Genesis =
-        serde_json::from_str(include_str!("../../execution/testdata/signed-beacon-genesis.json")).unwrap();
+        serde_json::from_str(include_str!("../../execution/testdata/signed-beacon-genesis.json"))
+            .unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
     let validator = UnicityEngineValidator::new(chain_spec.clone());
     let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash()));

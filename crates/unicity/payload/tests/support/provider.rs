@@ -66,10 +66,12 @@ impl FixtureProvider {
     }
 
     pub(crate) fn signed_genesis() -> Self {
-        let this = Self::from_json(include_str!("../../../execution/testdata/signed-beacon-genesis.json"));
-        let oracle: serde_json::Value =
-            serde_json::from_str(include_str!("../../../execution/testdata/signed-beacon-genesis-oracle.json"))
-                .unwrap();
+        let this =
+            Self::from_json(include_str!("../../../execution/testdata/signed-beacon-genesis.json"));
+        let oracle: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../execution/testdata/signed-beacon-genesis-oracle.json"
+        ))
+        .unwrap();
         assert_eq!(this.root(), oracle["stateRoot"].as_str().unwrap().parse::<B256>().unwrap());
         this
     }
