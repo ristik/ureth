@@ -62,6 +62,8 @@ tracing.workspace = true
 
 [dev-dependencies]
 reth-unicity-b1.workspace = true
+secp256k1.workspace = true
+sha2.workspace = true
 reth-unicity-execution = { workspace = true, features = ["test-utils"] }
 alloy-genesis.workspace = true
 alloy-trie = { workspace = true, features = ["std"] }

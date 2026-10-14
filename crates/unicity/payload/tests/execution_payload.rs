@@ -4879,3 +4879,88 @@ async fn corrupt_imported_registry_state_fails_the_builder_closed_without_spinni
         assert!(costs[0] < 64, "{name}: a refused attempt reads only the registry header words");
     }
 }
+
+#[path = "../../b1/tests/support/uc.rs"]
+mod uc;
+
+/// A structurally valid `CERT_BATCH_V2` request with one claim for `epoch`, re-sealed from the
+/// pinned Go vector. Its signature is irrelevant: a corrupt required entry is refused before any
+/// signature is checked.
+fn batch_request_for_epoch(epoch: u64) -> Vec<u8> {
+    let manifest: serde_json::Value =
+        serde_json::from_str(include_str!("../../b1/tests/testdata/go-b3reprice.json")).unwrap();
+    let vector = manifest["vectors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["id"] == "cert.single.ok")
+        .unwrap();
+    let request = alloy_primitives::hex::decode(vector["request"].as_str().unwrap()).unwrap();
+    let signer = uc::Signer::new("m00", 1);
+    let claim = uc::reseal(&request[4..], epoch, 1, &[&signer], |_| {});
+    let mut out = vec![2, 0, 0, 1];
+    out.extend(claim);
+    out
+}
+
+fn signed_batch_call(nonce: u64, gas_price: u128, request: Vec<u8>) -> TransactionSigned {
+    let transaction = Transaction::Legacy(TxLegacy {
+        chain_id: Some(1337),
+        nonce,
+        gas_price,
+        gas_limit: 2_000_000,
+        to: TxKind::Call(reth_unicity_b1::Operation::CertBatch.address()),
+        value: U256::ZERO,
+        input: request.into(),
+    });
+    let signature = sign_message(B256::with_last_byte(1), transaction.signature_hash()).unwrap();
+    TransactionSigned::new_unhashed(transaction, signature)
+}
+
+/// A valid registry header with one corrupt epoch entry inside `[g, U]`, and a pool transaction
+/// whose `CERT_BATCH_V2` call needs that entry. The precompile's `Registry` failure is
+/// infrastructure, not a verdict: the whole build fails, no payload exists with that transaction
+/// dropped and the others kept, and the pool is untouched. The same state builds when no
+/// transaction touches the entry, and the same transaction builds on healthy state, so the
+/// failure is the precompile's alone.
+#[tokio::test]
+async fn a_pool_batch_call_that_hits_a_corrupt_epoch_entry_fails_the_whole_build() {
+    use reth_unicity_b1::{entry_slot, member_slot};
+    let healthy = FixtureProvider::signed_genesis();
+    // The genesis registry holds exactly epoch 1, which is both g and U.
+    let epoch = 1;
+    assert!(!healthy.storage_of(SEAL_REGISTRY)[&entry_slot(epoch, 0)].is_zero());
+    let mut corrupt = healthy.clone();
+    corrupt.set_storage(SEAL_REGISTRY, member_slot(epoch, 0, 7), U256::ZERO);
+    let request = batch_request_for_epoch(epoch);
+    let price =
+        |rig: &FailClosedRig| u128::from(rig.config.parent_header.base_fee_per_gas.unwrap()) + 100;
+
+    // Healthy state: the batch call is a normal transaction and is included.
+    let rig = fail_closed_rig(healthy, 1).await;
+    add(&rig.pool, signed_batch_call(1, price(&rig), request.clone())).await;
+    match rig.builder.try_build(rig.args()).unwrap() {
+        BuildOutcome::Better { payload, .. } => {
+            assert_eq!(payload.block().body().transactions.len(), 2)
+        }
+        other => panic!("healthy state: {other:?}"),
+    }
+
+    // Corrupt entry, no transaction reads it: the block builds, so the header and update are fine.
+    let rig = fail_closed_rig(corrupt.clone(), 2).await;
+    assert!(matches!(rig.builder.try_build(rig.args()), Ok(BuildOutcome::Better { .. })));
+
+    // Corrupt entry and a batch call among ordinary transactions: the build fails as a whole.
+    let rig = fail_closed_rig(corrupt, 2).await;
+    add(&rig.pool, signed_batch_call(2, price(&rig), request)).await;
+    let pooled = rig.pool.pool_size().total;
+    assert_eq!(pooled, 3);
+    let (first, first_reads) = rig.failed_attempt();
+    // The error names the fatal registry failure and the transaction; the offending slot is not
+    // carried yet.
+    assert!(first.contains("fatal: impossible admitted B1 registry"), "{first}");
+    for _ in 0..3 {
+        assert_eq!(rig.failed_attempt(), (first.clone(), first_reads), "deterministic and bounded");
+    }
+    assert_eq!(rig.pool.pool_size().total, pooled, "the pool is untouched");
+}
