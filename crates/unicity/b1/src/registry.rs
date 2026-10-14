@@ -68,11 +68,11 @@ pub(crate) fn common<R: RegistryRead>(r: &mut R) -> Result<Common, Error<R::Erro
     }
     let phase = small(w[1])?;
     let network = small(w[3])?;
-    if w[0].is_zero() ||
-        w[5].is_zero() ||
-        w[2] != U256::from(1) ||
-        !matches!(phase, 1 | 2) ||
-        network > u64::from(u16::MAX)
+    if w[0].is_zero()
+        || w[5].is_zero()
+        || w[2] != U256::from(1)
+        || !matches!(phase, 1 | 2)
+        || network > u64::from(u16::MAX)
     {
         return Err(Error::Registry);
     }
@@ -112,16 +112,16 @@ pub(crate) fn entry<R: RegistryRead>(
     let scheme = small(w[7])?;
     let count = small(w[9])?;
     let total = small(w[10])?;
-    if w[0] != U256::from(1) ||
-        !(1..=3).contains(&kind) ||
-        w[2].is_zero() ||
-        w[8].is_zero() ||
-        (kind == 1) != w[3].is_zero() ||
-        !matches!(scheme, 1 | 2) ||
-        !(1..=MAX_MEMBERS).contains(&count) ||
-        has_end > 1 ||
-        (has_end == 0 && end != 0) ||
-        (has_end == 1 && end <= start)
+    if w[0] != U256::from(1)
+        || !(1..=3).contains(&kind)
+        || w[2].is_zero()
+        || w[8].is_zero()
+        || (kind == 1) != w[3].is_zero()
+        || !matches!(scheme, 1 | 2)
+        || !(1..=MAX_MEMBERS).contains(&count)
+        || has_end > 1
+        || (has_end == 0 && end != 0)
+        || (has_end == 1 && end <= start)
     {
         return Err(Error::Registry);
     }
@@ -149,9 +149,9 @@ pub(crate) fn entry<R: RegistryRead>(
         key[32] = m[6][0];
         let key = PublicKey::from_slice(&key).map_err(|_| Error::Registry)?;
         let weight = small(U256::from_be_bytes(m[7]))?;
-        if weight == 0 ||
-            members.last().is_some_and(|prev| prev.id >= id) ||
-            members.iter().any(|prev| prev.key == key)
+        if weight == 0
+            || members.last().is_some_and(|prev| prev.id >= id)
+            || members.iter().any(|prev| prev.key == key)
         {
             return Err(Error::Registry);
         }
@@ -162,4 +162,72 @@ pub(crate) fn entry<R: RegistryRead>(
         return Err(Error::Registry);
     }
     Ok(Some(Entry { start, end: (has_end == 1).then_some(end), total, members }))
+}
+
+/// The deployment pins a batch call compares the registry against. Both come from authenticated
+/// deployment configuration, never from the caller or from the words being checked.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Pins {
+    /// Expected `genesisCommitment` word.
+    pub genesis_commitment: U256,
+    /// Expected `b1.profileHash` word.
+    pub profile_hash: U256,
+}
+/// The eleven common words of a batch call (contract section 5).
+#[derive(Debug)]
+pub(crate) struct CommonV2 {
+    pub phase: u64,
+    pub network: u64,
+    pub genesis: u64,
+    pub ready: bool,
+    pub origin: u64,
+    pub round: u64,
+}
+/// Read and validate the common words. Any impossible value is a `Registry` error, not a verdict.
+pub(crate) fn common_v2<R: RegistryRead>(
+    r: &mut R,
+    pins: &Pins,
+) -> Result<CommonV2, Error<R::Error>> {
+    let mut w = [U256::ZERO; 11];
+    for (dst, name) in w.iter_mut().zip([
+        "genesisCommitment",
+        "phase",
+        "b1.initialized",
+        "b1.network",
+        "b1.profileHash",
+        "b1.format",
+        "b1.genesisEpoch",
+        "b1.importedTipEpoch",
+        "b1.originReady",
+        "clock.rootRound",
+        "origin.rootEpoch",
+    ]) {
+        *dst = read(r, fixed_slot(name))?;
+    }
+    let phase = small(w[1])?;
+    let network = small(w[3])?;
+    let genesis = small(w[6])?;
+    let tip = small(w[7])?;
+    let ready = small(w[8])?;
+    let round = small(w[9])?;
+    let origin = small(w[10])?;
+    if w[0].is_zero() ||
+        w[0] != pins.genesis_commitment ||
+        w[4].is_zero() ||
+        w[4] != pins.profile_hash ||
+        w[2] != U256::from(1) ||
+        w[5] != U256::from(2) ||
+        !matches!(phase, 1 | 2) ||
+        !(1..=u64::from(u16::MAX)).contains(&network) ||
+        genesis > tip ||
+        ready > 1
+    {
+        return Err(Error::Registry);
+    }
+    // Before the first origin the operational pair is zero; afterwards the usable epoch is the
+    // import tip (no preload: the acknowledgement block installs the whole missing range).
+    if (ready == 0 && (origin != 0 || round != 0)) || (ready == 1 && origin != tip) {
+        return Err(Error::Registry);
+    }
+    Ok(CommonV2 { phase, network, genesis, ready: ready == 1, origin, round })
 }

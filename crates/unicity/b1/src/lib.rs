@@ -2,13 +2,16 @@
 //!
 //! Authority comes exclusively from the current EVM journal after authenticated
 //! block admission. This crate neither authenticates history nor enables a fork.
+pub mod batch;
 mod cbor;
 mod certificate;
 pub mod provider;
 mod registry;
 mod rsmt;
 
-pub use registry::{entry_slot, fixed_slot, member_slot, RegistryRead, MAX_MEMBERS, REGISTRY};
+pub use registry::{
+    entry_slot, fixed_slot, member_slot, Pins, RegistryRead, MAX_MEMBERS, REGISTRY,
+};
 use sha2::{Digest, Sha256};
 
 /// Caller failures are exceptional halts, never execution/host errors.
@@ -92,8 +95,12 @@ pub struct Output {
 }
 impl Output {
     fn new(gas: u64, valid: bool) -> Self {
+        Self::versioned(gas, 1, valid)
+    }
+    /// abi.encode(uint256(version),bool(valid)).
+    fn versioned(gas: u64, version: u8, valid: bool) -> Self {
         let mut bytes = [0; 64];
-        bytes[31] = 1;
+        bytes[31] = version;
         bytes[63] = u8::from(valid);
         Self { gas, bytes }
     }
