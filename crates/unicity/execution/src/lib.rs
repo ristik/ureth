@@ -113,9 +113,9 @@ pub const SYSTEM_CALLER: Address =
 pub const SEAL_REGISTRY: Address =
     Address::new([0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
 /// Keccak-256 of the pinned `SealRegistry` runtime artifact: B1 plus the authenticated root-record
-/// log (contracts commit 30bc153).
+/// log, permanent layout (contracts `registry/permanent-layout`).
 pub const SEAL_REGISTRY_CODE_HASH: B256 =
-    b256!("1c660647c1dc27aff97d9e9d5315e2ff60208ea8446253164d831c3ae0cd2611");
+    b256!("8c5b57fd322b9ca1370fca310564a1fba8e80b6ad29a78ceb23aa9ae4113cfe4");
 const GENESIS_SHARD_CONF_HASH_SLOT: B256 =
     b256!("4d19b7530faa2fa3495319b01857830cdc6ca35a5b20c4084d10119118d44afe");
 const ASSIGNMENT_EPOCH_SLOT: B256 =
@@ -130,8 +130,6 @@ const OUTCOMES_COMMITMENT_SLOT: B256 =
     b256!("a20cac25b5a8a5560378675c46b953deb71e952d3a217adf06a367755ed9e14c");
 const B1_NETWORK_SLOT: B256 =
     b256!("36655612ed573010c759ea2241753af111519811fe26d69e6b788feffd5d8a5a");
-const B1_W_CERT_SLOT: B256 =
-    b256!("bc96539a5a8854ca78a846b195d14afa7f672a6576866a9ebcc3af80225331ea");
 const B1_PROFILE_HASH_SLOT: B256 =
     b256!("134a17ec577b5250d3bf72a1025982cb0e0dcc333f6fcb9e4b09f238d462e907");
 const B1_INITIALIZED_SLOT: B256 =
@@ -696,16 +694,39 @@ where
     for (slot, expected, what) in [
         (B1_INITIALIZED_SLOT, U256::from(1), "B1 registry is not initialized"),
         (B1_NETWORK_SLOT, U256::from(config.b1.network), "B1 network differs from the profile"),
-        (B1_W_CERT_SLOT, U256::from(config.b1.w_cert), "B1 window differs from the profile"),
+        (
+            B256::from(reth_unicity_b1::fixed_slot("b1.format").to_be_bytes::<32>()),
+            U256::from(2),
+            "B1 registry layout is not the permanent format 2",
+        ),
         (
             B1_PROFILE_HASH_SLOT,
             U256::from_be_bytes(config.b1.profile_hash.0),
             "B1 profile hash differs from the profile",
         ),
+        (
+            B256::from(reth_unicity_b1::fixed_slot("genesisCommitment").to_be_bytes::<32>()),
+            U256::from_be_bytes(config.b1.genesis_commitment.0),
+            "B1 genesis commitment differs from the deployment pin",
+        ),
     ] {
         if storage(slot)? != expected {
             return Err(ExecutionError::B1ProfileMismatch(what));
         }
+    }
+    // No preload mode: a ready parent's usable origin is its imported tip. Anything else is
+    // registry corruption, refused here and never healed by the update that follows.
+    let ready =
+        storage(B256::from(reth_unicity_b1::fixed_slot("b1.originReady").to_be_bytes::<32>()))?;
+    let usable =
+        storage(B256::from(reth_unicity_b1::fixed_slot("origin.rootEpoch").to_be_bytes::<32>()))?;
+    let imported = storage(B256::from(
+        reth_unicity_b1::fixed_slot("b1.importedTipEpoch").to_be_bytes::<32>(),
+    ))?;
+    if ready == U256::from(1) && usable != imported {
+        return Err(ExecutionError::B1ProfileMismatch(
+            "B1 registry usable origin differs from its imported tip",
+        ));
     }
     let assigned = storage(ASSIGNMENT_ROOT_EPOCH_SLOT)?;
     let assigned_shard = storage(ASSIGNMENT_EPOCH_SLOT)?;
@@ -1224,22 +1245,16 @@ mod tests {
         }
     }
 
-    /// The tail of the registry's live set, read from the candidate's own storage.
+    /// The imported tip of the registry, read from the candidate's own storage.
     fn tail_of(db: &CacheDB<EmptyDB>) -> testing::Tail {
         let word = |slot: U256| db.storage_ref(SEAL_REGISTRY, slot).unwrap();
-        let head = u64::try_from(word(reth_unicity_b1::fixed_slot("b1.head"))).unwrap();
-        let count = u64::try_from(word(reth_unicity_b1::fixed_slot("b1.count"))).unwrap();
-        if count == 0 {
-            // No registry, or an emptied one: the refusal tests supply their own failure.
+        // The tip word of a registry whose entry is not installed: the refusal tests supply their
+        // own failure.
+        let epoch =
+            u64::try_from(word(reth_unicity_b1::fixed_slot("b1.importedTipEpoch"))).unwrap();
+        if word(reth_unicity_b1::entry_slot(epoch, 0)).is_zero() {
             return testing::GENESIS_TAIL;
         }
-        let ring = u64::try_from(word(reth_unicity_b1::fixed_slot("b1.wCert"))).unwrap() + 1;
-        let queue = |i: u64| {
-            let mut bytes = reth_unicity_b1::fixed_slot("b1.queue").to_be_bytes::<32>().to_vec();
-            bytes.extend_from_slice(&U256::from(i).to_be_bytes::<32>());
-            U256::from_be_bytes(keccak256(bytes).0)
-        };
-        let epoch = u64::try_from(word(queue((head + count - 1) % ring))).unwrap();
         let start = u64::try_from(word(reth_unicity_b1::entry_slot(epoch, 4))).unwrap();
         testing::Tail { epoch, start }
     }
@@ -1361,7 +1376,7 @@ mod tests {
                 second.finalize_gas_spent,
                 second.total_gas_spent
             ),
-            (7_728, 123_610, 24_726, 47_525, 203_589)
+            (7_728, 123_297, 24_726, 47_286, 203_037)
         );
         let exact = second.total_gas_spent;
         assert!(run(&second_input, &after_first, exact).is_ok());

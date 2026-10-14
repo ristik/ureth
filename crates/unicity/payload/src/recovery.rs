@@ -270,6 +270,7 @@ where
         return Ok(());
     }
     let UnicitySealConfig { profile, fee_collector, b1, .. } = seal;
+    let pin_context = b1;
     let chain = provider.chain_spec();
     let genesis = chain.genesis_hash();
     let target_hash = canonical_hash(provider, target)?;
@@ -314,7 +315,8 @@ where
         }
         .map_err(|error| eyre::eyre!("parent accounting binding failed at {number}: {error:?}"))?;
         let state = provider.state_by_block_hash(parent_hash)?;
-        let config = UnicityEvmConfig::new(unicity_eth_config(chain.clone()), Arc::new(bound));
+        let config =
+            UnicityEvmConfig::new(unicity_eth_config(chain.clone(), &pin_context), Arc::new(bound));
         let replay =
             replay_complete(&config, StateProviderDatabase::new(state.as_ref()), &state, &block)
                 .map_err(|error| eyre::eyre!("accounting replay failed at {number}: {error}"))?;
@@ -470,7 +472,8 @@ mod tests {
                     root_genesis_id: B256::repeat_byte(1),
                     execution_chain_id: 1337,
                     profile_hash: B256::repeat_byte(2),
-                    w_cert: 1,
+                    genesis_commitment: B256::repeat_byte(3),
+                    max_epochs: 2,
                     hook: Default::default(),
                 },
             },

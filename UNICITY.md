@@ -376,10 +376,11 @@ the acceptance and benchmark work follow in 4b.
   stages: the byte cap and scan charge before the bytes are read, the member charge before any
   member is allocated or any key point parsed. `open` and `finalize` receive the remainder, the
   outcome commitment covers admission plus open, and refunds never lower the total.
-- **Profile.** `--unicity.chain-id`, `--unicity.profile-hash` and `--unicity.w-cert` pin the B1
-  bindings; `--unicity.max-gas` and `--unicity.system-gas` have no default, and a reservation below
-  `155936 + 15626944*K + G_rest(K)` or a ring above the measured cap of 31 is refused at startup and
-  at job binding.
+- **Profile.** `--unicity.chain-id`, `--unicity.profile-hash`, `--unicity.genesis-commitment` and
+  `--unicity.max-epochs-per-update` (`B`, 2) pin the B1 bindings; `--unicity.max-gas` and
+  `--unicity.system-gas` have no default, and a reservation below
+  `155936 + 3350044*B + 1150000 + 250000*B + import envelope` or a `B` outside `[2, 2]` is refused at
+  startup and at job binding. The registry is the permanent layout (every entry kept forever).
 
 The Go vector generator (`crates/unicity/execution/testdata/generate-b1-vectors_test.go`) emits the
 funded B1 genesis, a K=2 scenario with every changed registry word from bft-core's own `b1state`
@@ -389,17 +390,18 @@ the real registry runtime against them. `tools/mutate_b1_guards.py` disables eac
 ## B1 #62 (4b/4): system integration and acceptance, inactive
 
 - **One EVM factory.** `UnicityEvmFactory` (`crates/unicity/execution/src/evm_factory.rs`) wraps
-  `EthEvmFactory` and installs the B1 precompiles at `0x0100` (UC), `0x0101` (shared seal) and
-  `0x0102` (RSMT) in every EVM it creates. Build, import, replay, recovery, `eth_call`,
+  `EthEvmFactory` and installs `CERT_BATCH_V2` at `0x0100` (the sole certificate operation, compared with the
+  profile hash and genesis commitment pins) and the RSMT membership check at `0x0102` in every EVM
+  it creates; `0x0101` stays unregistered. Build, import, replay, recovery, `eth_call`,
   `eth_estimateGas` and tracing all go through the node's `ConfigureEvm`, so there is no second
-  construction path. `0x0103` (S1) stays unregistered. UC and shared results are never
+  construction path. `0x0103` (S1) stays unregistered. The batch result is never
   result-cached (a test pins `supports_caching`); RSMT may be.
-- **Actual callers.** All 144 requests of the pinned conformance manifest are sent by a contract
+- **Actual callers.** All requests of bft-core's `b1-vectors/any-age-v1` corpus are sent by a contract
   executing `STATICCALL` (`tests/b1_static_callers.rs`): same verdict and returndata, exact
   gas and gas-1, malformed requests burn the forwarded gas, repeated calls pay the same flat
   charge, an unregistered address answers with empty success. `payload/tests/rpc_routes.rs` runs a
   launched node over HTTP: `eth_call`, `eth_estimateGas`, an explicit state-override simulation
-  (including that a half-erased entry is an infrastructure error, never a verdict) and
+  (a foreign network word is a false verdict; a half-erased entry is an infrastructure error) and
   `debug_traceCall`.
 - **Two pairs.** `tests/rotation_acceptance.rs`: a builder and an independent follower (state,
   head and accounting token only; the follower sees the block, root input and update bytes)
@@ -407,19 +409,22 @@ the real registry runtime against them. `tools/mutate_b1_guards.py` disables eac
   pruning reach identical headers, state roots, gas and registry words; a restart from the
   persisted token record continues identically; a reorg applies the other branch to the common
   parent only; a swapped update is refused at binding.
-- **G_rest re-measurement.** `b1_profile` drives the real registry runtime at W_cert 0, 1, 3, 7, 15
-  and 30 (rings of 1 to 31) with maximal entries (16 members, the committee ceiling of owner-decisions §22, 128-byte identifiers) through baseline, insertion,
-  rotation, pruning, refill and a two-epoch supersession over a full ring. Every gross total fits the profile envelope and
-  the measured non-history gas (gross minus the exact Cancun price of the history writes) is
-  3.9x to 8.5x below the frozen `G_rest(a, p)` allowance, so the constants stand (the history write rectangle and the allowance are still sized for 64-member entries and over-reserve; a worst gross of 28.8M at W_cert 30 sits under a 539.6M reservation). The result is
-  frozen in `testdata/b1-gas-profile.json`; the test fails if gas changes.
-- **CPU.** `cargo run --release -p reth-unicity-b1 --example bench` (1000 warmups, 10000
-  iterations) times the maximal requests against same-binary ecrecover and SHA-256 references and
-  requires twice the slower reference's gas per nanosecond. x86-64 result:
-  `crates/unicity/b1/testdata/cpu-x86_64.json`, all five kernels pass after the repricing of owner-decisions §22
-  (price `90,700 + 16B + 6000S + 2000N + 250P`; worst: the 16-member, 16-signature quorum at
-  0.187 gas/ns against a 0.132 requirement), measured on a loaded host. **arm64 has not been
-  measured**: no arm64 host was available, and activation needs that run.
+- **G_rest re-measurement.** `b1_profile` drives the real registry runtime of the permanent layout
+  (first origin, repeated origin, one epoch, a two-epoch supersession, one epoch over a larger
+  registry) with maximal entries (16 members, 128-byte identifiers). Every gross total fits the
+  profile envelope; the measured non-history gas (gross minus the exact Cancun price of the history
+  writes) is 290,165 (first origin), 412,727 (B=1) and 430,549 (B=2), against the frozen
+  `G_rest(B) = 1,150,000 + 250,000*B` allowance (1,650,000 at B=2), which therefore stands as a
+  conservative bound. The result is frozen in `testdata/b1-gas-profile.json`; the test fails if gas
+  changes. Provenance: revm 42.0.1 (the workspace pin), the `b1_profile` test of this tree, Intel i7-8850H x86-64
+  laptop; gas is deterministic, so the figures do not depend on the machine.
+- **CPU.** `cargo run --release -p reth-unicity-b1 --example any_age_cold_registry` is the CPU half
+  of the `any_age_cold_registry_v1` gate: `CERT_BATCH_V2` at E=1/4/8/16, valid and cheapest-false,
+  against same-binary ecrecover and SHA-256 references (twice the slower reference's gas per
+  nanosecond required). x86-64 laptop, loaded: every case passes, thinnest E=16 cheapest-false at
+  0.1654 against 0.1580. The cold-storage half needs dedicated hardware and has not run, and arm64
+  is unmeasured; no profile may pin R=100 until both pass
+  (`briefs/any-age-evidence/cold-registry-v1.json`).
 
 ## B2 0x0104 registration, inactive
 

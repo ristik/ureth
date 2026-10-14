@@ -1382,7 +1382,7 @@ mod tests {
             .unwrap_err(),
             BlockAccountingError::UpdateHashMismatch
         );
-        let short = BlockProfile { system_gas: profile().system_gas - 1, ..profile() };
+        let short = BlockProfile { system_gas: profile().system_gas - 2, ..profile() };
         assert_eq!(
             bind_validated_genesis(
                 input.clone(),
@@ -1396,7 +1396,7 @@ mod tests {
             BlockAccountingError::B1Profile
         );
         let unmeasured = B1Job {
-            context: crate::update::B1Context { w_cert: 16, ..crate::testing::b1_context() },
+            context: crate::update::B1Context { max_epochs: 3, ..crate::testing::b1_context() },
             ..job()
         };
         assert_eq!(

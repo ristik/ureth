@@ -3,7 +3,7 @@
 //! Block execution, `eth_call`, `eth_estimateGas` and tracing all build their EVM from the node's
 //! `ConfigureEvm`, so one factory serves every route. This launches a real Unicity node whose
 //! genesis carries a STATICCALL caller contract and a registry pre-state taken from bft-core's
-//! pinned conformance manifest (an injected simulation of authenticated state, as in the kernel
+//! any-age-v1 corpus (an injected simulation of authenticated state, as in the kernel
 //! tests), then asks the node over HTTP: the result matches the manifest, an explicit state
 //! override can change it (a simulation, never canonical authority), the estimate covers the
 //! manifest charge, and a call trace shows the precompile frame.
@@ -19,7 +19,7 @@ use reth_node_core::{
 };
 use reth_rpc_server_types::RpcModuleSelection;
 use reth_tasks::Runtime;
-use reth_unicity_b1::{entry_slot, fixed_slot, member_slot, Operation, REGISTRY};
+use reth_unicity_b1::{entry_slot, Operation, REGISTRY};
 use reth_unicity_execution::{
     block::BlockProfile,
     pairing::PairPins,
@@ -29,7 +29,7 @@ use reth_unicity_payload::{SealJobRegistry, UnicityNode, UnicitySealConfig};
 use serde_json::{json, Value};
 use std::sync::Arc;
 
-const MANIFEST: &str = include_str!("../../b1/tests/testdata/go-b3reprice.json");
+const MANIFEST: &str = include_str!("../../b1/tests/testdata/b1-vectors-anyage.json");
 const GENESIS: &str = include_str!("../../execution/testdata/signed-beacon-genesis.json");
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
 
@@ -51,60 +51,19 @@ fn caller_code(target: Address) -> String {
     format!("0x{}", alloy_primitives::hex::encode(code))
 }
 
-/// The registry words a manifest pre-state describes.
+/// The registry words a corpus pre-state lists.
 fn registry_words(pre: &Value) -> Vec<(U256, U256)> {
-    let mut out = Vec::new();
-    for (name, value) in
-        [("genesisCommitment", 1u64), ("phase", 2), ("b1.initialized", 1), ("b1.profileHash", 2)]
-    {
-        out.push((fixed_slot(name), U256::from(value)));
-    }
-    for (name, field) in [
-        ("b1.network", "network"),
-        ("b1.wCert", "wCert"),
-        ("clock.rootRound", "clockRound"),
-        ("origin.rootEpoch", "origin"),
-    ] {
-        out.push((fixed_slot(name), U256::from(pre[field].as_u64().unwrap_or(0))));
-    }
-    for e in pre["epochs"].as_array().into_iter().flatten() {
-        let epoch = e["epoch"].as_u64().unwrap();
-        let members = e["members"].as_array().unwrap();
-        let total: u64 = members.iter().map(|m| m["weight"].as_u64().unwrap()).sum();
-        let end = e["end"].as_u64().unwrap();
-        let fields = [
-            U256::from(1),
-            U256::from(2),
-            U256::from_be_slice(&hex(e["bodyID"].as_str().unwrap())),
-            U256::from(3),
-            U256::from(e["start"].as_u64().unwrap()),
-            U256::from(end),
-            U256::from(u64::from(end != 0)),
-            U256::from(1),
-            U256::from(4),
-            U256::from(members.len()),
-            U256::from(total),
-        ];
-        for (f, w) in fields.into_iter().enumerate() {
-            out.push((entry_slot(epoch, f as u64), w));
-        }
-        for (j, m) in members.iter().enumerate() {
-            let id = m["nodeID"].as_str().unwrap().as_bytes();
-            let key = hex(m["key"].as_str().unwrap());
-            let mut word = [[0u8; 32]; 8];
-            word[0] = U256::from(id.len()).to_be_bytes::<32>();
-            for (i, b) in id.iter().enumerate() {
-                word[1 + i / 32][i % 32] = *b;
-            }
-            word[5].copy_from_slice(&key[..32]);
-            word[6][0] = key[32];
-            word[7] = U256::from(m["weight"].as_u64().unwrap()).to_be_bytes::<32>();
-            for (f, w) in word.into_iter().enumerate() {
-                out.push((member_slot(epoch, j as u64, f as u64), U256::from_be_bytes(w)));
-            }
-        }
-    }
-    out
+    pre["storage"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|w| {
+            (
+                U256::from_be_slice(&hex(w["slot"].as_str().unwrap())),
+                U256::from_be_slice(&hex(w["value"].as_str().unwrap())),
+            )
+        })
+        .collect()
 }
 
 #[tokio::test]
@@ -121,7 +80,7 @@ async fn rpc_routes_run_the_same_precompiles_over_the_same_registry_state() -> e
     let charge = vector["expected"]["gas"].as_u64().unwrap();
     let expected_output = vector["expected"]["output"].as_str().unwrap().to_owned();
 
-    // Genesis: the B1 world with the manifest's registry words overlaid and a caller contract.
+    // Genesis: the B1 world with the corpus's registry words overlaid and a caller contract.
     let mut doc: Value = serde_json::from_str(GENESIS)?;
     let registry_key = format!("{REGISTRY:#x}");
     let storage: &mut Value = &mut doc["alloc"][registry_key.as_str()]["storage"];
@@ -130,7 +89,7 @@ async fn rpc_routes_run_the_same_precompiles_over_the_same_registry_state() -> e
         storage[word_hex(slot)] = json!(word_hex(value));
     }
     doc["alloc"][format!("{CALLER:#x}")] =
-        json!({ "balance": "0x0", "code": caller_code(Operation::Uc.address()) });
+        json!({ "balance": "0x0", "code": caller_code(Operation::CertBatch.address()) });
     let genesis: Genesis = serde_json::from_value(doc)?;
     let chain_spec = Arc::new(
         ChainSpecBuilder::default()
@@ -171,7 +130,17 @@ async fn rpc_routes_run_the_same_precompiles_over_the_same_registry_state() -> e
                     network_id: u64::from(w.network),
                     root_genesis_id: w.root_genesis_id,
                 },
-                b1: b1_context(),
+                b1: reth_unicity_execution::update::B1Context {
+                    network: vector["preState"]["network"].as_u64().unwrap() as u16,
+                    genesis_commitment: B256::from_slice(&hex(vector["preState"]
+                        ["pinnedGenesisCommitment"]
+                        .as_str()
+                        .unwrap())),
+                    profile_hash: B256::from_slice(&hex(vector["preState"]["pinnedProfileHash"]
+                        .as_str()
+                        .unwrap())),
+                    ..b1_context()
+                },
             },
         ))
         .launch()
@@ -193,7 +162,7 @@ async fn rpc_routes_run_the_same_precompiles_over_the_same_registry_state() -> e
         p
     };
 
-    // eth_call: success flag 1, then the manifest's 64-byte answer.
+    // eth_call: success flag 1, then the corpus's 64-byte answer.
     let out: Bytes =
         client.request("eth_call", params(call(&request), vec![json!("latest")])).await?;
     assert_eq!(out.len(), 32 + 64);
@@ -205,20 +174,22 @@ async fn rpc_routes_run_the_same_precompiles_over_the_same_registry_state() -> e
         client.request("eth_estimateGas", params(call(&request), vec![json!("latest")])).await?;
     assert!(estimate > U256::from(21_000 + charge), "estimate {estimate} below the charge");
 
-    // An explicit state override is a simulation: erasing the certificate's epoch makes the seal an
-    // unknown epoch, so the answer is a well-formed false. It establishes no canonical authority.
+    // An explicit state override is a simulation: another network word makes the seal foreign, so
+    // the answer is a well-formed false at the same charge. It establishes no canonical authority.
+    // (Erasing a whole epoch entry inside [genesis, usable] would be a missing entry, which is an
+    // infrastructure error, never a verdict.)
     let seal_epoch = vector["preState"]["epochs"][0]["epoch"].as_u64().unwrap();
-    // Every word of the entry is cleared: a half-erased entry is an impossible registry and an
-    // infrastructure error, never a verdict.
-    let erased: serde_json::Map<String, Value> = (0..11)
-        .map(|f| (word_hex(entry_slot(seal_epoch, f)), json!(word_hex(U256::ZERO))))
-        .collect();
+    let mut erased = serde_json::Map::new();
+    erased.insert(
+        word_hex(reth_unicity_b1::fixed_slot("b1.network")),
+        json!(word_hex(U256::from(4))),
+    );
     let overrides = json!({ format!("{REGISTRY:#x}"): { "stateDiff": erased } });
     let simulated: Bytes = client
         .request("eth_call", params(call(&request), vec![json!("latest"), overrides]))
         .await?;
     assert_eq!(&simulated[..32], B256::with_last_byte(1).as_slice(), "the call itself succeeds");
-    assert_eq!(simulated[32 + 63], 0, "an unknown epoch is a false verdict");
+    assert_eq!(simulated[32 + 63], 0, "a foreign network is a false verdict");
     assert_ne!(simulated, out);
 
     // A half-erased entry is an impossible registry, which surfaces as an infrastructure error and
@@ -243,10 +214,10 @@ async fn rpc_routes_run_the_same_precompiles_over_the_same_registry_state() -> e
     assert_eq!(frames.len(), 1);
     assert_eq!(
         frames[0]["to"].as_str().unwrap().to_lowercase(),
-        format!("{:#x}", Operation::Uc.address())
+        format!("{:#x}", Operation::CertBatch.address())
     );
     assert_eq!(frames[0]["type"], "STATICCALL");
-    // The traced frame ran the kernel: the manifest's answer at the manifest's charge, not the
+    // The traced frame ran the kernel: the corpus's answer at the corpus's charge, not the
     // empty success an unregistered address gives.
     assert_eq!(frames[0]["output"].as_str().unwrap(), format!("0x{expected_output}"));
     assert_eq!(

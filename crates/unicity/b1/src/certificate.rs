@@ -1,31 +1,24 @@
 use crate::{
     cbor::{self, Item},
-    hash, registry, Error, Malformed, Output, Reader, RegistryRead,
+    hash, Malformed, Reader,
 };
-use secp256k1::{ecdsa::Signature, Message, Secp256k1};
 
 #[derive(Clone, Copy, Debug)]
-struct Claim<'a> {
-    partition: u32,
-    shard: &'a [u8],
-    config: &'a [u8],
-    state: &'a [u8],
-    ir_hash: &'a [u8],
-    ir: Item<'a>,
-    tr: Item<'a>,
-    conf: Item<'a>,
-    shard_cert: [Item<'a>; 3],
-    tree_cert: [Item<'a>; 3],
-    seal: Item<'a>,
-    seal_fields: [Item<'a>; 8],
+pub(crate) struct Claim<'a> {
+    pub partition: u32,
+    pub shard: &'a [u8],
+    pub config: &'a [u8],
+    pub state: &'a [u8],
+    pub ir_hash: &'a [u8],
+    pub ir: Item<'a>,
+    pub tr: Item<'a>,
+    pub conf: Item<'a>,
+    pub shard_cert: [Item<'a>; 3],
+    pub tree_cert: [Item<'a>; 3],
+    pub seal: Item<'a>,
+    pub seal_fields: [Item<'a>; 8],
 }
-#[derive(Debug)]
-pub(crate) struct Call<'a> {
-    claims: [Option<Claim<'a>>; 8],
-    pub gas: u64,
-}
-
-fn shard_depth(b: &[u8]) -> Result<usize, Malformed> {
+pub(crate) fn shard_depth(b: &[u8]) -> Result<usize, Malformed> {
     let last = *b.last().ok_or(Malformed::Shard)?;
     if last == 0 {
         return Err(Malformed::Shard);
@@ -42,76 +35,81 @@ fn nullable_hash(v: Item<'_>) -> Result<(), Malformed> {
     }
     Ok(())
 }
-pub(crate) fn scan(input: &[u8], shared: bool) -> Result<Call<'_>, Malformed> {
-    let mut r = Reader { data: input };
-    let count = r.header()?;
-    if count == 0 || count > 8 || (!shared && count != 1) {
-        return Err(Malformed::Count);
-    }
-    let mut claims = [None; 8];
-    let mut tokens = 0;
-    let mut max_sigs = 0;
+pub(crate) struct Parsed<'a> {
+    pub claim: Claim<'a>,
+    /// Shard siblings plus Unicity-tree steps of this occurrence.
+    pub paths: u64,
+    /// Signature-map cardinality of this occurrence's seal.
+    pub sigs: u64,
+}
+/// Parse and structurally validate one packed claim (the layout shared by every B1 certificate
+/// operation) against the caller's cumulative CBOR item budget.
+pub(crate) fn parse_claim<'a>(
+    r: &mut Reader<'a>,
+    tokens: &mut usize,
+) -> Result<Parsed<'a>, Malformed> {
     let mut paths = 0;
-    for dst in claims.iter_mut().take(count) {
-        let partition = r.uint(4)? as u32;
-        let sl = r.uint(2)? as usize;
-        if sl > 33 {
-            return Err(Malformed::Shard);
+    let mut max_sigs = 0;
+    let partition = r.uint(4)? as u32;
+    let sl = r.uint(2)? as usize;
+    if sl > 33 {
+        return Err(Malformed::Shard);
+    }
+    let shard = r.take(sl)?;
+    shard_depth(shard)?;
+    let config = r.take(32)?;
+    let state = r.take(32)?;
+    let ir_hash = r.take(32)?;
+    let uc_len = r.uint(4)? as usize;
+    if uc_len > 24576 {
+        return Err(Malformed::Limit);
+    }
+    let uc = cbor::one(r.take(uc_len)?, tokens)?.tagged::<7>(39001)?;
+    let ir = uc[1].tagged::<10>(39002)?;
+    for i in [1, 2, 6, 8] {
+        ir[i].uint(u64::MAX)?;
+    }
+    for i in [3, 7, 9] {
+        nullable_hash(ir[i])?;
+    }
+    ir[4].bytes(32)?;
+    if !ir[5].null() {
+        ir[5].blob(2, 0, 256)?;
+    }
+    uc[2].bytes(32)?;
+    uc[3].bytes(32)?;
+    let sc = uc[4].tagged::<3>(39003)?;
+    shard_depth(sc[1].blob(2, 1, 33)?)?;
+    paths += sc[2].collection(4, 256)?;
+    for sib in sc[2].children() {
+        sib.bytes(32)?;
+    }
+    let tc = uc[5].tagged::<3>(39004)?;
+    tc[1].uint(u64::from(u32::MAX))?;
+    paths += tc[2].collection(4, 32)?;
+    for step in tc[2].children() {
+        let pair = step.array::<2>()?;
+        pair[0].uint(u64::from(u32::MAX))?;
+        pair[1].bytes(32)?;
+    }
+    let sf = uc[6].tagged::<8>(39005)?;
+    sf[1].uint(u64::from(u16::MAX))?;
+    for v in &sf[2..5] {
+        v.uint(u64::MAX)?;
+    }
+    sf[5].bytes(32)?;
+    sf[6].bytes(32)?;
+    max_sigs = max_sigs.max(sf[7].collection(5, 64)?);
+    let mut sigs = sf[7].children();
+    while let Some(id) = sigs.next() {
+        id.blob(3, 0, 128)?;
+        let sig = sigs.next().ok_or(Malformed::Shape)?.blob(2, 0, usize::MAX)?;
+        if !(sig.len() == 64 || (sig.len() == 65 && sig[64] <= 1)) {
+            return Err(Malformed::Signature);
         }
-        let shard = r.take(sl)?;
-        shard_depth(shard)?;
-        let config = r.take(32)?;
-        let state = r.take(32)?;
-        let ir_hash = r.take(32)?;
-        let uc_len = r.uint(4)? as usize;
-        if uc_len > 24576 {
-            return Err(Malformed::Limit);
-        }
-        let uc = cbor::one(r.take(uc_len)?, &mut tokens)?.tagged::<7>(39001)?;
-        let ir = uc[1].tagged::<10>(39002)?;
-        for i in [1, 2, 6, 8] {
-            ir[i].uint(u64::MAX)?;
-        }
-        for i in [3, 7, 9] {
-            nullable_hash(ir[i])?;
-        }
-        ir[4].bytes(32)?;
-        if !ir[5].null() {
-            ir[5].blob(2, 0, 256)?;
-        }
-        uc[2].bytes(32)?;
-        uc[3].bytes(32)?;
-        let sc = uc[4].tagged::<3>(39003)?;
-        shard_depth(sc[1].blob(2, 1, 33)?)?;
-        paths += sc[2].collection(4, 256)?;
-        for sib in sc[2].children() {
-            sib.bytes(32)?;
-        }
-        let tc = uc[5].tagged::<3>(39004)?;
-        tc[1].uint(u64::from(u32::MAX))?;
-        paths += tc[2].collection(4, 32)?;
-        for step in tc[2].children() {
-            let pair = step.array::<2>()?;
-            pair[0].uint(u64::from(u32::MAX))?;
-            pair[1].bytes(32)?;
-        }
-        let sf = uc[6].tagged::<8>(39005)?;
-        sf[1].uint(u64::from(u16::MAX))?;
-        for v in &sf[2..5] {
-            v.uint(u64::MAX)?;
-        }
-        sf[5].bytes(32)?;
-        sf[6].bytes(32)?;
-        max_sigs = max_sigs.max(sf[7].collection(5, 64)?);
-        let mut sigs = sf[7].children();
-        while let Some(id) = sigs.next() {
-            id.blob(3, 0, 128)?;
-            let sig = sigs.next().ok_or(Malformed::Shape)?.blob(2, 0, usize::MAX)?;
-            if !(sig.len() == 64 || (sig.len() == 65 && sig[64] <= 1)) {
-                return Err(Malformed::Signature);
-            }
-        }
-        *dst = Some(Claim {
+    }
+    Ok(Parsed {
+        claim: Claim {
             partition,
             shard,
             config,
@@ -124,56 +122,12 @@ pub(crate) fn scan(input: &[u8], shared: bool) -> Result<Call<'_>, Malformed> {
             tree_cert: tc,
             seal: uc[6],
             seal_fields: sf,
-        });
-    }
-    if !r.data.is_empty() {
-        return Err(Malformed::Trailing);
-    }
-    Ok(Call {
-        claims,
-        gas: 60000 +
-            16 * input.len() as u64 +
-            MEMBER_ALLOWANCE +
-            6000 * max_sigs +
-            2000 * count as u64 +
-            250 * paths +
-            READ_ALLOWANCE,
+        },
+        paths,
+        sigs: max_sigs,
     })
 }
-
-/// 1,000 gas per member of the ceiling-sized committee (owner-decisions section 22).
-const MEMBER_ALLOWANCE: u64 = 1000 * registry::MAX_MEMBERS;
-/// The registry words a ceiling-sized call may read (8 common, 11 epoch, 8 per member), every one
-/// priced warm at 100 gas: the registry is system state that every block reads, so its reads are
-/// subsidised. The call's price depends on the request alone, never on the journal's warmth, the
-/// verdict or any parsed-entry cache.
-const READ_ALLOWANCE: u64 = 100 * (8 + 11 + 8 * registry::MAX_MEMBERS);
-
-pub(crate) fn evaluate<R: RegistryRead>(
-    call: Call<'_>,
-    state: &mut R,
-) -> Result<Output, Error<R::Error>> {
-    let common = registry::common(state)?;
-    let claims: [_; 8] = call.claims;
-    let first = claims[0].expect("nonempty scanned call");
-    let same_seal = claims.iter().flatten().all(|c| c.seal.raw == first.seal.raw);
-    // Common words are always read. A common seal additionally selects exactly
-    // one epoch, including all metadata and every populated member word.
-    let entry = if same_seal { registry::entry(state, first.seal_fields[3].arg)? } else { None };
-    let valid = if common.phase != 2 || !same_seal {
-        false
-    } else {
-        let ordered = claims
-            .iter()
-            .flatten()
-            .zip(claims.iter().flatten().skip(1))
-            .all(|(a, b)| (a.partition, a.shard) < (b.partition, b.shard));
-        ordered && claims.iter().flatten().all(folds) && seal_valid(first, &common, entry.as_ref())
-    };
-    Ok(Output::new(call.gas, valid))
-}
-
-fn folds(c: &Claim<'_>) -> bool {
+pub(crate) fn folds(c: &Claim<'_>) -> bool {
     let ir = c.ir.tagged::<10>(39002).expect("scanned IR");
     let sf = c.seal_fields;
     if (ir[1].arg != 0 && (ir[5].null() || ir[6].arg == 0)) ||
@@ -221,50 +175,4 @@ fn folds(c: &Claim<'_>) -> bool {
         };
     }
     h == sf[6].data
-}
-fn seal_valid(c: Claim<'_>, common: &registry::Common, entry: Option<&registry::Entry>) -> bool {
-    let s = c.seal_fields;
-    let Some(e) = entry else {
-        return false;
-    };
-    let r = s[2].arg;
-    if s[1].arg != common.network ||
-        s[3].arg > common.origin ||
-        r < e.start ||
-        e.end.is_some_and(|end| r >= end) ||
-        (e.end.is_none() && s[3].arg != common.origin) ||
-        r > common.round ||
-        common.round - r > common.window
-    {
-        return false;
-    }
-    // Canonical tagged seal prefix is preserved verbatim; only signatures is
-    // replaced with the native null item. No domain/prefix or second digest.
-    let sig_map = s[7];
-    let prefix = &c.seal.raw[..c.seal.raw.len() - sig_map.raw.len()];
-    let digest = hash(&[prefix, &[0xf6]]);
-    let message = Message::from_digest(digest);
-    let secp = Secp256k1::verification_only();
-    let mut good = 0u64;
-    let mut valid = true;
-    let mut sigs = sig_map.children();
-    while let Some(id) = sigs.next() {
-        let sig = sigs.next().expect("scanned signature pair");
-        let Some(member) = e.members.iter().find(|m| m.id.as_bytes() == id.data) else {
-            valid = false;
-            continue;
-        };
-        let Ok(signature) = Signature::from_compact(&sig.data[..64]) else {
-            valid = false;
-            continue;
-        };
-        let mut low = signature;
-        low.normalize_s();
-        if low != signature || secp.verify_ecdsa(&message, &signature, &member.key).is_err() {
-            valid = false;
-            continue;
-        }
-        good += member.weight;
-    }
-    valid && good >= e.total - (e.total - 1) / 3
 }

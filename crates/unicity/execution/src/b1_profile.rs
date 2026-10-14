@@ -1,13 +1,14 @@
 //! Re-measurement of the registry's gross system gas under this client's revm.
 //!
-//! The contracts artifact freezes `G_rest(a, p) = 1136500 + 949500*a + 198000*p` from its own
-//! fixtures and requires this client to re-measure it before activation. Each run here drives the
-//! real registry runtime through the privileged `open`/`finalize` pair with maximal entries (64
-//! members, 128-byte identifiers sharing a 96-byte prefix) at ring sizes 1, 2, 4, 8 and 16, from an
-//! empty-history baseline up to a two-epoch supersession over a full ring, and checks every gross
-//! total against the profile envelope and the frozen allowance. Gas accounting does not depend on
-//! the backing database (warmth comes from the journal's access list), so the in-memory state is
-//! the same measurement a disk-backed one gives.
+//! The contracts artifact (permanent layout) freezes `G_rest(B) = 1150000 + 250000*B` from its own
+//! forge measurement and requires this client to re-measure it before activation. Each run here
+//! drives the real registry runtime through the privileged `open`/`finalize` pair with maximal
+//! entries (16 members, 128-byte identifiers sharing a 96-byte prefix): a first origin, a repeated
+//! origin, a one-epoch import and the two-epoch supersession `B = 2` allows, and checks every gross
+//! total against the profile envelope and the allowance. The registry keeps every entry forever,
+//! so the only history writes are the new entries, the closure of the predecessor and the cursors.
+//! Gas accounting does not depend on the backing database (warmth comes from the journal's access
+//! list), so the in-memory state is the same measurement a disk-backed one gives.
 //!
 //! The measurements are frozen in `testdata/b1-gas-profile.json`; with
 //! `B1_PROFILE_MANIFEST=<path>` they are written there instead of compared.
@@ -19,27 +20,19 @@ use crate::{
     UpdateInput, SEAL_REGISTRY,
 };
 use alloy_primitives::{B256, U256};
-use revm::{
-    database::{CacheDB, EmptyDB},
-    DatabaseRef,
-};
+use revm::database::{CacheDB, EmptyDB};
 use serde::Serialize;
 
-const RECTANGLE_SET: u64 = 22_100;
-const RECTANGLE_CLEAR: u64 = 7_100;
-
-fn g_rest(a: u64, p: u64) -> u64 {
-    1_136_500 + 949_500 * a + 198_000 * p
+fn g_rest(b: u64) -> u64 {
+    crate::update::REST_GAS_BASE + crate::update::REST_GAS_PER_EPOCH * b
 }
 
 /// One measured block.
 #[derive(Clone, Debug, Serialize)]
 struct Measurement {
-    #[serde(rename = "wCert")]
-    w_cert: u64,
     scenario: &'static str,
-    inserted: u64,
-    deleted: u64,
+    /// Epochs the update installs.
+    installed: u64,
     #[serde(rename = "admissionGas")]
     admission: u64,
     #[serde(rename = "openGas")]
@@ -48,9 +41,6 @@ struct Measurement {
     finalize: u64,
     #[serde(rename = "grossGas")]
     total: u64,
-    /// Gross gas minus the design's conservative history SSTORE rectangle (saturating).
-    #[serde(rename = "restVsRectangle")]
-    rest: u64,
     /// History words set, cleared and reset, counted from the storage diff.
     #[serde(rename = "historySets")]
     sets: u64,
@@ -66,7 +56,7 @@ struct Measurement {
     allowance: u64,
 }
 
-/// A K-slot world whose registry has the genesis entry and nothing else.
+/// A world whose registry has the genesis entry and nothing else.
 struct World {
     context: B1Context,
     db: CacheDB<EmptyDB>,
@@ -110,30 +100,10 @@ fn history_diff(before: &CacheDB<EmptyDB>, after: &CacheDB<EmptyDB>) -> (u64, u6
     (sets, clears, resets)
 }
 
-fn word(db: &CacheDB<EmptyDB>, name: &str) -> u64 {
-    u64::try_from(db.storage_ref(SEAL_REGISTRY, reth_unicity_b1::fixed_slot(name)).unwrap())
-        .unwrap()
-}
-
 impl World {
-    fn new(w_cert: u64) -> Self {
-        let mut db = testing::genesis_db();
-        // The genesis allocation is one open entry in ring slot zero, valid for every ring size:
-        // only the immutable window and profile words differ between sizes.
-        let profile_hash = B256::repeat_byte(0x50 + w_cert as u8);
-        db.insert_account_storage(
-            SEAL_REGISTRY,
-            reth_unicity_b1::fixed_slot("b1.wCert"),
-            U256::from(w_cert),
-        )
-        .unwrap();
-        db.insert_account_storage(
-            SEAL_REGISTRY,
-            reth_unicity_b1::fixed_slot("b1.profileHash"),
-            U256::from_be_bytes(profile_hash.0),
-        )
-        .unwrap();
-        let context = B1Context { w_cert, profile_hash, ..testing::b1_context() };
+    fn new(b: u64) -> Self {
+        let db = testing::genesis_db();
+        let context = B1Context { max_epochs: b, ..testing::b1_context() };
         Self {
             context,
             db,
@@ -143,10 +113,6 @@ impl World {
             last_round: 0,
             results: Vec::new(),
         }
-    }
-
-    fn k(&self) -> u64 {
-        self.context.w_cert + 1
     }
 
     fn input(&self, n: u64, round: u64, epoch: u64) -> RootInputV2 {
@@ -229,42 +195,33 @@ impl World {
         input.root_records_hash = crate::sha256(&testing::empty_import());
         let bytes = update.to_bytes();
         let limit = self.context.required_system_gas().unwrap();
-        let before = word(&self.db, "b1.count");
         let (result, next): (ExecutionResult, _) = crate::execute_registry_transition(
             &input,
             UpdateInput { bytes: &bytes, records: &testing::empty_import(), parent_number },
             &self.db,
             ExecutionConfig { system_gas_limit: limit, b1: self.context },
         )
-        .unwrap_or_else(|error| panic!("W={} {scenario}: {error:?}", self.context.w_cert));
-        let after = word(&next, "b1.count");
-        let p = before + a - after;
-        // The addressed history writes the allowance rectangle prices: 524 words per inserted
-        // entry plus head and count, and 524 per deleted entry. Closure writes are in `G_rest`.
-        let rectangle = RECTANGLE_SET * (524 * a + 2) + RECTANGLE_CLEAR * 524 * p;
+        .unwrap_or_else(|error| panic!("B={} {scenario}: {error:?}", self.context.max_epochs));
         let (sets, clears, resets) = history_diff(&self.db, &next);
         let exact_writes = 22_100 * sets + 5_000 * (clears + resets);
         let gross = result.open_gas_spent + result.finalize_gas_spent;
         let measurement = Measurement {
-            w_cert: self.context.w_cert,
             scenario,
-            inserted: a,
-            deleted: p,
+            installed: a,
             admission: result.admission_gas,
             open: result.open_gas_spent,
             finalize: result.finalize_gas_spent,
             total: result.total_gas_spent,
-            rest: gross.saturating_sub(rectangle),
             sets,
             clears,
             resets,
             rest_exact: gross.saturating_sub(exact_writes),
-            allowance: g_rest(a, p),
+            allowance: g_rest(a),
         };
         assert!(
             result.total_gas_spent <= limit,
-            "W={} {scenario}: gross {} exceeds the profile envelope {limit}",
-            self.context.w_cert,
+            "B={} {scenario}: gross {} exceeds the profile envelope {limit}",
+            self.context.max_epochs,
             result.total_gas_spent
         );
         self.db = next;
@@ -277,51 +234,36 @@ impl World {
         measurement
     }
 
-    /// Runs the whole scenario ladder for this ring size.
+    /// Runs the whole scenario ladder for this `B`.
     fn ladder(&mut self) {
-        let k = self.k();
-        let mut round = 0;
-        // Baseline: nothing changes in history (a quiet origin at the genesis epoch).
+        let mut round = 1;
+        // The first usable origin at the genesis epoch: no history change, `originReady` flips.
+        self.step("first origin, no import", round, 1);
         round += 1;
-        self.step("no history change", round, 1);
-        // Fill: single insertions while the ring has room.
-        for _ in 1..k {
-            round += 1;
-            let epoch = self.tail.epoch + 1;
-            self.step("insertion into a ring with room", round, epoch);
-        }
-        // Steady state: the ring is full, each rotation inserts one and deletes the oldest.
+        self.step("repeated origin", round, 1);
+        // One maximal entry: closes the predecessor and moves the origin onto the new tip.
         round += 1;
         let epoch = self.tail.epoch + 1;
-        self.step("rotation of a full ring", round, epoch);
-        // Pruning only: a quiet origin far enough ahead that every closed entry expires.
-        let ahead = self.tail.start + self.context.w_cert;
-        round = ahead.max(round + 1);
-        let epoch = self.tail.epoch;
-        self.step("pruning without insertion", round, epoch);
-        // Refill to a full ring so the replacement starts from K live maximal entries.
-        for _ in 1..k {
+        self.step("one epoch imported", round, epoch);
+        if self.context.max_epochs >= 2 {
+            // The widest import `B = 2` allows: a folded supersession installs two maximal entries.
+            round += 2;
+            let epoch = self.tail.epoch + 2;
+            self.step("two epochs imported (supersession)", round, epoch);
+            // A later single import over a registry that already holds three maximal entries.
             round += 1;
             let epoch = self.tail.epoch + 1;
-            self.step("refill", round, epoch);
+            self.step("one epoch imported over a larger registry", round, epoch);
         }
-        // Widest churn the transition bound allows: a folded supersession of two epochs inserts two
-        // maximal entries while the window passes every closed entry of the full ring (the design's
-        // envelope also covers a == p == K, which a span of at most two cannot reach).
-        round = self.tail.start + self.context.w_cert + 1;
-        let epoch = self.tail.epoch + k.min(2);
-        self.step("supersession over a full ring", round, epoch);
     }
 }
 
 fn check(measurements: &[Measurement]) {
     for m in measurements {
         assert!(
-            m.rest <= m.allowance && m.rest_exact <= m.allowance,
-            "W={} {}: measured G_rest {} (exact {}) exceeds the frozen allowance {}; raise the constants",
-            m.w_cert,
+            m.rest_exact <= m.allowance,
+            "{}: measured G_rest {} exceeds the frozen allowance {}; raise the constants",
             m.scenario,
-            m.rest,
             m.rest_exact,
             m.allowance
         );
@@ -331,20 +273,18 @@ fn check(measurements: &[Measurement]) {
 #[test]
 fn gross_gas_stays_within_the_profile_envelope_and_the_frozen_allowance() {
     let mut all = Vec::new();
-    for w_cert in [0, 1, 3, 7, 15, 30] {
-        let mut world = World::new(w_cert);
+    {
+        let mut world = World::new(2);
         world.ladder();
         check(&world.results);
         let last = world.results.last().unwrap();
-        assert_eq!(last.inserted, world.k().min(2), "W={w_cert}");
-        assert!(last.deleted + 1 >= world.k(), "W={w_cert}: every closed entry expires");
+        assert_eq!(last.installed, 1);
         all.extend(world.results);
     }
     let manifest = serde_json::json!({
         "format": "unicity-b1-gas-profile",
         "client": "reth-unicity-execution on revm 42, Cancun, gross pre-refund",
-        "frozenAllowance": "G_rest(a,p) = 1136500 + 949500*a + 198000*p",
-        "rectangle": "22100 per addressed set, 7100 per addressed clear",
+        "frozenAllowance": "G_rest(B) = 1150000 + 250000*B",
         "exactWrites": "22100 per set, 5000 per clear or reset",
         "measurements": all,
     });

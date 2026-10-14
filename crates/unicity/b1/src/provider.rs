@@ -1,6 +1,6 @@
-//! Explicit provider objects for PR4 integration. No automatic registration,
-//! fork activation, ambient authority, or stateful result cache.
-use crate::{run, Error, Operation, RegistryRead, REGISTRY};
+//! Provider objects for the B1 precompiles. The node factory installs them; the certificate batch
+//! is never result-cached.
+use crate::{batch, membership, Error, Pins, RegistryRead, REGISTRY};
 use alloy_evm::{
     precompiles::{DynPrecompile, Precompile, PrecompileInput},
     EvmInternals,
@@ -10,28 +10,22 @@ use revm::precompile::{
     PrecompileError, PrecompileHalt, PrecompileId, PrecompileOutput, PrecompileResult,
 };
 
-/// Native provider for one reserved B1 operation. Merely constructing one does
-/// not add it to any production factory or precompile map.
+/// Native provider for the stateless RSMT membership check. Its verdict depends on the request
+/// alone, so it may be result-cached.
 #[derive(Debug)]
-pub struct B1Precompile {
-    op: Operation,
+pub struct MembershipPrecompile {
     id: PrecompileId,
 }
-impl B1Precompile {
-    /// Construct an inactive provider. Integration must separately install it
-    /// under the accepted profile after all PR1–4 activation gates pass.
-    pub fn new(op: Operation) -> Self {
-        Self { op, id: PrecompileId::Custom(format!("unicity-b1-{op:?}").into()) }
+impl Default for MembershipPrecompile {
+    fn default() -> Self {
+        Self { id: PrecompileId::Custom("unicity-b1-membership".into()) }
     }
-    /// Wrap for an explicitly supplied map, preserving the stateful cache ban.
-    /// This method does not modify or install any production map.
+}
+impl MembershipPrecompile {
+    /// Wrap for an explicitly supplied map.
     pub fn into_dyn(self) -> DynPrecompile {
         let id = self.id.clone();
-        if self.op == Operation::Member {
-            DynPrecompile::new(id, move |input| self.call(input))
-        } else {
-            DynPrecompile::new_stateful(id, move |input| self.call(input))
-        }
+        DynPrecompile::new(id, move |input| self.call(input))
     }
 }
 struct Journal<'a, 'b>(&'a mut EvmInternals<'b>);
@@ -41,15 +35,57 @@ impl RegistryRead for Journal<'_, '_> {
         self.0.sload(REGISTRY, key).map(|v| v.data)
     }
 }
-impl Precompile for B1Precompile {
+impl Precompile for MembershipPrecompile {
     fn precompile_id(&self) -> &PrecompileId {
         &self.id
     }
     fn supports_caching(&self) -> bool {
-        self.op == Operation::Member
+        true
+    }
+    fn call(&self, input: PrecompileInput<'_>) -> PrecompileResult {
+        match membership::<core::convert::Infallible>(input.data, input.gas) {
+            Ok(out) => {
+                Ok(PrecompileOutput::new(out.gas, out.bytes.to_vec().into(), input.reservoir))
+            }
+            Err(Error::OutOfGas) => {
+                Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, input.reservoir))
+            }
+            Err(_) => Ok(PrecompileOutput::halt(
+                PrecompileHalt::Other("malformed B1 request".into()),
+                input.reservoir,
+            )),
+        }
+    }
+}
+
+/// Native provider for `CERT_BATCH_V2` at [`batch::ADDRESS`]. It reads the registry through the
+/// current journal, is never result-cached and carries the deployment pins it compares against.
+#[derive(Debug)]
+pub struct CertBatchPrecompile {
+    pins: Pins,
+    id: PrecompileId,
+}
+impl CertBatchPrecompile {
+    /// Construct a provider; installing it in a precompile map is the integration's decision.
+    pub fn new(pins: Pins) -> Self {
+        Self { pins, id: PrecompileId::Custom("unicity-b1-cert-batch-v2".into()) }
+    }
+    /// Wrap for an explicitly supplied map. The result is stateful: no result cache.
+    pub fn into_dyn(self) -> DynPrecompile {
+        let id = self.id.clone();
+        DynPrecompile::new_stateful(id, move |input| self.call(input))
+    }
+}
+impl Precompile for CertBatchPrecompile {
+    fn precompile_id(&self) -> &PrecompileId {
+        &self.id
+    }
+    fn supports_caching(&self) -> bool {
+        false
     }
     fn call(&self, mut input: PrecompileInput<'_>) -> PrecompileResult {
-        let result = run(self.op, input.data, input.gas, &mut Journal(&mut input.internals));
+        let result =
+            batch::run(input.data, input.gas, &self.pins, &mut Journal(&mut input.internals), None);
         match result {
             Ok(out) => {
                 Ok(PrecompileOutput::new(out.gas, out.bytes.to_vec().into(), input.reservoir))
@@ -58,7 +94,7 @@ impl Precompile for B1Precompile {
                 Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, input.reservoir))
             }
             Err(Error::Malformed(_)) => Ok(PrecompileOutput::halt(
-                PrecompileHalt::Other("malformed B1 request".into()),
+                PrecompileHalt::Other("malformed B1 batch request".into()),
                 input.reservoir,
             )),
             Err(Error::Host(e)) => Err(PrecompileError::Fatal(e.to_string())),

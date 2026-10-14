@@ -125,7 +125,13 @@ impl Pair {
             ),
         }
         .expect("the pair binds its own derivation to its own head");
-        UnicityEvmConfig::new(unicity_eth_config(self.chain_spec.clone()), Arc::new(bound))
+        UnicityEvmConfig::new(
+            unicity_eth_config(
+                self.chain_spec.clone(),
+                &reth_unicity_execution::testing::b1_context(),
+            ),
+            Arc::new(bound),
+        )
     }
 
     fn attributes(&self, input: &RootInputV2) -> NextBlockEnvAttributes {
@@ -218,22 +224,12 @@ impl Pair {
         self.state.storage_of(SEAL_REGISTRY).get(&slot(name)).copied().unwrap_or_default()
     }
 
-    /// Epochs of the live set, oldest first, read from the ring in the pair's own state.
+    /// Installed epochs, oldest first: the registry keeps every one from the genesis epoch to the
+    /// imported tip.
     fn live(&self) -> Vec<u64> {
-        let storage = self.state.storage_of(SEAL_REGISTRY);
-        let ring = u64::try_from(self.word("b1.wCert")).unwrap() + 1;
-        let (head, count) = (
-            u64::try_from(self.word("b1.head")).unwrap(),
-            u64::try_from(self.word("b1.count")).unwrap(),
-        );
-        (0..count)
-            .map(|i| {
-                let mut bytes = slot("b1.queue").to_be_bytes::<32>().to_vec();
-                bytes.extend_from_slice(&U256::from((head + i) % ring).to_be_bytes::<32>());
-                let key = U256::from_be_bytes(alloy_primitives::keccak256(bytes).0);
-                u64::try_from(storage.get(&key).copied().unwrap_or_default()).unwrap()
-            })
-            .collect()
+        let genesis = u64::try_from(self.word("b1.genesisEpoch")).unwrap();
+        let tip = u64::try_from(self.word("b1.importedTipEpoch")).unwrap();
+        (genesis..=tip).collect()
     }
 
     const fn system_gas(&self) -> u64 {
@@ -262,7 +258,7 @@ fn a_follower_reproduces_every_block_of_a_rotation_and_a_supersession() {
     assert_same(&builder, &follower);
 
     // 2: root epoch 1 to 2 as a root-only acknowledgement. Genesis [0, 1) is closed at the first
-    // successor start and stays live inside the window; epoch 2 is inserted.
+    // successor start and stays installed; epoch 2 is inserted.
     let two = builder.build(2, 2, 0xc0, false);
     assert!(
         two.block.body().transactions.is_empty(),
@@ -280,26 +276,24 @@ fn a_follower_reproduces_every_block_of_a_rotation_and_a_supersession() {
     let rotation_gas = follower.system_gas();
 
     // 4: supersession of epochs 3 and 4 in one acknowledgement (root 2 to 4, shard 0 to 2). Both
-    // survive the window, epoch 2 expires, and the former tip is closed once by the update.
+    // are installed, nothing expires, and the former tip is closed once by the update.
     let four = builder.build(10, 4, 0xc0, false);
     follower.follow(&four);
     assert_same(&builder, &follower);
-    assert_eq!(builder.live(), vec![3, 4]);
+    assert_eq!(builder.live(), vec![1, 2, 3, 4]);
     assert_eq!(builder.word("assignment.rootEpoch"), U256::from(4));
     assert_eq!(builder.word("assignment.epoch"), U256::from(2));
     assert!(
         builder.system_gas() > rotation_gas,
-        "inserting two entries and expiring one costs more system gas than a quiet block"
+        "inserting two entries costs more system gas than a quiet block"
     );
     assert!(builder.system_gas() <= profile().system_gas);
 
-    // 5: ordinary traffic continues on the superseded configuration. One round later the window
-    // floor reaches epoch 3's end, so a quiet-origin block prunes it (end equal to the floor is
-    // removed) and only the open tail remains.
+    // 5: ordinary traffic continues on the superseded configuration; every installed entry stays.
     let five = builder.build(11, 4, 0xc0, true);
     follower.follow(&five);
     assert_same(&builder, &follower);
-    assert_eq!(builder.live(), vec![4]);
+    assert_eq!(builder.live(), vec![1, 2, 3, 4]);
 }
 
 #[test]

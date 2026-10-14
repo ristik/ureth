@@ -72,7 +72,11 @@ fn call(request: &[u8], forward: Option<u64>, gas_limit: u64) -> Outcome {
     );
     let cfg = CfgEnv::new_with_spec(SpecId::CANCUN);
     let block = BlockEnv { gas_limit: 100_000_000, ..Default::default() };
-    let mut evm = UnicityEvmFactory::default().create_evm(db, EvmEnv::new(cfg, block));
+    let mut evm = UnicityEvmFactory::new(reth_unicity_b1::Pins {
+        genesis_commitment: Default::default(),
+        profile_hash: Default::default(),
+    })
+    .create_evm(db, EvmEnv::new(cfg, block));
     let tx = TxEnv {
         caller: SENDER,
         kind: TxKind::Call(CALLER),

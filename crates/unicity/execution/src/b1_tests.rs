@@ -6,7 +6,7 @@
 
 use crate::{
     testing::{self, world},
-    update::{admit, window_floor, B1Context, Entry, Update, UpdateBinding, UpdateError},
+    update::{admit, B1Context, Entry, Update, UpdateBinding, UpdateError},
     ExecutionConfig, ExecutionError, ExecutionResult, RootInputV2, UpdateInput, SEAL_REGISTRY,
 };
 use alloy_primitives::{keccak256, B256, U256};
@@ -42,11 +42,10 @@ struct Step {
     root_records_hash: B256,
     records_admission_gas: u64,
     insert_writes: u64,
-    clear_writes: u64,
     write_allowance: u64,
     #[serde(rename = "final")]
     changed: BTreeMap<B256, B256>,
-    live_epochs: Vec<u64>,
+    imported_tip: u64,
 }
 
 fn hex(value: &str) -> Vec<u8> {
@@ -148,9 +147,9 @@ fn binding(input: &RootInputV2, parent_number: u64) -> UpdateBinding {
 }
 
 const QUIET: usize = 0;
-const EXPIRES_GENESIS: usize = 2;
+const INSTALLS_ONE: usize = 2;
 const CLOSES_AND_INSERTS: usize = 4;
-const SKIPS_EXPIRED: usize = 9;
+const SUPERSESSION: usize = 9;
 
 #[test]
 fn genesis_words_match_bft_cores_model() {
@@ -163,7 +162,7 @@ fn every_step_reproduces_bft_cores_registry_words_and_admission_gas() {
     let v = vectors();
     let mut db = testing::genesis_db();
     let mut expected = v.genesis_words.clone();
-    let mut live = vec![1u64];
+    let mut tip = 1u64;
     for step in &v.steps {
         let input = RootInputV2::from_canonical_cbor(&hex(&step.root_input)).unwrap();
         let bytes = hex(&step.update);
@@ -196,11 +195,10 @@ fn every_step_reproduces_bft_cores_registry_words_and_admission_gas() {
         assert_universe(&next, &v, &expected, &step.name);
 
         // Re-measurement under this client: everything except the history SSTORE rectangle must
-        // fit the frozen `G_rest(a, p)` allowance of the contracts artifact (1.5x margin
-        // included). `a` and `p` are the entries inserted and deleted by the step.
-        let a = step.live_epochs.iter().filter(|e| !live.contains(e)).count() as u64;
-        let p = live.iter().filter(|e| !step.live_epochs.contains(e)).count() as u64;
-        let rest = 1_136_500 + 949_500 * a + 198_000 * p;
+        // fit the frozen `G_rest(B)` allowance of the contracts artifact. `a` is the number of
+        // entries the step installs.
+        let a = step.imported_tip - tip;
+        let rest = crate::update::REST_GAS_BASE + crate::update::REST_GAS_PER_EPOCH * a;
         let gross = result.open_gas_spent + result.finalize_gas_spent;
         assert!(
             gross <= step.write_allowance + rest,
@@ -208,17 +206,16 @@ fn every_step_reproduces_bft_cores_registry_words_and_admission_gas() {
             step.name,
             step.write_allowance
         );
-        assert!(step.insert_writes + step.clear_writes > 0);
-        live.clone_from(&step.live_epochs);
+        assert!(step.insert_writes > 0);
+        tip = step.imported_tip;
         db = next;
     }
 }
 
 #[test]
-fn deleting_history_refunds_are_never_credited_to_the_system_budget() {
-    let case = Case::at(EXPIRES_GENESIS);
+fn the_gross_total_is_the_whole_system_budget() {
+    let case = Case::at(INSTALLS_ONE);
     let result = case.with(|_| {}).unwrap();
-    assert!(result.open_gas_refunded > 0, "pruning the genesis entry clears nonzero words");
     assert_eq!(
         result.total_gas_spent,
         result.admission_gas +
@@ -227,7 +224,7 @@ fn deleting_history_refunds_are_never_credited_to_the_system_budget() {
             result.finalize_gas_spent
     );
     // The gross total is the whole budget: one unit less cannot fund the last operation.
-    let step = &vectors().steps[EXPIRES_GENESIS];
+    let step = &vectors().steps[INSTALLS_ONE];
     let bytes = hex(&step.update);
     let exact = result.total_gas_spent;
     assert!(run_bytes(&case.input, &bytes, case.parent_number, &case.parent, exact).is_ok());
@@ -239,7 +236,7 @@ fn deleting_history_refunds_are_never_credited_to_the_system_budget() {
 
 #[test]
 fn admission_is_charged_before_open_and_staged_before_the_members_are_parsed() {
-    let case = Case::at(EXPIRES_GENESIS);
+    let case = Case::at(INSTALLS_ONE);
     let bytes = case.update.to_bytes();
     let context = testing::b1_context();
     let bind = binding(&case.input, case.parent_number);
@@ -272,7 +269,7 @@ fn admission_is_charged_before_open_and_staged_before_the_members_are_parsed() {
 
 #[test]
 fn the_kernel_refuses_a_system_budget_that_cannot_admit() {
-    let case = Case::at(EXPIRES_GENESIS);
+    let case = Case::at(INSTALLS_ONE);
     let bytes = case.update.to_bytes();
     let scan = 2000 + 16 * bytes.len() as u64;
     for (limit, expected) in
@@ -364,9 +361,8 @@ fn entry_mut(u: &mut Update) -> &mut Entry {
 #[test]
 fn every_interval_and_member_invariant_is_checked_alone() {
     // At step 4 the parent tail is epoch 2 [10, inf); the update closes it at 20 and inserts
-    // epoch 3 as the origin epoch with window floor 19.
+    // epoch 3 as the origin epoch.
     let case = Case::at(CLOSES_AND_INSERTS);
-    assert_eq!(window_floor(20, world().w_cert), 19);
     let cases: Vec<Mutation> = vec![
         (
             "zero body id",
@@ -413,17 +409,7 @@ fn every_interval_and_member_invariant_is_checked_alone() {
         (
             "end after origin",
             Box::new(|u| entry_mut(u).end = Some(u.origin_round + 1)),
-            UpdateError::EndOutsideWindow,
-        ),
-        (
-            "end at floor",
-            Box::new(|u| {
-                let floor = window_floor(u.origin_round, world().w_cert);
-                let e = entry_mut(u);
-                e.start = floor - 1;
-                e.end = Some(floor);
-            }),
-            UpdateError::EndOutsideWindow,
+            UpdateError::EndAfterOrigin,
         ),
         (
             "old tip end after first start",
@@ -439,13 +425,12 @@ fn every_interval_and_member_invariant_is_checked_alone() {
         (
             "closed tail",
             Box::new(|u| {
-                // A valid closed interval inside the window whose successor start the former tip
-                // is closed at, so only the open-tail requirement can refuse it.
+                // A valid closed interval whose start the former tip is closed at, so only the
+                // open-tail requirement can refuse it.
                 let origin = u.origin_round;
-                let floor = window_floor(origin, world().w_cert);
-                u.old_tip_end = Some(floor);
+                u.old_tip_end = Some(origin - 1);
                 let e = entry_mut(u);
-                e.start = floor;
+                e.start = origin - 1;
                 e.end = Some(origin);
             }),
             UpdateError::TailNotOrigin,
@@ -460,7 +445,7 @@ fn every_interval_and_member_invariant_is_checked_alone() {
     }
     // A skipped epoch leaves no successor to close the former tip early: the old-tip end may not
     // lie after the first surviving start even when the epochs are not consecutive.
-    let skipping = Case::at(SKIPS_EXPIRED);
+    let skipping = Case::at(SUPERSESSION);
     let first_start = skipping.update.new_entries[0].start;
     assert_eq!(
         skipping.with(|u| u.old_tip_end = Some(first_start + 1)).unwrap_err(),
@@ -552,7 +537,7 @@ fn admit_raw(bytes: &[u8], case: &Case) -> Result<crate::update::Admitted, Updat
 
 #[test]
 fn the_scan_refuses_every_structural_violation_by_name() {
-    let case = Case::at(EXPIRES_GENESIS);
+    let case = Case::at(INSTALLS_ONE);
     let good = case.update.to_bytes();
     assert!(admit_raw(&good, &case).is_ok());
     // Offsets into the canonical encoding: array(13), then a 17-byte domain text, then the network.
@@ -606,8 +591,8 @@ const UPDATE_DOMAIN_LEN: usize = crate::update::UPDATE_DOMAIN.len();
 #[test]
 fn counts_and_sizes_are_bounded_before_anything_is_allocated() {
     let case = Case::at(CLOSES_AND_INSERTS);
-    let k = testing::b1_context().k_max().unwrap();
-    // More entries than the ring has slots cannot be a live set: the count is refused by the scan.
+    let k = testing::b1_context().b().unwrap();
+    // More entries than B cannot be one block's import: the count is refused by the scan.
     let mut crowded = case.update.clone();
     let template = crowded.new_entries[0].clone();
     crowded.new_entries = (0..=k).map(|i| Entry { epoch: 3 + i, ..template.clone() }).collect();
@@ -631,7 +616,7 @@ fn counts_and_sizes_are_bounded_before_anything_is_allocated() {
     let mut max = case.update.clone();
     max.new_entries[0].members[2].node_id = "z".repeat(128);
     assert!(admit_raw(&max.to_bytes(), &case).is_ok());
-    // A zero-length ring entry and a token flood are bounded by the profile's token cap.
+    // A zero-member entry and a token flood are bounded by the profile's token cap.
     assert!(testing::b1_context().max_tokens().unwrap() > 32);
 }
 
@@ -654,22 +639,25 @@ fn every_single_bit_mutation_is_refused_or_reencodes_to_exactly_itself() {
 }
 
 #[test]
-fn an_unmeasured_ring_is_refused_never_truncated() {
-    let big = B1Context { w_cert: 31, ..testing::b1_context() };
-    assert_eq!(big.k_max(), Err(UpdateError::UnmeasuredRing(32)));
-    assert_eq!(big.required_system_gas(), Err(UpdateError::UnmeasuredRing(32)));
-    let edge = B1Context { w_cert: 30, ..testing::b1_context() };
-    assert_eq!(edge.k_max(), Ok(31));
+fn an_unmeasured_or_unsafe_epoch_count_is_refused_never_truncated() {
+    let big = B1Context { max_epochs: 3, ..testing::b1_context() };
+    assert_eq!(big.b(), Err(UpdateError::UnmeasuredEpochs(3)));
+    assert_eq!(big.required_system_gas(), Err(UpdateError::UnmeasuredEpochs(3)));
+    // B below the supersession span could strand an acknowledgement block.
+    for low in [0, 1] {
+        let c = B1Context { max_epochs: low, ..testing::b1_context() };
+        assert_eq!(c.b(), Err(UpdateError::EpochsBelowSpan(low)));
+        assert_eq!(c.required_system_gas(), Err(UpdateError::EpochsBelowSpan(low)));
+    }
+    let edge = B1Context { max_epochs: 2, ..testing::b1_context() };
+    assert_eq!(edge.b(), Ok(2));
+    // 155,936 + 2*(505,244 + 177,800*16) + 1,150,000 + 2*250,000 + import envelope.
     assert_eq!(
         edge.required_system_gas().unwrap(),
-        155_936 + 1_136_500 + (15_626_944 + 1_147_500) * 31 + crate::records::IMPORT_ENVELOPE_GAS
+        155_936 + 1_150_000 + (3_350_044 + 250_000) * 2 + crate::records::IMPORT_ENVELOPE_GAS
     );
-    // The B3 lane pin (W_cert 15, no hooks) and the W_cert 30 pin of owner-decisions section 23.
-    let lane = B1Context { w_cert: 15, ..testing::b1_context() };
-    assert_eq!(lane.required_system_gas().unwrap(), 287_979_684);
-    assert_eq!(edge.required_system_gas().unwrap(), 539_596_344);
-    let overflow = B1Context { w_cert: u64::MAX, ..testing::b1_context() };
-    assert_eq!(overflow.k_max(), Err(UpdateError::Overflow));
+    assert_eq!(edge.max_update_bytes().unwrap(), 4096 + 16384 * 2);
+    assert_eq!(edge.max_tokens().unwrap(), 32 + 266 * 2);
 }
 
 #[test]
@@ -684,6 +672,55 @@ fn the_registry_refuses_what_only_its_own_state_can_show() {
         }
         other => panic!("expected the registry to revert, got {other:?}"),
     }
+}
+
+#[test]
+fn an_update_that_would_leave_the_usable_origin_behind_the_imported_tip_is_refused_at_admission() {
+    // Layer 1, state-free admission: the tail of a non-empty update must be the open origin epoch,
+    // so no admitted update can leave a ready registry with I_after != U_new. Dropping the last
+    // entry of the two-epoch supersession leaves the imported tip one epoch behind the origin.
+    let case = Case::at(SUPERSESSION);
+    assert!(case.update.new_entries.len() >= 2);
+    let mut short = case.update.clone();
+    short.new_entries.pop();
+    assert_eq!(admit_raw(&short.to_bytes(), &case).unwrap_err(), UpdateError::TailNotOrigin);
+    // An empty update must name the origin epoch as its prior tip.
+    let mut empty = case.update.clone();
+    empty.new_entries.clear();
+    empty.old_tip_end = None;
+    assert_eq!(admit_raw(&empty.to_bytes(), &case).unwrap_err(), UpdateError::EmptyUpdateMismatch);
+}
+
+#[test]
+fn a_ready_registry_whose_usable_origin_is_not_its_imported_tip_is_refused_before_the_update_runs()
+{
+    // Layer 2, the client's parent check: a committed ready parent with U != I is corruption and is
+    // refused with ImportedUsableMismatch, never repaired by the update that follows.
+    let mut case = Case::at(CLOSES_AND_INSERTS);
+    let tip = u64::try_from(word_u256(&case.parent, "b1.importedTipEpoch")).unwrap();
+    assert_eq!(word_u256(&case.parent, "origin.rootEpoch"), U256::from(tip), "ready parent: U = I");
+    assert!(case.with(|_| {}).is_ok(), "the uncorrupted parent accepts the step");
+    case.parent
+        .insert_account_storage(
+            SEAL_REGISTRY,
+            reth_unicity_b1::fixed_slot("origin.rootEpoch"),
+            U256::from(tip - 1),
+        )
+        .unwrap();
+    // The registry runtime's own ImportedUsableMismatch compares the update's origin with the tip
+    // after the append, which admission already forces equal; the client therefore also refuses
+    // a corrupted parent itself, before the update runs.
+    assert_eq!(
+        case.with(|_| {}).unwrap_err(),
+        ExecutionError::B1ProfileMismatch(
+            "B1 registry usable origin differs from its imported tip"
+        )
+    );
+}
+
+fn word_u256(db: &CacheDB<EmptyDB>, name: &str) -> U256 {
+    let mut db = db.clone();
+    revm::Database::storage(&mut db, SEAL_REGISTRY, reth_unicity_b1::fixed_slot(name)).unwrap()
 }
 
 #[test]
@@ -707,7 +744,6 @@ fn the_registry_profile_words_must_equal_the_pinned_profile() {
     assert!(run(pinned, &case.parent).is_ok());
     let wrong = [
         ("network", B1Context { network: pinned.b1.network + 1, ..pinned.b1 }),
-        ("window", B1Context { w_cert: pinned.b1.w_cert + 1, ..pinned.b1 }),
         ("profile hash", B1Context { profile_hash: B256::repeat_byte(9), ..pinned.b1 }),
     ];
     for (name, b1) in wrong {
@@ -719,6 +755,16 @@ fn the_registry_profile_words_must_equal_the_pinned_profile() {
             "{name}"
         );
     }
+    // A registry that is not the permanent layout (format word 2) is refused at startup.
+    let mut old_layout = case.parent.clone();
+    old_layout
+        .insert_account_storage(
+            SEAL_REGISTRY,
+            reth_unicity_b1::fixed_slot("b1.format"),
+            U256::from(1),
+        )
+        .unwrap();
+    assert!(matches!(run(pinned, &old_layout), Err(ExecutionError::B1ProfileMismatch(_))));
     let mut uninitialized = case.parent.clone();
     uninitialized
         .insert_account_storage(
@@ -781,7 +827,7 @@ fn an_empty_update_names_no_closure_and_the_origin_epoch() {
 
 #[test]
 fn the_scan_stage_refuses_invalid_utf8_before_the_member_debit() {
-    let case = Case::at(EXPIRES_GENESIS);
+    let case = Case::at(INSTALLS_ONE);
     let mut bytes = case.update.to_bytes();
     let at = bytes.windows(6).position(|w| w == b"node-a").unwrap();
     bytes[at] = 0xff;
@@ -813,7 +859,7 @@ fn a_maximal_entry_fits_far_below_the_entry_byte_cap() {
 
 #[test]
 fn the_system_budget_is_spent_in_stages_and_committed_without_finalize() {
-    let case = Case::at(EXPIRES_GENESIS);
+    let case = Case::at(INSTALLS_ONE);
     let bytes = case.update.to_bytes();
     let reference = case.with(|_| {}).unwrap();
     let after_open = reference.admission_gas + reference.open_gas_spent;

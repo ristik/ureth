@@ -241,7 +241,7 @@ where
         ComponentsBuilder::default()
             .node_types::<N>()
             .pool(EthereumPoolBuilder::default())
-            .executor(UnicityExecutorBuilder::new(self.execution_inputs.clone()))
+            .executor(UnicityExecutorBuilder::new(self.execution_inputs.clone(), self.seal.b1))
             .payload(BasicPayloadServiceBuilder::new(UnicityPayloadBuilderBuilder::new(
                 self.registry.clone(),
                 self.builder_config.clone(),
@@ -410,12 +410,14 @@ where
 #[derive(Clone, Debug)]
 pub struct UnicityExecutorBuilder {
     execution_inputs: UnicityBlockExecutionRegistry,
+    b1: B1Context,
 }
 
 impl UnicityExecutorBuilder {
-    /// Creates the builder from the registry shared with the import path.
-    pub const fn new(execution_inputs: UnicityBlockExecutionRegistry) -> Self {
-        Self { execution_inputs }
+    /// Creates the builder from the registry shared with the import path and the B1 bindings whose
+    /// deployment pins the certificate batch compares the registry against.
+    pub const fn new(execution_inputs: UnicityBlockExecutionRegistry, b1: B1Context) -> Self {
+        Self { execution_inputs, b1 }
     }
 }
 
@@ -427,7 +429,10 @@ where
     type EVM = UnicityNodeEvmConfig;
 
     async fn build_evm(self, ctx: &BuilderContext<Node>) -> eyre::Result<Self::EVM> {
-        Ok(UnicityNodeEvmConfig::new(unicity_eth_config(ctx.chain_spec()), self.execution_inputs))
+        Ok(UnicityNodeEvmConfig::new(
+            unicity_eth_config(ctx.chain_spec(), &self.b1),
+            self.execution_inputs,
+        ))
     }
 }
 
@@ -656,7 +661,8 @@ mod tests {
                     root_genesis_id: B256::repeat_byte(1),
                     execution_chain_id: 1337,
                     profile_hash: B256::repeat_byte(2),
-                    w_cert: 1,
+                    genesis_commitment: B256::repeat_byte(3),
+                    max_epochs: 2,
                     hook: Default::default(),
                 },
             },

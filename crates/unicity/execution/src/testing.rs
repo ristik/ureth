@@ -30,8 +30,8 @@ pub struct World {
     pub network: u16,
     /// Execution chain identifier.
     pub execution_chain_id: u64,
-    /// `W_cert`.
-    pub w_cert: u64,
+    /// `B`: epochs one block may install.
+    pub max_epochs_per_update: u64,
     /// Root genesis identity.
     pub root_genesis_id: B256,
     /// Registry runtime hash.
@@ -65,15 +65,28 @@ pub fn world() -> &'static World {
     WORLD.get_or_init(|| serde_json::from_str::<Vectors>(VECTORS).expect("vectors parse").world)
 }
 
+/// The registry's `genesisCommitment`, as the checked-in execution genesis allocates it.
+fn genesis_commitment() -> B256 {
+    static WORD: OnceLock<B256> = OnceLock::new();
+    *WORD.get_or_init(|| {
+        let word = genesis_db()
+            .storage(crate::SEAL_REGISTRY, reth_unicity_b1::fixed_slot("genesisCommitment"))
+            .expect("genesis storage");
+        assert!(!word.is_zero(), "the genesis allocates no genesis commitment");
+        B256::from(word.to_be_bytes::<32>())
+    })
+}
+
 /// The pinned bindings of the vector world.
 pub fn b1_context() -> B1Context {
     let w = world();
     B1Context {
+        genesis_commitment: genesis_commitment(),
         network: w.network,
         root_genesis_id: w.root_genesis_id,
         execution_chain_id: w.execution_chain_id,
         profile_hash: w.profile_hash,
-        w_cert: w.w_cert,
+        max_epochs: w.max_epochs_per_update,
         hook: Default::default(),
     }
 }
@@ -202,13 +215,10 @@ pub fn update_in(
     let first = tail.epoch + 1;
     let start_of = |epoch: u64| round - (target - epoch);
     assert!(start_of(first) > tail.start, "rotation does not fit the rounds");
-    let floor = round.saturating_sub(context.w_cert);
     update.old_tip_end = Some(start_of(first));
     for epoch in first..=target {
         let end = (epoch < target).then(|| start_of(epoch + 1));
-        if end.is_none_or(|end| end > floor) {
-            update.new_entries.push(entry(epoch, start_of(epoch), end, shape));
-        }
+        update.new_entries.push(entry(epoch, start_of(epoch), end, shape));
     }
     update
 }
