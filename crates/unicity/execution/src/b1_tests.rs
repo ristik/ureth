@@ -1314,3 +1314,120 @@ mod import {
         );
     }
 }
+
+/// A database that records which registry slots the executed transition reads and changes.
+struct Touched {
+    db: CacheDB<EmptyDB>,
+    read: std::collections::BTreeSet<U256>,
+    written: std::collections::BTreeSet<U256>,
+}
+
+impl revm::Database for Touched {
+    type Error = <CacheDB<EmptyDB> as revm::Database>::Error;
+    fn basic(
+        &mut self,
+        a: alloy_primitives::Address,
+    ) -> Result<Option<revm::state::AccountInfo>, Self::Error> {
+        self.db.basic(a)
+    }
+    fn code_by_hash(&mut self, h: B256) -> Result<revm::state::Bytecode, Self::Error> {
+        self.db.code_by_hash(h)
+    }
+    fn storage(&mut self, a: alloy_primitives::Address, k: U256) -> Result<U256, Self::Error> {
+        if a == SEAL_REGISTRY {
+            self.read.insert(k);
+        }
+        self.db.storage(a, k)
+    }
+    fn block_hash(&mut self, n: u64) -> Result<B256, Self::Error> {
+        self.db.block_hash(n)
+    }
+}
+
+impl revm::DatabaseCommit for Touched {
+    fn commit(&mut self, changes: alloy_primitives::map::AddressMap<revm::state::Account>) {
+        if let Some(account) = changes.get(&SEAL_REGISTRY) {
+            self.written.extend(
+                account.storage.iter().filter(|(_, slot)| slot.is_changed()).map(|(k, _)| *k),
+            );
+        }
+        self.db.commit(changes);
+    }
+}
+
+/// The permanent registry is addressed by epoch, so an update's work follows the update, not the
+/// history behind it: across the whole corpus progression, while the history grows, every step
+/// reads and writes only the fixed words and the entries at or above the previous imported tip.
+/// No older entry or member slot is touched, so the number of slots cannot grow with the history.
+#[test]
+fn an_update_touches_only_the_current_suffix_however_long_the_history_is() {
+    let v = vectors();
+    let mut db = testing::genesis_db();
+    let last = v.steps.last().unwrap().imported_tip + 2;
+    // Every entry and member slot of every epoch the progression can reach, by owning epoch.
+    let mut owner = BTreeMap::new();
+    for epoch in 0..=last {
+        for field in 0..16 {
+            owner.insert(reth_unicity_b1::entry_slot(epoch, field), epoch);
+        }
+        for index in 0..16 {
+            for field in 0..8 {
+                owner.insert(reth_unicity_b1::member_slot(epoch, index, field), epoch);
+            }
+        }
+    }
+    let mut table = Vec::new();
+    for step in &v.steps {
+        let input = RootInputV2::from_canonical_cbor(&hex(&step.root_input)).unwrap();
+        let bytes = hex(&step.update);
+        let old_tip = u64::try_from(word_u256(&db, "b1.importedTipEpoch")).unwrap();
+        let genesis = u64::try_from(word_u256(&db, "b1.genesisEpoch")).unwrap();
+        let mut touched =
+            Touched { db: db.clone(), read: Default::default(), written: Default::default() };
+        crate::execute_registry_transition_on_db(
+            &input,
+            UpdateInput {
+                bytes: &bytes,
+                records: &crate::testing::empty_import(),
+                parent_number: step.parent_number,
+            },
+            &mut touched,
+            config(world().system_gas),
+        )
+        .unwrap();
+        let history = old_tip - genesis + 1;
+        let (mut fixed, mut suffix) = (0usize, 0usize);
+        for slot in touched.read.iter().chain(touched.written.iter()) {
+            match owner.get(slot) {
+                Some(&epoch) => {
+                    assert!(
+                        epoch >= old_tip,
+                        "{}: slot of epoch {epoch} is below the previous tip {old_tip}",
+                        step.name
+                    );
+                    suffix += 1;
+                }
+                None => fixed += 1,
+            }
+        }
+        table.push((
+            history,
+            step.imported_tip - old_tip,
+            touched.read.len(),
+            touched.written.len(),
+        ));
+        eprintln!(
+            "{}: history {history}, installs {}, reads {}, writes {}, fixed-word touches {fixed}, suffix touches {suffix}",
+            step.name,
+            step.imported_tip - old_tip,
+            touched.read.len(),
+            touched.written.len()
+        );
+        db = touched.db;
+    }
+    assert!(table.first().unwrap().0 < table.last().unwrap().0, "the history must grow");
+    // Updates that install nothing cost the same slot reads whatever the history length.
+    let quiet: Vec<_> = table.iter().filter(|row| row.1 == 0).collect();
+    assert!(quiet.len() > 4 && quiet.last().unwrap().0 > quiet[0].0);
+    assert!(quiet.iter().all(|row| row.2 == quiet[0].2), "quiet reads vary: {quiet:?}");
+}
