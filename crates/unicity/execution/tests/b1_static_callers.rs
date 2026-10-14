@@ -1,6 +1,6 @@
 //! Actual STATICCALL callers of the B1 precompiles through the real EVM.
 //!
-//! Every request of bft-core's pinned conformance manifest (`go-4ba487e`, shared with the native
+//! Every request of bft-core's pinned conformance manifest (`go-b3reprice`, shared with the native
 //! kernel's tests) is sent by a contract executing `STATICCALL`, against an EVM created by
 //! [`UnicityEvmFactory`], with the manifest's registry pre-state written into the registry
 //! account's storage. The caller returns `success ++ returndata`, so the test sees exactly what a
@@ -23,7 +23,7 @@ use revm::{
 };
 use serde_json::Value;
 
-const MANIFEST: &str = include_str!("../../b1/tests/testdata/go-4ba487e.json");
+const MANIFEST: &str = include_str!("../../b1/tests/testdata/go-b3reprice.json");
 const SENDER: Address = address!("1000000000000000000000000000000000000001");
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
 const INTRINSIC: u64 = 21_000;

@@ -12,6 +12,10 @@ pub trait RegistryRead {
     /// Read a present value from the current journal, with normal warming.
     fn sload(&mut self, key: U256) -> Result<U256, Self::Error>;
 }
+/// The committee ceiling pinned in the profile (owner-decisions section 22): an epoch entry holds 1
+/// to 16 members. Admission refuses more, so a stored entry above it is an impossible admitted
+/// invariant.
+pub const MAX_MEMBERS: u64 = 16;
 /// Fresh fixed-word domain; no old layout fallback.
 pub fn fixed_slot(name: &str) -> U256 {
     U256::from_be_bytes(
@@ -114,7 +118,7 @@ pub(crate) fn entry<R: RegistryRead>(
         w[8].is_zero() ||
         (kind == 1) != w[3].is_zero() ||
         !matches!(scheme, 1 | 2) ||
-        !(1..=64).contains(&count) ||
+        !(1..=MAX_MEMBERS).contains(&count) ||
         has_end > 1 ||
         (has_end == 0 && end != 0) ||
         (has_end == 1 && end <= start)

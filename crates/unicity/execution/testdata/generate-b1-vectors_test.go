@@ -53,11 +53,11 @@ func three(w [3]uint64) []b1state.Member {
 	return []b1state.Member{{NodeID: "node-a", Key: memberKey("a"), Weight: w[0]}, {NodeID: "node-b", Key: memberKey("b"), Weight: w[1]}, {NodeID: "node-c", Key: memberKey("c"), Weight: w[2]}}
 }
 
-// wide has 64 members with maximal 128-byte identifiers sharing a 96-byte prefix.
+// wide has MaxMembers (16) members with maximal 128-byte identifiers sharing a 96-byte prefix.
 func wide() []b1state.Member {
 	prefix := strings.Repeat("p", 96)
 	var out []b1state.Member
-	for i := 0; i < 64; i++ {
+	for i := 0; i < b1state.MaxMembers; i++ {
 		out = append(out, b1state.Member{NodeID: prefix + fmt.Sprintf("%032d", i), Key: memberKey(fmt.Sprint("wide", i)), Weight: uint64(i + 1)})
 	}
 	return out

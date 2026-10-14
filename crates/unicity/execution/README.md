@@ -60,7 +60,7 @@ The system reservation `g_sys` is `G_admit + G_open + G_finalize`, all gross and
   parent ordinary-gas recovery and replay use the same gross total.
 
 A job is refused at binding time if `g_sys` is below the profile envelope
-`155936 + 15626944*K + G_rest(K)` or the ring exceeds the measured cap of 16.
+`155936 + 15626944*K + G_rest(K)` or the ring exceeds the measured cap of 31 (W_cert 30).
 
 ## Adapter
 

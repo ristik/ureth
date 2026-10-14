@@ -369,7 +369,8 @@ async fn add(pool: &TestPool, tx: TransactionSigned) {
 #[tokio::test]
 async fn real_pool_payload_resolves_prefix_skips_oversized_and_replays() {
     let genesis: Genesis =
-        serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
+        serde_json::from_str(include_str!("../../execution/testdata/signed-beacon-genesis.json"))
+            .unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
     let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash()));
     let mut state = FixtureProvider::signed_genesis();
@@ -902,7 +903,8 @@ fn consensus_rejects_a_block_level_timestamp_mutation_with_a_typed_error() {
 #[test]
 fn seal_job_registry_is_bounded_shared_and_reuses_identical_jobs() {
     let genesis: Genesis =
-        serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
+        serde_json::from_str(include_str!("../../execution/testdata/signed-beacon-genesis.json"))
+            .unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
     let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash()));
     let base = EthereumBuilderConfig::new()
@@ -980,7 +982,8 @@ fn seal_fixture() -> (
     UnicityEngineValidator,
 ) {
     let genesis: Genesis =
-        serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
+        serde_json::from_str(include_str!("../../execution/testdata/signed-beacon-genesis.json"))
+            .unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
     let validator = UnicityEngineValidator::new(chain_spec.clone());
     let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash()));
@@ -3714,7 +3717,7 @@ fn companion_pruning_failure_does_not_skip_accounting_pruning() {
 // genesis interval and inserts epoch 2. The genesis is the B1 genesis whose block 0 is the
 // acknowledgement's frozen parent.
 
-const GO_X2_GENESIS: &str = include_str!("../testdata/signed-beacon-genesis.json");
+const GO_X2_GENESIS: &str = include_str!("../../execution/testdata/signed-beacon-genesis.json");
 
 /// The acknowledgement vector this pair would be handed, built from the B1 world.
 fn go_x2_vector() -> serde_json::Value {

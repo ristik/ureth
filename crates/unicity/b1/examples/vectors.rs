@@ -343,8 +343,7 @@ fn add(out: &mut Vec<Value>, id: &str, ucs: &[Uc], valid: bool, weights: &[u64])
     let req = request(ucs);
     let sigs = ucs.iter().map(|u| u.seal.signers.len()).max().unwrap();
     let steps: usize = ucs.iter().map(|u| u.siblings.len() + u.steps.len()).sum();
-    let gas =
-        60000 + 16 * req.len() + 64000 + 6000 * sigs + 2000 * ucs.len() + 250 * steps + 1117700;
+    let gas = 60000 + 16 * req.len() + 16000 + 6000 * sigs + 2000 * ucs.len() + 250 * steps + 14700;
     let mut ret = [0; 64];
     ret[31] = 1;
     ret[63] = u8::from(valid);
@@ -463,7 +462,7 @@ fn emit(
             let mut ret = [0; 64];
             ret[31] = 1;
             ret[63] = u8::from(valid);
-            json!({"status":"ok","valid":valid,"output":hex(&ret),"gas":60000+16*req.len()+64000+6000*sigs+2000*n+250*paths+1117700})
+            json!({"status":"ok","valid":valid,"output":hex(&ret),"gas":60000+16*req.len()+16000+6000*sigs+2000*n+250*paths+14700})
         }
         None => json!({"status":"error"}),
     };
@@ -587,13 +586,13 @@ fn native_validity(out: &mut Vec<Value>) {
 
 fn supplemental(out: &mut Vec<Value>) {
     native_validity(out);
-    for (id, n) in [("quorum.max.exact", 43), ("quorum.max.short", 42), ("quorum.max.all", 64)] {
-        let seed = format!("{SEED}/64");
+    for (id, n) in [("quorum.max.exact", 11), ("quorum.max.short", 10), ("quorum.max.all", 16)] {
+        let seed = format!("{SEED}/16");
         let uc = build_seeded(&seed, "a", 990, (0..n).map(|i| format!("node{i:02}")).collect())
             [&(1, String::new())]
             .clone();
-        add(out, id, &[uc], n >= 43, &[1; 64]);
-        out.last_mut().unwrap()["preState"] = prestate_seeded(&seed, &[1; 64]);
+        add(out, id, &[uc], n >= 11, &[1; 16]);
+        out.last_mut().unwrap()["preState"] = prestate_seeded(&seed, &[1; 16]);
     }
     let q: Vec<_> = (0..3).map(|i| format!("node{i:02}")).collect();
     let cs = build("a", 990, q.clone());

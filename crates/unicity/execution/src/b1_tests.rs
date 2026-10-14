@@ -612,13 +612,13 @@ fn counts_and_sizes_are_bounded_before_anything_is_allocated() {
     let template = crowded.new_entries[0].clone();
     crowded.new_entries = (0..=k).map(|i| Entry { epoch: 3 + i, ..template.clone() }).collect();
     assert_eq!(admit_raw(&crowded.to_bytes(), &case).unwrap_err(), UpdateError::Encoding);
-    // An entry with no members, or with more than 64, is refused by the scan, not the semantics.
+    // An entry with no members, or with more than 16, is refused by the scan, not the semantics.
     let mut empty = case.update.clone();
     empty.new_entries[0].members.clear();
     assert_eq!(admit_raw(&empty.to_bytes(), &case).unwrap_err(), UpdateError::Encoding);
     let mut wide = case.update.clone();
     let member = wide.new_entries[0].members[0].clone();
-    wide.new_entries[0].members = vec![member; 65];
+    wide.new_entries[0].members = vec![member; 17];
     assert_eq!(admit_raw(&wide.to_bytes(), &case).unwrap_err(), UpdateError::Encoding);
     // Identifiers are 1..=128 bytes.
     let mut long = case.update.clone();
@@ -655,15 +655,19 @@ fn every_single_bit_mutation_is_refused_or_reencodes_to_exactly_itself() {
 
 #[test]
 fn an_unmeasured_ring_is_refused_never_truncated() {
-    let big = B1Context { w_cert: 16, ..testing::b1_context() };
-    assert_eq!(big.k_max(), Err(UpdateError::UnmeasuredRing(17)));
-    assert_eq!(big.required_system_gas(), Err(UpdateError::UnmeasuredRing(17)));
-    let edge = B1Context { w_cert: 15, ..testing::b1_context() };
-    assert_eq!(edge.k_max(), Ok(16));
+    let big = B1Context { w_cert: 31, ..testing::b1_context() };
+    assert_eq!(big.k_max(), Err(UpdateError::UnmeasuredRing(32)));
+    assert_eq!(big.required_system_gas(), Err(UpdateError::UnmeasuredRing(32)));
+    let edge = B1Context { w_cert: 30, ..testing::b1_context() };
+    assert_eq!(edge.k_max(), Ok(31));
     assert_eq!(
         edge.required_system_gas().unwrap(),
-        155_936 + 1_136_500 + (15_626_944 + 1_147_500) * 16 + crate::records::IMPORT_ENVELOPE_GAS
+        155_936 + 1_136_500 + (15_626_944 + 1_147_500) * 31 + crate::records::IMPORT_ENVELOPE_GAS
     );
+    // The B3 lane pin (W_cert 15, no hooks) and the W_cert 30 pin of owner-decisions section 23.
+    let lane = B1Context { w_cert: 15, ..testing::b1_context() };
+    assert_eq!(lane.required_system_gas().unwrap(), 287_979_684);
+    assert_eq!(edge.required_system_gas().unwrap(), 539_596_344);
     let overflow = B1Context { w_cert: u64::MAX, ..testing::b1_context() };
     assert_eq!(overflow.k_max(), Err(UpdateError::Overflow));
 }
@@ -791,14 +795,15 @@ fn the_scan_stage_refuses_invalid_utf8_before_the_member_debit() {
 
 #[test]
 fn a_maximal_entry_fits_far_below_the_entry_byte_cap() {
-    // 64 members with 128-byte identifiers and maximal weights: the cap needs no separate guard.
+    // 16 members (the ceiling) with 128-byte identifiers and maximal weights: the cap needs no
+    // separate guard.
     let case = Case::at(CLOSES_AND_INSERTS);
     let mut update = case.update.clone();
-    update.new_entries[0].members = (0..64)
+    update.new_entries[0].members = (0..crate::update::MAX_MEMBERS)
         .map(|i| crate::update::Member {
             node_id: format!("{}{i:032}", "p".repeat(96)),
             key: case.update.new_entries[0].members[0].key,
-            weight: u64::MAX / 64,
+            weight: u64::MAX / crate::update::MAX_MEMBERS,
         })
         .collect();
     let single = Update { new_entries: vec![update.new_entries[0].clone()], ..update.clone() };

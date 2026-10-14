@@ -106,7 +106,7 @@ fn time(mut f: impl FnMut()) -> (u128, u128, u128) {
 }
 fn main() {
     let manifest: Value =
-        serde_json::from_str(include_str!("../tests/testdata/go-4ba487e.json")).unwrap();
+        serde_json::from_str(include_str!("../tests/testdata/go-b3reprice.json")).unwrap();
     // References in the same binary.
     let sig = RecoverableSignature::from_compact(&[7u8; 64], RecoveryId::Zero).unwrap();
     let msg = Message::from_digest([9u8; 32]);

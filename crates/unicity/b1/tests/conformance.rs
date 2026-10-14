@@ -102,7 +102,7 @@ fn malformed(s: &str) -> Malformed {
     }
 }
 fn check_go_vectors(filter: Option<&str>) {
-    let manifest: Value = serde_json::from_str(include_str!("testdata/go-4ba487e.json")).unwrap();
+    let manifest: Value = serde_json::from_str(include_str!("testdata/go-b3reprice.json")).unwrap();
     let mut failures = Vec::new();
     for v in manifest["vectors"].as_array().unwrap() {
         let id = v["id"].as_str().unwrap();
@@ -143,7 +143,7 @@ fn check_go_vectors(filter: Option<&str>) {
 }
 
 fn fixture(id: &str) -> Value {
-    let m: Value = serde_json::from_str(include_str!("testdata/go-4ba487e.json")).unwrap();
+    let m: Value = serde_json::from_str(include_str!("testdata/go-b3reprice.json")).unwrap();
     m["vectors"].as_array().unwrap().iter().find(|v| v["id"] == id).unwrap().clone()
 }
 #[test]
@@ -427,7 +427,7 @@ mod generator;
 #[test]
 fn independently_constructed_requests_match_kernel_verdicts() {
     let generated = generator::generate();
-    let go: Value = serde_json::from_str(include_str!("testdata/go-4ba487e.json")).unwrap();
+    let go: Value = serde_json::from_str(include_str!("testdata/go-b3reprice.json")).unwrap();
     for v in generated["vectors"].as_array().unwrap() {
         let id = v["id"].as_str().unwrap();
         let op = match v["op"].as_str().unwrap() {
@@ -463,7 +463,9 @@ fn maximum_member_reads_and_unequal_seals_are_bounded() {
     let mut s = state(&v["preState"]);
     let input = hex(v["request"].as_str().unwrap());
     assert_eq!(run(Operation::Uc, &input, u64::MAX, &mut s).unwrap().bytes[63], 1);
-    assert_eq!(s.reads.len(), 531);
+    // A ceiling-sized call reads exactly the 147 words its price allows for (8 common, 11 epoch, 8
+    // per member of 16).
+    assert_eq!(s.reads.len(), 147);
     let v = fixture("cert.shared.sigcount-3-4.false");
     let mut s = state(&v["preState"]);
     let input = hex(v["request"].as_str().unwrap());
@@ -471,6 +473,75 @@ fn maximum_member_reads_and_unequal_seals_are_bounded() {
     assert_eq!(out.bytes[63], 0);
     assert_eq!(s.reads.len(), 8);
     assert_eq!(out.gas, v["expected"]["gas"].as_u64().unwrap());
+}
+
+/// The repriced charge (owner-decisions section 22): `90,700 + 16*bytes + 6000*sigs + 2000*claims +
+/// 250*steps`, from the request alone.
+#[test]
+fn the_charge_is_the_repriced_formula_at_four_and_sixteen_members() {
+    for (id, members, sigs, claims) in [
+        ("cert.single.ok", 4u64, 3u64, 1u64),
+        ("quorum.max.exact", 16, 11, 1),
+        ("quorum.max.all", 16, 16, 1),
+        ("cert.shared.max-8.ok", 4, 3, 8),
+    ] {
+        let v = fixture(id);
+        let input = hex(v["request"].as_str().unwrap());
+        let mut s = state(&v["preState"]);
+        let op = if claims == 1 { Operation::Uc } else { Operation::Shared };
+        let out = run(op, &input, u64::MAX, &mut s).unwrap();
+        // Path steps are what is left after the fixed terms: they are a whole number of 250s.
+        let rest = out.gas - (90_700 + 16 * input.len() as u64 + 6000 * sigs + 2000 * claims);
+        assert_eq!(rest % 250, 0, "{id} ({members} members)");
+        assert!(rest / 250 <= 2304, "{id}");
+        assert_eq!(out.gas, v["expected"]["gas"].as_u64().unwrap(), "{id}");
+    }
+    // Pinned values: the lane's three-signature UC and the sixteen-member maximum.
+    let v = fixture("cert.single.ok");
+    assert_eq!(v["expected"]["gas"].as_u64().unwrap(), 123_738);
+    let v = fixture("cert.shared.max-8.ok");
+    assert_eq!(v["expected"]["gas"].as_u64().unwrap(), 229_318);
+}
+
+/// The price never depends on warmth, on a previous call, or on the verdict: the same request costs
+/// the same on a fresh state, on a state whose every registry word has just been read, and when the
+/// relation is false.
+#[test]
+fn the_charge_does_not_depend_on_warmth_or_verdict() {
+    let v = fixture("quorum.max.exact");
+    let input = hex(v["request"].as_str().unwrap());
+    let mut cold = state(&v["preState"]);
+    let first = run(Operation::Uc, &input, u64::MAX, &mut cold).unwrap();
+    let second = run(Operation::Uc, &input, u64::MAX, &mut cold).unwrap();
+    assert_eq!(first.gas, second.gas);
+    assert_eq!(cold.reads.len(), 2 * 147);
+    let short = fixture("quorum.max.short");
+    let mut s = state(&short["preState"]);
+    let false_call =
+        run(Operation::Uc, &hex(short["request"].as_str().unwrap()), u64::MAX, &mut s).unwrap();
+    assert_eq!(false_call.bytes[63], 0);
+    assert_eq!(false_call.gas, short["expected"]["gas"].as_u64().unwrap());
+    // 16 signatures cost 5 * 6000 more than 11, plus their bytes: only the request-dependent terms
+    // move.
+    assert!(false_call.gas < first.gas);
+}
+
+/// A committee above the profile ceiling is an impossible admitted state (admission refuses it):
+/// the call has no EVM result.
+#[test]
+fn an_entry_above_the_member_ceiling_is_refused() {
+    let v = fixture("quorum.max.all");
+    let input = hex(v["request"].as_str().unwrap());
+    let mut s = state(&v["preState"]);
+    let epoch = v["preState"]["epochs"][0]["epoch"].as_u64().unwrap();
+    s.words.insert(entry_slot(epoch, 9), U256::from(17));
+    assert_eq!(run(Operation::Uc, &input, u64::MAX, &mut s), Err(Error::Registry));
+    let mut s = state(&v["preState"]);
+    s.words.insert(entry_slot(epoch, 9), U256::from(0));
+    assert_eq!(run(Operation::Uc, &input, u64::MAX, &mut s), Err(Error::Registry));
+    // exactly the ceiling is fine
+    let mut s = state(&v["preState"]);
+    assert_eq!(run(Operation::Uc, &input, u64::MAX, &mut s).unwrap().bytes[63], 1);
 }
 
 macro_rules! vector_tests { ($($name:ident => $id:literal,)*) => { $(#[test] fn $name() { check_go_vectors(Some($id)); })* }; }

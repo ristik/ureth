@@ -8,7 +8,7 @@ pub mod provider;
 mod registry;
 mod rsmt;
 
-pub use registry::{entry_slot, fixed_slot, member_slot, RegistryRead, REGISTRY};
+pub use registry::{entry_slot, fixed_slot, member_slot, RegistryRead, MAX_MEMBERS, REGISTRY};
 use sha2::{Digest, Sha256};
 
 /// Caller failures are exceptional halts, never execution/host errors.

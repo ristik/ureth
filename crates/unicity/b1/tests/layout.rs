@@ -69,7 +69,7 @@ fn entry(epoch: u64, start: u64, weight: u64) -> BTreeMap<String, String> {
 #[test]
 fn every_genesis_member_and_changed_entry_word_matches_go() {
     let go: Value =
-        serde_json::from_str(include_str!("testdata/go-projection-4ba487e.json")).unwrap();
+        serde_json::from_str(include_str!("testdata/go-projection-b3reprice.json")).unwrap();
     for (epoch, start, weight, field) in [(0, 7, 1, "genesisWords"), (2, 9, 7, "changedWords")] {
         for (k, v) in entry(epoch, start, weight) {
             assert_eq!(go[field][k], v, "epoch {epoch}");
