@@ -17,10 +17,10 @@ fn head(r: &mut Reader<'_>) -> Result<(u8, u64), Malformed> {
         24..=27 => r.uint(1 << (ai - 24))?,
         _ => return Err(Malformed::Cbor),
     };
-    if (ai == 24 && n < 24)
-        || (ai == 25 && n <= 255)
-        || (ai == 26 && n <= 65535)
-        || (ai == 27 && n <= u64::from(u32::MAX))
+    if (ai == 24 && n < 24) ||
+        (ai == 25 && n <= 255) ||
+        (ai == 26 && n <= 65535) ||
+        (ai == 27 && n <= u64::from(u32::MAX))
     {
         return Err(Malformed::Canonical);
     }

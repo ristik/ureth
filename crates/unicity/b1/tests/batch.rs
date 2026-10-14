@@ -8,7 +8,13 @@ use reth_unicity_b1::{
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-const PINS: Pins = Pins { genesis_commitment: U256::from_limbs([1, 0, 0, 0]), profile_hash: U256::from_limbs([2, 0, 0, 0]) };
+#[path = "support/uc.rs"]
+mod uc;
+
+const PINS: Pins = Pins {
+    genesis_commitment: U256::from_limbs([1, 0, 0, 0]),
+    profile_hash: U256::from_limbs([2, 0, 0, 0]),
+};
 
 fn hex(s: &str) -> Vec<u8> {
     s.as_bytes()
@@ -77,19 +83,7 @@ fn members(id: &str) -> Vec<Member<'static>> {
 }
 fn put_epoch(s: &mut State, epoch: u64, start: u64, end: u64, ms: &[Member<'_>]) {
     let total: u64 = ms.iter().map(|m| m.weight).sum();
-    let fields = [
-        1,
-        2,
-        0xb0d1,
-        3,
-        start,
-        end,
-        u64::from(end != 0),
-        1,
-        4,
-        ms.len() as u64,
-        total,
-    ];
+    let fields = [1, 2, 0xb0d1, 3, start, end, u64::from(end != 0), 1, 4, ms.len() as u64, total];
     for (f, w) in fields.into_iter().enumerate() {
         s.words.insert(entry_slot(epoch, f as u64), U256::from(w));
     }
@@ -160,7 +154,15 @@ fn a_single_claim_and_a_shared_batch_verify_with_the_exact_counters() {
     assert_eq!(out.gas, d.gas());
     assert_eq!(
         c,
-        Counters { epoch_loads: 1, key_parses: 4, quorums: 1, signatures: 3, claims: 1, folds: 1, reads: 11 + 11 + 32 }
+        Counters {
+            epoch_loads: 1,
+            key_parses: 4,
+            quorums: 1,
+            signatures: 3,
+            claims: 1,
+            folds: 1,
+            reads: 11 + 11 + 32
+        }
     );
 
     let shared = claims("cert.shared.ok");
@@ -410,7 +412,10 @@ fn impossible_registry_state_is_an_infrastructure_error_never_a_verdict() {
             Err("down")
         }
     }
-    assert_eq!(batch::run(&request(&one), u64::MAX, &PINS, &mut Down, None), Err(Error::Host("down")));
+    assert_eq!(
+        batch::run(&request(&one), u64::MAX, &PINS, &mut Down, None),
+        Err(Error::Host("down"))
+    );
 }
 
 #[test]
@@ -422,4 +427,85 @@ fn a_mixed_batch_checks_the_required_entries_for_corruption_before_any_false() {
     let mut s = registry(7, 7, &ms);
     s.words.insert(member_slot(7, 0, 7), U256::ZERO);
     assert_eq!(go(&a, &mut s).0, Err(Error::Registry));
+}
+
+/// Registry epochs `g..=u` of `n` members each (ids `mNN`, keys of `uc::Signer`), epoch `e` live
+/// from `900 + 10*(e-g)`, the last open, root round `round`.
+fn own_registry(g: u64, u: u64, signers: &[uc::Signer], round: u64) -> State {
+    let ms: Vec<Member<'_>> = signers
+        .iter()
+        .map(|s| Member {
+            id: Box::leak(s.id.clone().into_boxed_str()),
+            key: s.public().to_vec(),
+            weight: 1,
+        })
+        .collect();
+    let mut st = registry(g, u, &ms[..1]);
+    for e in g..=u {
+        let start = 900 + 10 * (e - g);
+        put_epoch(&mut st, e, start, if e == u { 0 } else { start + 10 }, &ms);
+    }
+    st.words.insert(fixed_slot("clock.rootRound"), U256::from(round));
+    st
+}
+fn signers(n: usize) -> Vec<uc::Signer> {
+    (0..n).map(|i| uc::Signer::new(&format!("m{i:02}"), i as u64 + 1)).collect()
+}
+
+#[test]
+fn certificates_of_many_epochs_verify_in_one_call_with_one_load_per_epoch() {
+    let base = claims("cert.single.ok").remove(0);
+    let sg = signers(4);
+    let all: Vec<&uc::Signer> = sg.iter().collect();
+    // Epochs 5, 6 and 7 (7 open): rounds 905, 915 and 985.
+    let parts: Vec<Vec<u8>> = [(5, 905), (6, 915), (7, 985)]
+        .iter()
+        .map(|&(e, r)| uc::reseal(&base, e, r, &all, |_| {}))
+        .collect();
+    let d = batch::dimensions(&request(&parts)).unwrap();
+    assert_eq!((d.k, d.e, d.s, d.a, d.q), (3, 3, 3, 3, 12));
+    let mut st = own_registry(5, 7, &sg, 1000);
+    let (out, c) = ok(&parts, &mut st);
+    assert!(verdict(&out));
+    assert_eq!(out.gas, d.gas());
+    assert_eq!((c.epoch_loads, c.key_parses, c.quorums, c.signatures, c.claims), (3, 12, 3, 12, 3));
+    // The order of the occurrences changes nothing.
+    let mut shuffled = parts.clone();
+    shuffled.swap(0, 2);
+    let (again, _) = ok(&shuffled, &mut own_registry(5, 7, &sg, 1000));
+    assert_eq!((verdict(&again), again.gas), (true, out.gas));
+    // An epoch below genesis among them: false, still the full charge, the required entries read.
+    let mut st = own_registry(6, 7, &sg, 1000);
+    let (out2, c2) = ok(&parts, &mut st);
+    assert!(!verdict(&out2));
+    assert_eq!(out2.gas, out.gas);
+    assert_eq!(c2.epoch_loads, 2);
+    // A missing installed epoch inside [g,U] that a claim names is an infrastructure error.
+    let mut st = own_registry(5, 7, &sg, 1000);
+    st.words.insert(entry_slot(6, 0), U256::ZERO);
+    assert_eq!(go(&parts, &mut st).0, Err(Error::Registry));
+}
+
+#[test]
+fn a_seal_outside_its_epochs_interval_or_with_a_short_quorum_is_false_at_the_same_charge() {
+    let base = claims("cert.single.ok").remove(0);
+    let sg = signers(4);
+    let all: Vec<&uc::Signer> = sg.iter().collect();
+    let good = uc::reseal(&base, 5, 905, &all, |_| {});
+    let (ok_out, _) = ok(&[good.clone()], &mut own_registry(5, 6, &sg, 1000));
+    assert!(verdict(&ok_out));
+    // Round 912 is past epoch 5's end (910).
+    let late = uc::reseal(&base, 5, 912, &all, |_| {});
+    let (o, _) = ok(&[late], &mut own_registry(5, 6, &sg, 1000));
+    assert!(!verdict(&o));
+    // Two of four signers: below the quorum of three.
+    let two = uc::reseal(&base, 5, 905, &all[..2], |_| {});
+    let (o, c) = ok(&[two], &mut own_registry(5, 6, &sg, 1000));
+    assert!(!verdict(&o));
+    assert_eq!(c.signatures, 2);
+    // One damaged signature among four valid ones: the seal fails though three would be a quorum.
+    let bad = uc::reseal(&base, 5, 905, &all, |s| s[3][10] ^= 1);
+    let (o, c) = ok(&[bad], &mut own_registry(5, 6, &sg, 1000));
+    assert!(!verdict(&o));
+    assert_eq!(c.signatures, 4);
 }

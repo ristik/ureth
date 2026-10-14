@@ -68,11 +68,11 @@ pub(crate) fn common<R: RegistryRead>(r: &mut R) -> Result<Common, Error<R::Erro
     }
     let phase = small(w[1])?;
     let network = small(w[3])?;
-    if w[0].is_zero()
-        || w[5].is_zero()
-        || w[2] != U256::from(1)
-        || !matches!(phase, 1 | 2)
-        || network > u64::from(u16::MAX)
+    if w[0].is_zero() ||
+        w[5].is_zero() ||
+        w[2] != U256::from(1) ||
+        !matches!(phase, 1 | 2) ||
+        network > u64::from(u16::MAX)
     {
         return Err(Error::Registry);
     }
@@ -112,16 +112,16 @@ pub(crate) fn entry<R: RegistryRead>(
     let scheme = small(w[7])?;
     let count = small(w[9])?;
     let total = small(w[10])?;
-    if w[0] != U256::from(1)
-        || !(1..=3).contains(&kind)
-        || w[2].is_zero()
-        || w[8].is_zero()
-        || (kind == 1) != w[3].is_zero()
-        || !matches!(scheme, 1 | 2)
-        || !(1..=MAX_MEMBERS).contains(&count)
-        || has_end > 1
-        || (has_end == 0 && end != 0)
-        || (has_end == 1 && end <= start)
+    if w[0] != U256::from(1) ||
+        !(1..=3).contains(&kind) ||
+        w[2].is_zero() ||
+        w[8].is_zero() ||
+        (kind == 1) != w[3].is_zero() ||
+        !matches!(scheme, 1 | 2) ||
+        !(1..=MAX_MEMBERS).contains(&count) ||
+        has_end > 1 ||
+        (has_end == 0 && end != 0) ||
+        (has_end == 1 && end <= start)
     {
         return Err(Error::Registry);
     }
@@ -149,9 +149,9 @@ pub(crate) fn entry<R: RegistryRead>(
         key[32] = m[6][0];
         let key = PublicKey::from_slice(&key).map_err(|_| Error::Registry)?;
         let weight = small(U256::from_be_bytes(m[7]))?;
-        if weight == 0
-            || members.last().is_some_and(|prev| prev.id >= id)
-            || members.iter().any(|prev| prev.key == key)
+        if weight == 0 ||
+            members.last().is_some_and(|prev| prev.id >= id) ||
+            members.iter().any(|prev| prev.key == key)
         {
             return Err(Error::Registry);
         }

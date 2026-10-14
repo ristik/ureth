@@ -95,9 +95,9 @@ fn malformed(s: &str) -> Malformed {
         "ErrShape" | "ErrRSMTLength" => Malformed::Shape,
         "ErrShardEncoding" | "ErrShardTooDeep" => Malformed::Shard,
         "ErrSigFormat" => Malformed::Signature,
-        "ErrInputTooLarge" | "ErrUCTooLarge" | "ErrTooManySigs" | "ErrNodeIDTooLong"
-        | "ErrTooManySiblings" | "ErrTooManySteps" | "ErrDepth" | "ErrSummaryTooLong"
-        | "ErrValueTooLarge" => Malformed::Limit,
+        "ErrInputTooLarge" | "ErrUCTooLarge" | "ErrTooManySigs" | "ErrNodeIDTooLong" |
+        "ErrTooManySiblings" | "ErrTooManySteps" | "ErrDepth" | "ErrSummaryTooLong" |
+        "ErrValueTooLarge" => Malformed::Limit,
         s => panic!("unknown error {s}"),
     }
 }
