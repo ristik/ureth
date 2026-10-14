@@ -4,7 +4,7 @@
 //! parent. This module never repeats that authentication. It checks everything Rust can check by
 //! itself before any execution: canonical bounded bytes, the committed bindings (profile, parent,
 //! height, origin), and the interval and member invariants of the entries that the registry will
-//! store. State-dependent queue and coverage checks run in the metered registry call.
+//! store. State-dependent append, closure and origin checks run in the metered registry call.
 //!
 //! Admission follows the design's staged order. The outer byte cap and the scan charge
 //! `2000 + 16*C` are checked before the bytes are looked at. An allocation-free structural scan
@@ -35,12 +35,28 @@ pub const SCAN_BASE_GAS: u64 = 2000;
 pub const SCAN_BYTE_GAS: u64 = 16;
 /// Charge per member of the update, reserved before member allocation.
 pub const MEMBER_GAS: u64 = 1000;
-/// Measured-plus-margin `G_rest` constant term (contracts PR 6, to be re-measured here).
-pub const REST_GAS_BASE: u64 = 1_136_500;
-/// Measured-plus-margin `G_rest` term per ring slot.
-pub const REST_GAS_PER_ENTRY: u64 = 1_147_500;
-/// Largest measured ring size (`W_cert` 30). A larger profile is refused, never truncated.
-pub const MAX_MEASURED_K: u64 = 31;
+/// Fixed admission and finalize reservation of an update.
+pub const UPDATE_GAS_BASE: u64 = 155_936;
+/// Per-epoch fixed part of the write allowance: admission scan and member debit, authentication,
+/// the predecessor closure and the cursor writes.
+pub const EPOCH_GAS_FIXED: u64 = 505_244;
+/// Per-member part of the write allowance of one installed epoch (the full 11 + 8N word entry).
+pub const EPOCH_GAS_PER_MEMBER: u64 = 177_800;
+/// The reservation of one installed entry at the committee ceiling. The registry keeps every
+/// entry forever, so there is no deletion term.
+pub const EPOCH_GAS: u64 = EPOCH_GAS_FIXED + EPOCH_GAS_PER_MEMBER * MAX_MEMBERS;
+/// `G_rest` constant term of the permanent registry runtime (contracts `registry/permanent-layout`;
+/// re-measured under this client by `b1_profile`).
+pub const REST_GAS_BASE: u64 = 1_150_000;
+/// `G_rest` term per installed epoch.
+pub const REST_GAS_PER_EPOCH: u64 = 250_000;
+/// Largest epoch count per update the runtime's `G_rest` was measured for. A larger profile is
+/// refused, never truncated.
+pub const MAX_MEASURED_B: u64 = 2;
+/// The least `B` a profile may carry: the acknowledgement block of a supersession installs every
+/// epoch the root moved past the frozen parent, and the root refuses a longer unacknowledged chain
+/// than `MaxSupersessionSpan` (2).
+pub const MIN_EPOCHS_PER_UPDATE: u64 = 2;
 
 /// Local profile bindings every update must carry. All values come from the node's pinned genesis
 /// profile, never from the update itself.
@@ -54,45 +70,47 @@ pub struct B1Context {
     pub execution_chain_id: u64,
     /// `SHA-256` of the complete execution profile, equal to the registry's `b1.profileHash`.
     pub profile_hash: B256,
-    /// Certificate window `W_cert`.
-    pub w_cert: u64,
+    /// `B`: the most validator epochs one execution block may install, across all update calls.
+    pub max_epochs: u64,
     /// The mandatory records hook the profile pins (no custody: no hook).
     pub hook: crate::hook::RecordsHook,
 }
 
 impl B1Context {
-    /// Ring size `K_max = W_cert + 1`, refused above the measured cap.
-    pub fn k_max(&self) -> Result<u64, UpdateError> {
-        let k = self.w_cert.checked_add(1).ok_or(UpdateError::Overflow)?;
-        if k > MAX_MEASURED_K {
-            return Err(UpdateError::UnmeasuredRing(k));
+    /// `B`, refused outside the measured envelope `[MIN_EPOCHS_PER_UPDATE, MAX_MEASURED_B]`.
+    pub fn b(&self) -> Result<u64, UpdateError> {
+        if self.max_epochs < MIN_EPOCHS_PER_UPDATE {
+            return Err(UpdateError::EpochsBelowSpan(self.max_epochs));
         }
-        Ok(k)
+        if self.max_epochs > MAX_MEASURED_B {
+            return Err(UpdateError::UnmeasuredEpochs(self.max_epochs));
+        }
+        Ok(self.max_epochs)
     }
 
-    /// Canonical byte cap `C_max = 4096 + 16384*K_max`.
+    /// Canonical byte cap `C_max = 4096 + 16384*B`.
     pub fn max_update_bytes(&self) -> Result<u64, UpdateError> {
-        Ok(4096 + MAX_ENTRY_BYTES as u64 * self.k_max()?)
+        Ok(4096 + MAX_ENTRY_BYTES as u64 * self.b()?)
     }
 
-    /// The least `g_sys` the pinned profile admits: the maximum admission charge, the rectangular
-    /// gross history-write allowance and the measured-plus-margin `G_rest(K_max)` of the registry
-    /// runtime, `155936 + 15626944*K + 1136500 + 1147500*K`, plus the root-record import envelope
-    /// (`records::IMPORT_ENVELOPE_GAS`) and the records hook's envelope. A smaller reservation is
-    /// refused at startup, never truncated at runtime.
+    /// The least `g_sys` the pinned profile admits: the admission base, the per-epoch gross write
+    /// allowance at the committee ceiling, the measured `G_rest(B)` of the registry runtime, the
+    /// root-record import envelope (`records::IMPORT_ENVELOPE_GAS`) and the records hook's
+    /// envelope: `155936 + 3350044*B + 1150000 + 250000*B + import + hook`. A smaller reservation
+    /// is refused at startup, never truncated at runtime.
     pub fn required_system_gas(&self) -> Result<u64, UpdateError> {
-        let k = self.k_max()?;
+        let b = self.b()?;
         let hook = self.hook.envelope_gas().map_err(|_| UpdateError::Overflow)?;
-        Ok(155_936 +
+        Ok(UPDATE_GAS_BASE +
             REST_GAS_BASE +
-            (15_626_944 + REST_GAS_PER_ENTRY) * k +
+            (EPOCH_GAS + REST_GAS_PER_EPOCH) * b +
             crate::records::IMPORT_ENVELOPE_GAS +
             hook)
     }
 
-    /// Token cap `32 + 266*K_max`.
+    /// Token cap `32 + 266*B`.
     pub fn max_tokens(&self) -> Result<u64, UpdateError> {
-        Ok(32 + 266 * self.k_max()?)
+        Ok(32 + 266 * self.b()?)
     }
 }
 
@@ -155,15 +173,17 @@ pub struct Update {
     pub prior_tip_epoch: u64,
     /// Actual end of the former tip, present iff there are new entries.
     pub old_tip_end: Option<u64>,
-    /// Newer epochs surviving the target window, in increasing epoch order.
+    /// The newer epochs, in increasing epoch order, at most `B`.
     pub new_entries: Vec<Entry>,
 }
 
 /// Named refusal. The scan and debit variants reject the block; none is a caller verdict.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UpdateError {
-    /// The profile ring exceeds the measured cap.
-    UnmeasuredRing(u64),
+    /// `B` exceeds the measured cap.
+    UnmeasuredEpochs(u64),
+    /// `B` is below the supersession span an acknowledgement block must be able to import.
+    EpochsBelowSpan(u64),
     /// A checked size or gas computation overflowed.
     Overflow,
     /// The update is longer than `C_max`.
@@ -221,8 +241,8 @@ pub enum UpdateError {
     EpochNotNewer,
     /// A new entry starts after the origin round.
     StartAfterOrigin,
-    /// A closed new entry ends at or below the window floor, or after the origin.
-    EndOutsideWindow,
+    /// A closed new entry ends after the origin.
+    EndAfterOrigin,
     /// New entries are not consecutive epochs with end equal to the next start.
     NotContiguous,
     /// `oldTipEnd` is missing, exceeds the first start, or is not that start for the next epoch.
@@ -237,11 +257,6 @@ impl From<UpdateError> for ExecutionError {
     fn from(error: UpdateError) -> Self {
         Self::B1Update(error)
     }
-}
-
-/// Window floor `L = max(0, O - W)`.
-pub const fn window_floor(origin: u64, w_cert: u64) -> u64 {
-    origin.saturating_sub(w_cert)
 }
 
 fn head(out: &mut Vec<u8>, major: u8, value: u64) {
@@ -583,7 +598,7 @@ pub fn admit(
     binding: &UpdateBinding,
     budget: u64,
 ) -> Result<Admitted, UpdateError> {
-    let k = context.k_max()?;
+    let k = context.b()?;
     let cap = context.max_update_bytes()?;
     if raw.len() as u64 > cap {
         return Err(UpdateError::TooLarge { len: raw.len(), limit: cap });
@@ -608,7 +623,7 @@ pub fn admit(
         return Err(UpdateError::UpdateHashMismatch);
     }
     check_bindings(&update, context, binding)?;
-    check_entries(&update, context)?;
+    check_entries(&update)?;
     Ok(Admitted { update, gas })
 }
 
@@ -643,8 +658,7 @@ fn check_bindings(u: &Update, c: &B1Context, b: &UpdateBinding) -> Result<(), Up
     Ok(())
 }
 
-fn check_entries(u: &Update, c: &B1Context) -> Result<(), UpdateError> {
-    let floor = window_floor(u.origin_round, c.w_cert);
+fn check_entries(u: &Update) -> Result<(), UpdateError> {
     for (i, e) in u.new_entries.iter().enumerate() {
         e.validate()?;
         if e.body_kind == 1 {
@@ -656,8 +670,8 @@ fn check_entries(u: &Update, c: &B1Context) -> Result<(), UpdateError> {
         if e.start > u.origin_round {
             return Err(UpdateError::StartAfterOrigin);
         }
-        if e.end.is_some_and(|end| end <= floor || end > u.origin_round) {
-            return Err(UpdateError::EndOutsideWindow);
+        if e.end.is_some_and(|end| end > u.origin_round) {
+            return Err(UpdateError::EndAfterOrigin);
         }
         if i > 0 {
             let prev = &u.new_entries[i - 1];

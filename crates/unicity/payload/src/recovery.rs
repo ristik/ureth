@@ -470,7 +470,7 @@ mod tests {
                     root_genesis_id: B256::repeat_byte(1),
                     execution_chain_id: 1337,
                     profile_hash: B256::repeat_byte(2),
-                    w_cert: 1,
+                    max_epochs: 2,
                     hook: Default::default(),
                 },
             },
