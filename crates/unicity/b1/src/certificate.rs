@@ -155,13 +155,13 @@ pub(crate) fn scan(input: &[u8], shared: bool) -> Result<Call<'_>, Malformed> {
     }
     Ok(Call {
         claims,
-        gas: 60000
-            + 16 * input.len() as u64
-            + MEMBER_ALLOWANCE
-            + 6000 * max_sigs
-            + 2000 * count as u64
-            + 250 * paths
-            + READ_ALLOWANCE,
+        gas: 60000 +
+            16 * input.len() as u64 +
+            MEMBER_ALLOWANCE +
+            6000 * max_sigs +
+            2000 * count as u64 +
+            250 * paths +
+            READ_ALLOWANCE,
     })
 }
 
@@ -200,20 +200,20 @@ pub(crate) fn evaluate<R: RegistryRead>(
 pub(crate) fn folds(c: &Claim<'_>) -> bool {
     let ir = c.ir.tagged::<10>(39002).expect("scanned IR");
     let sf = c.seal_fields;
-    if (ir[1].arg != 0 && (ir[5].null() || ir[6].arg == 0))
-        || ((ir[3].data == ir[4].data) == !ir[7].null())
-        || sf[2].arg == 0
-        || sf[4].arg < 1681971084
-        || sf[7].null()
-        || sf[7].arg == 0
+    if (ir[1].arg != 0 && (ir[5].null() || ir[6].arg == 0)) ||
+        ((ir[3].data == ir[4].data) == !ir[7].null()) ||
+        sf[2].arg == 0 ||
+        sf[4].arg < 1681971084 ||
+        sf[7].null() ||
+        sf[7].arg == 0
     {
         return false;
     }
-    if c.tree_cert[1].arg != u64::from(c.partition)
-        || c.shard_cert[1].data != c.shard
-        || c.conf.data != c.config
-        || ir[4].data != c.state
-        || hash(&[c.ir.raw]) != c.ir_hash
+    if c.tree_cert[1].arg != u64::from(c.partition) ||
+        c.shard_cert[1].data != c.shard ||
+        c.conf.data != c.config ||
+        ir[4].data != c.state ||
+        hash(&[c.ir.raw]) != c.ir_hash
     {
         return false;
     }
@@ -252,13 +252,13 @@ fn seal_valid(c: Claim<'_>, common: &registry::Common, entry: Option<&registry::
         return false;
     };
     let r = s[2].arg;
-    if s[1].arg != common.network
-        || s[3].arg > common.origin
-        || r < e.start
-        || e.end.is_some_and(|end| r >= end)
-        || (e.end.is_none() && s[3].arg != common.origin)
-        || r > common.round
-        || common.round - r > common.window
+    if s[1].arg != common.network ||
+        s[3].arg > common.origin ||
+        r < e.start ||
+        e.end.is_some_and(|end| r >= end) ||
+        (e.end.is_none() && s[3].arg != common.origin) ||
+        r > common.round ||
+        common.round - r > common.window
     {
         return false;
     }

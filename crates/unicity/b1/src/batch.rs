@@ -12,6 +12,9 @@ use crate::{
 use secp256k1::{ecdsa::Signature, Message, Secp256k1};
 
 pub use crate::Output;
+
+/// The reserved call address of `CERT_BATCH_V2`.
+pub const ADDRESS: alloy_primitives::Address = crate::Operation::Uc.address();
 use crate::Output as Out;
 
 /// Largest accepted request, in bytes.
@@ -164,15 +167,8 @@ fn scan(input: &[u8], gas: u64) -> Result<Scanned<'_>, Error<core::convert::Infa
     if q > MAX_SIGNATURES {
         return Err(Malformed::Limit.into());
     }
-    let dims = Dimensions {
-        c,
-        k: k as u64,
-        e: epochs.len() as u64,
-        s: seals.len() as u64,
-        q,
-        a,
-        p,
-    };
+    let dims =
+        Dimensions { c, k: k as u64, e: epochs.len() as u64, s: seals.len() as u64, q, a, p };
     Ok(Scanned { claims, packed, dims })
 }
 
