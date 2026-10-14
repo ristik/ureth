@@ -57,6 +57,10 @@ pub const MAX_MEASURED_B: u64 = 2;
 /// epoch the root moved past the frozen parent, and the root refuses a longer unacknowledged chain
 /// than `MaxSupersessionSpan` (2).
 pub const MIN_EPOCHS_PER_UPDATE: u64 = 2;
+// Raising the supersession span alone must not compile: an acknowledgement block installs up to
+// that many epochs, so `B` has to cover it (the Go twin is `b1state.MinEpochsPerUpdate -
+// MaxSupersessionSpan` in `handoff/evm_transition.go`).
+const _: () = assert!(MIN_EPOCHS_PER_UPDATE >= crate::wire::MAX_SUPERSESSION_SPAN);
 
 /// Local profile bindings every update must carry. All values come from the node's pinned genesis
 /// profile, never from the update itself.

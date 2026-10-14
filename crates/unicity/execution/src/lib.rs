@@ -714,6 +714,20 @@ where
             return Err(ExecutionError::B1ProfileMismatch(what));
         }
     }
+    // No preload mode: a ready parent's usable origin is its imported tip. Anything else is
+    // registry corruption, refused here and never healed by the update that follows.
+    let ready =
+        storage(B256::from(reth_unicity_b1::fixed_slot("b1.originReady").to_be_bytes::<32>()))?;
+    let usable =
+        storage(B256::from(reth_unicity_b1::fixed_slot("origin.rootEpoch").to_be_bytes::<32>()))?;
+    let imported = storage(B256::from(
+        reth_unicity_b1::fixed_slot("b1.importedTipEpoch").to_be_bytes::<32>(),
+    ))?;
+    if ready == U256::from(1) && usable != imported {
+        return Err(ExecutionError::B1ProfileMismatch(
+            "B1 registry usable origin differs from its imported tip",
+        ));
+    }
     let assigned = storage(ASSIGNMENT_ROOT_EPOCH_SLOT)?;
     let assigned_shard = storage(ASSIGNMENT_EPOCH_SLOT)?;
     let assigned_active = storage(ASSIGNMENT_ACTIVE_CONF_HASH_SLOT)?;

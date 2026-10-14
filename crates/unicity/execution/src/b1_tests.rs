@@ -675,6 +675,55 @@ fn the_registry_refuses_what_only_its_own_state_can_show() {
 }
 
 #[test]
+fn an_update_that_would_leave_the_usable_origin_behind_the_imported_tip_is_refused_at_admission() {
+    // Layer 1, state-free admission: the tail of a non-empty update must be the open origin epoch,
+    // so no admitted update can leave a ready registry with I_after != U_new. Dropping the last
+    // entry of the two-epoch supersession leaves the imported tip one epoch behind the origin.
+    let case = Case::at(SUPERSESSION);
+    assert!(case.update.new_entries.len() >= 2);
+    let mut short = case.update.clone();
+    short.new_entries.pop();
+    assert_eq!(admit_raw(&short.to_bytes(), &case).unwrap_err(), UpdateError::TailNotOrigin);
+    // An empty update must name the origin epoch as its prior tip.
+    let mut empty = case.update.clone();
+    empty.new_entries.clear();
+    empty.old_tip_end = None;
+    assert_eq!(admit_raw(&empty.to_bytes(), &case).unwrap_err(), UpdateError::EmptyUpdateMismatch);
+}
+
+#[test]
+fn a_ready_registry_whose_usable_origin_is_not_its_imported_tip_is_refused_before_the_update_runs()
+{
+    // Layer 2, the client's parent check: a committed ready parent with U != I is corruption and is
+    // refused with ImportedUsableMismatch, never repaired by the update that follows.
+    let mut case = Case::at(CLOSES_AND_INSERTS);
+    let tip = u64::try_from(word_u256(&case.parent, "b1.importedTipEpoch")).unwrap();
+    assert_eq!(word_u256(&case.parent, "origin.rootEpoch"), U256::from(tip), "ready parent: U = I");
+    assert!(case.with(|_| {}).is_ok(), "the uncorrupted parent accepts the step");
+    case.parent
+        .insert_account_storage(
+            SEAL_REGISTRY,
+            reth_unicity_b1::fixed_slot("origin.rootEpoch"),
+            U256::from(tip - 1),
+        )
+        .unwrap();
+    // The registry runtime's own ImportedUsableMismatch compares the update's origin with the tip
+    // after the append, which admission already forces equal; the client therefore also refuses
+    // a corrupted parent itself, before the update runs.
+    assert_eq!(
+        case.with(|_| {}).unwrap_err(),
+        ExecutionError::B1ProfileMismatch(
+            "B1 registry usable origin differs from its imported tip"
+        )
+    );
+}
+
+fn word_u256(db: &CacheDB<EmptyDB>, name: &str) -> U256 {
+    let mut db = db.clone();
+    revm::Database::storage(&mut db, SEAL_REGISTRY, reth_unicity_b1::fixed_slot(name)).unwrap()
+}
+
+#[test]
 fn the_registry_profile_words_must_equal_the_pinned_profile() {
     let case = Case::at(QUIET);
     let bytes = case.update.to_bytes();

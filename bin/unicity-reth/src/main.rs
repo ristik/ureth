@@ -60,9 +60,14 @@ struct UnicityArgs {
     #[arg(long = "unicity.profile-hash", value_name = "HASH")]
     profile_hash: B256,
 
-    /// Certificate window `W_cert`; the registry keeps `W_cert + 1` authority intervals.
-    #[arg(long = "unicity.w-cert", value_name = "ROUNDS")]
-    w_cert: u64,
+    /// The registry's `genesisCommitment`: a deployment pin kept outside the profile hash
+    /// preimage.
+    #[arg(long = "unicity.genesis-commitment", value_name = "HASH")]
+    genesis_commitment: B256,
+
+    /// `B`: the most validator epochs one execution block may install (2: the supersession span).
+    #[arg(long = "unicity.max-epochs-per-update", value_name = "EPOCHS")]
+    max_epochs: u64,
 
     /// The custody contract the mandatory records hook applies imported root records to after
     /// EIP-4788. Absent: the chain has no custody and no hook. It is part of the profile hash.
@@ -149,7 +154,8 @@ impl UnicityArgs {
             root_genesis_id: self.root_genesis_id,
             execution_chain_id: self.chain_id,
             profile_hash: self.profile_hash,
-            w_cert: self.w_cert,
+            genesis_commitment: self.genesis_commitment,
+            max_epochs: self.max_epochs,
             hook: reth_unicity_execution::hook::RecordsHook {
                 custody: self.records_custody.unwrap_or(Address::ZERO),
                 h_records: self.h_records,
@@ -300,7 +306,8 @@ mod tests {
             ROOT_GENESIS,
             "--unicity.chain-id=1337",
             "--unicity.profile-hash=0x0202020202020202020202020202020202020202020202020202020202020202",
-            "--unicity.w-cert=1",
+            "--unicity.genesis-commitment=0x0303030303030303030303030303030303030303030303030303030303030303",
+            "--unicity.max-epochs-per-update=2",
             "--unicity.max-gas=50000000",
             "--unicity.system-gas=43000000",
         ];
@@ -333,7 +340,8 @@ mod tests {
             root_genesis_id: B256::repeat_byte(1),
             chain_id: 1337,
             profile_hash: B256::repeat_byte(2),
-            w_cert: 1,
+            genesis_commitment: B256::repeat_byte(3),
+            max_epochs: 2,
             records_custody: None,
             h_records: 0,
             hook_record_gas: 0,
@@ -360,7 +368,8 @@ mod tests {
             root_genesis_id: B256::repeat_byte(1),
             chain_id: 1337,
             profile_hash: B256::repeat_byte(2),
-            w_cert: 1,
+            genesis_commitment: B256::repeat_byte(3),
+            max_epochs: 2,
             records_custody: None,
             h_records: 0,
             hook_record_gas: 0,
@@ -456,23 +465,23 @@ mod tests {
     fn system_gas_must_cover_the_b1_profile_envelope() {
         let args = proof_args(true, None);
         let profile = args.profile().unwrap();
-        // W_cert = 1 needs 155936 + 1136500 + 2 * (15626944 + 1147500) + the import envelope
-        // (296144 admission + 18000000 execution) = 53_137_468.
-        let exact = BlockProfile { system_gas: 53_137_468, max_gas: 60_137_468, ..profile };
-        assert_eq!(args.b1(&exact).unwrap().w_cert, 1);
-        let short = BlockProfile { system_gas: 53_137_467, max_gas: 60_137_468, ..profile };
+        // B = 2 needs 155936 + 2 * 3350044 + (1150000 + 2 * 250000) + the import envelope
+        // (296144 admission + 18000000 execution) = 26_802_168.
+        let exact = BlockProfile { system_gas: 26_802_168, max_gas: 33_802_168, ..profile };
+        assert_eq!(args.b1(&exact).unwrap().max_epochs, 2);
+        let short = BlockProfile { system_gas: 26_802_167, max_gas: 33_802_168, ..profile };
         assert!(args.b1(&short).is_err());
         // The records hook adds its gate reads and H records to the envelope.
-        // 53_137_468 + 150_000 + 2 * 1_000_000 = 55_287_468.
+        // 26_802_168 + 150_000 + 2 * 1_000_000 = 28_952_168.
         let hooked = UnicityArgs {
             records_custody: Some(Address::repeat_byte(0xc5)),
             h_records: 2,
             hook_record_gas: 1_000_000,
             ..args
         };
-        let exact = BlockProfile { system_gas: 55_287_468, max_gas: 62_287_468, ..profile };
+        let exact = BlockProfile { system_gas: 28_952_168, max_gas: 35_952_168, ..profile };
         assert_eq!(hooked.b1(&exact).unwrap().hook.h_records, 2);
-        let short = BlockProfile { system_gas: 55_287_467, max_gas: 62_287_468, ..profile };
+        let short = BlockProfile { system_gas: 28_952_167, max_gas: 35_952_168, ..profile };
         assert!(hooked.b1(&short).is_err());
         // a hook is a custody with 1..=32 records and a price, or nothing at all
         for bad in [
@@ -484,17 +493,17 @@ mod tests {
             assert!(bad.b1(&exact).is_err());
         }
         // The election adds its reserved `elect` price to the envelope and is part of the pinned
-        // hook: 55_287_468 + 5_000_000 = 60_287_468.
+        // hook: 28_952_168 + 5_000_000 = 33_952_168.
         let elected = UnicityArgs {
             election: Some(Address::repeat_byte(0xe1)),
             elect_gas: 5_000_000,
             ..hooked
         };
-        let exact_elect = BlockProfile { system_gas: 60_287_468, max_gas: 67_287_468, ..profile };
+        let exact_elect = BlockProfile { system_gas: 33_952_168, max_gas: 40_952_168, ..profile };
         let context = elected.b1(&exact_elect).unwrap();
         assert_eq!(context.hook.election, Address::repeat_byte(0xe1));
         assert_eq!(context.hook.elect_gas, 5_000_000);
-        let short_elect = BlockProfile { system_gas: 60_287_467, max_gas: 67_287_468, ..profile };
+        let short_elect = BlockProfile { system_gas: 33_952_167, max_gas: 40_952_168, ..profile };
         assert!(elected.b1(&short_elect).is_err());
         for bad in [
             UnicityArgs { elect_gas: 0, ..elected },
@@ -503,7 +512,7 @@ mod tests {
         ] {
             assert!(bad.b1(&exact_elect).is_err());
         }
-        let unmeasured = UnicityArgs { w_cert: 16, ..args };
+        let unmeasured = UnicityArgs { max_epochs: 3, ..args };
         assert!(unmeasured.b1(&profile).is_err());
     }
 
@@ -521,7 +530,8 @@ mod tests {
                 "--unicity.root-genesis-id=0x0101010101010101010101010101010101010101010101010101010101010101",
                 "--unicity.chain-id=1337",
                 "--unicity.profile-hash=0x0202020202020202020202020202020202020202020202020202020202020202",
-                "--unicity.w-cert=1",
+                "--unicity.genesis-commitment=0x0303030303030303030303030303030303030303030303030303030303030303",
+            "--unicity.max-epochs-per-update=2",
                 "--unicity.max-gas=50000000",
                 "--unicity.system-gas=43000000",
             ])
@@ -537,7 +547,8 @@ mod tests {
                 "--unicity.root-genesis-id=0x0101010101010101010101010101010101010101010101010101010101010101",
                 "--unicity.chain-id=1337",
                 "--unicity.profile-hash=0x0202020202020202020202020202020202020202020202020202020202020202",
-                "--unicity.w-cert=1",
+                "--unicity.genesis-commitment=0x0303030303030303030303030303030303030303030303030303030303030303",
+            "--unicity.max-epochs-per-update=2",
                 "--unicity.max-gas=50000000",
                 "--unicity.system-gas=43000000",
                 "--unicity.no-proof-source",
@@ -560,7 +571,8 @@ mod tests {
                 "--unicity.root-genesis-id=0x0101010101010101010101010101010101010101010101010101010101010101",
                 "--unicity.chain-id=1337",
                 "--unicity.profile-hash=0x0202020202020202020202020202020202020202020202020202020202020202",
-                "--unicity.w-cert=1",
+                "--unicity.genesis-commitment=0x0303030303030303030303030303030303030303030303030303030303030303",
+            "--unicity.max-epochs-per-update=2",
                 "--unicity.max-gas=50000000",
                 "--unicity.system-gas=43000000",
             ])
