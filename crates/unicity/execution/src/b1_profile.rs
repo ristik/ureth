@@ -20,9 +20,7 @@ use crate::{
     UpdateInput, SEAL_REGISTRY,
 };
 use alloy_primitives::{B256, U256};
-use revm::{
-    database::{CacheDB, EmptyDB},
-};
+use revm::database::{CacheDB, EmptyDB};
 use serde::Serialize;
 
 fn g_rest(b: u64) -> u64 {

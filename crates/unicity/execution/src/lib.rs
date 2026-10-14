@@ -1231,7 +1231,8 @@ mod tests {
         let word = |slot: U256| db.storage_ref(SEAL_REGISTRY, slot).unwrap();
         // The tip word of a registry whose entry is not installed: the refusal tests supply their
         // own failure.
-        let epoch = u64::try_from(word(reth_unicity_b1::fixed_slot("b1.importedTipEpoch"))).unwrap();
+        let epoch =
+            u64::try_from(word(reth_unicity_b1::fixed_slot("b1.importedTipEpoch"))).unwrap();
         if word(reth_unicity_b1::entry_slot(epoch, 0)).is_zero() {
             return testing::GENESIS_TAIL;
         }
