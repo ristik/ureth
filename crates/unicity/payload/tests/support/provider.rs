@@ -21,7 +21,14 @@ use revm::{
     state::{AccountInfo, Bytecode},
     Database,
 };
-use std::{collections::BTreeMap, convert::Infallible};
+use std::{
+    collections::BTreeMap,
+    convert::Infallible,
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    },
+};
 
 #[derive(Clone, Debug, Default)]
 pub(crate) struct FixtureProvider {
@@ -29,6 +36,8 @@ pub(crate) struct FixtureProvider {
     storage: BTreeMap<Address, BTreeMap<U256, U256>>,
     code: BTreeMap<B256, Bytecode>,
     hashes: BTreeMap<u64, B256>,
+    /// State reads served through the `StateProvider` traits, shared by every clone.
+    reads: Arc<AtomicUsize>,
 }
 
 impl FixtureProvider {
@@ -80,6 +89,18 @@ impl FixtureProvider {
     #[allow(dead_code)]
     pub(crate) fn storage_of(&self, address: Address) -> std::collections::BTreeMap<U256, U256> {
         self.storage.get(&address).cloned().unwrap_or_default()
+    }
+
+    /// Overwrites one storage word, for tests that start from corrupt imported state.
+    #[allow(dead_code)]
+    pub(crate) fn set_storage(&mut self, address: Address, key: U256, value: U256) {
+        self.storage.entry(address).or_default().insert(key, value);
+    }
+
+    /// Reads served so far through the provider traits, over all clones.
+    #[allow(dead_code)]
+    pub(crate) fn reads(&self) -> usize {
+        self.reads.load(Ordering::Relaxed)
     }
 
     pub(crate) fn set_block_hash(&mut self, number: u64, hash: B256) {
@@ -200,6 +221,7 @@ impl Database for FixtureProvider {
 }
 impl AccountReader for FixtureProvider {
     fn basic_account(&self, address: &Address) -> ProviderResult<Option<Account>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         Ok(self.accounts.get(address).map(|info| Account {
             nonce: info.nonce,
             balance: info.balance,
@@ -209,6 +231,7 @@ impl AccountReader for FixtureProvider {
 }
 impl BytecodeReader for FixtureProvider {
     fn bytecode_by_hash(&self, hash: &B256) -> ProviderResult<Option<RethBytecode>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         Ok(self.code.get(hash).cloned().map(RethBytecode))
     }
 }
@@ -222,6 +245,7 @@ impl BlockHashReader for FixtureProvider {
 }
 impl StateProvider for FixtureProvider {
     fn storage(&self, address: Address, key: B256) -> ProviderResult<Option<U256>> {
+        self.reads.fetch_add(1, Ordering::Relaxed);
         Ok(self.storage.get(&address).and_then(|s| s.get(&U256::from_be_bytes(key.0))).copied())
     }
 }

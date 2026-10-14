@@ -509,3 +509,90 @@ fn a_seal_outside_its_epochs_interval_or_with_a_short_quorum_is_false_at_the_sam
     assert!(!verdict(&o));
     assert_eq!(c.signatures, 4);
 }
+
+/// Nothing in a process may make a call cheaper, dearer or differently decided because earlier
+/// calls ran: there is no key, epoch or result cache behind `CERT_BATCH_V2`. A call on an empty
+/// process and the same call after many unrelated calls (accepting, rejecting, other epochs and
+/// shapes, on a long-lived state) agree on the output bytes, the charge, every counter and the
+/// number of registry words read. Keys are parsed again on every call.
+#[test]
+fn an_empty_and_a_warm_process_decide_charge_and_count_identically() {
+    let single = claims("cert.single.ok");
+    let shared = claims("cert.shared.ok");
+    let mut bad = single[0].clone();
+    let at = bad.windows(6).position(|w| w == b"node00").unwrap() + 6 + 2;
+    bad[at] ^= 1;
+    let probes: [(&str, Vec<Vec<u8>>); 4] = [
+        ("single", single.clone()),
+        ("shared", shared),
+        ("single bad signature, same keys", vec![bad]),
+        ("single twice", vec![single[0].clone(), single[0].clone()]),
+    ];
+    let observe = |parts: &[Vec<u8>], st: &mut State| {
+        let before = st.reads;
+        let (r, c) = go(parts, st);
+        let out = r.unwrap();
+        (out.bytes, out.gas, c, st.reads - before)
+    };
+    let empty: Vec<_> = probes.iter().map(|(_, p)| observe(p, &mut base())).collect();
+
+    // One long-lived state; every probe is run after every other probe, many times over.
+    let mut warm = base();
+    for round in 0..4 {
+        for (rotate, _) in probes.iter().enumerate() {
+            for step in 0..probes.len() {
+                let i = (rotate + step) % probes.len();
+                let got = observe(&probes[i].1, &mut warm);
+                assert_eq!(
+                    got, empty[i],
+                    "{} (round {round}, after rotation {rotate})",
+                    probes[i].0
+                );
+            }
+        }
+    }
+    // A rejecting call before an accepting one over the same keys leaves the accepting one intact.
+    let mut state = base();
+    assert!(!verdict(&ok(&probes[2].1, &mut state).0));
+    let (out, c) = ok(&probes[0].1, &mut state);
+    assert!(verdict(&out));
+    assert_eq!((out.gas, c), (empty[0].1, empty[0].2));
+    // Parses are per call: repeating the call parses the same four keys again.
+    assert_eq!(empty[0].2.key_parses, 4);
+}
+
+/// Verification work at a permanent registry depends on the claims, never on how long the history
+/// is: the same three-epoch suffix, and a claim for the oldest epoch, cost the same registry words,
+/// counters and dimensions whether the registry holds 7, 60 or 4,000 epochs. Entries are addressed
+/// by slot; nothing walks the history.
+#[test]
+fn steady_state_work_is_the_same_at_small_and_large_permanent_histories() {
+    let base = claims("cert.single.ok").remove(0);
+    let sg = signers(4);
+    let all: Vec<&uc::Signer> = sg.iter().collect();
+    // Epoch e of a history starting at 1 spans [900 + 10 (e - 1), +10]; seal inside it.
+    let claim = |e: u64| uc::reseal(&base, e, 905 + 10 * (e - 1), &all, |_| {});
+    let observe = |parts: &[Vec<u8>], u: u64| {
+        let mut st = own_registry(1, u, &sg, 900 + 10 * u + 100);
+        let before = st.reads;
+        let (out, c) = ok(parts, &mut st);
+        assert!(verdict(&out), "tip {u}");
+        // The charge is the formula over the request's own dimensions; only the calldata bytes
+        // differ between histories, because larger epoch numbers and rounds encode longer.
+        let d = batch::dimensions(&request(parts)).unwrap();
+        assert_eq!(out.gas, d.gas(), "tip {u}");
+        ((d.k, d.e, d.s, d.a, d.q, d.p), c, st.reads - before)
+    };
+    let mut suffix = Vec::new();
+    let mut oldest = Vec::new();
+    for u in [7u64, 60, 4_000] {
+        let tip: Vec<Vec<u8>> = (u - 2..=u).map(claim).collect();
+        suffix.push(observe(&tip, u));
+        oldest.push(observe(&[claim(1)], u));
+    }
+    assert!(suffix.windows(2).all(|w| w[0] == w[1]), "suffix work differs: {suffix:?}");
+    assert!(oldest.windows(2).all(|w| w[0] == w[1]), "oldest-epoch work differs: {oldest:?}");
+    // A deep-history claim is one epoch load, exactly like a tip claim.
+    assert_eq!(oldest[0].1.epoch_loads, 1);
+    assert_eq!(suffix[0].1.epoch_loads, 3);
+}

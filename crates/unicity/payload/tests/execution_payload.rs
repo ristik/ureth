@@ -4743,3 +4743,139 @@ async fn failed_rounds_above_the_head_keep_the_head() {
     }
     assert!(tokens.is_admitted(&head.hash()), "and it is still admitted after all of them");
 }
+
+/// One genesis-round builder over `state`, with `txs` ordinary transactions in the pool.
+struct FailClosedRig {
+    builder: UnicityExecutionPayloadBuilder<TestPool, Client, AlwaysResolver>,
+    pool: TestPool,
+    state: FixtureProvider,
+    resolves: Arc<AtomicUsize>,
+    config: PayloadConfig<UnicityPayloadAttributes>,
+}
+
+async fn fail_closed_rig(state: FixtureProvider, txs: u64) -> FailClosedRig {
+    let genesis: Genesis =
+        serde_json::from_str(include_str!("../../execution/testdata/signed-beacon-genesis.json"))
+            .unwrap();
+    let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
+    let parent = Arc::new(SealedHeader::new(chain_spec.genesis_header().clone(), genesis_hash()));
+    let mut state = state;
+    state.set_block_hash(0, genesis_hash());
+    let client = Client {
+        chain_spec: chain_spec.clone(),
+        parent_hash: genesis_hash(),
+        state: state.clone(),
+        extra_headers: Vec::new(),
+        finalized: 0,
+        best_number: 0,
+        persisted_number: 0,
+        fail_finalized: false,
+    };
+    let root = Arc::new(input(1, 1, genesis_hash()));
+    let attrs = attributes(&root, parent.timestamp);
+    let base = EthereumBuilderConfig::new()
+        .with_gas_limit(profile().max_gas)
+        .with_await_payload_on_missing(false);
+    let bound = Arc::new(
+        BoundExecutionInput::from_validated_genesis(
+            root.clone(),
+            b1::job(&root),
+            profile(),
+            &parent,
+            genesis_hash(),
+            FEE_COLLECTOR,
+        )
+        .unwrap(),
+    );
+    let evm = UnicityEvmConfig::new(
+        unicity_eth_config(chain_spec, &reth_unicity_execution::testing::b1_context()),
+        bound,
+    );
+    let pool = test_pool();
+    let price = u128::from(parent.base_fee_per_gas.unwrap()) + 100;
+    for nonce in 0..txs {
+        add(&pool, signed_call(nonce, price, Address::repeat_byte(0x42), U256::from(1), 21_000))
+            .await;
+    }
+    let resolves = Arc::new(AtomicUsize::new(0));
+    let builder = UnicityExecutionPayloadBuilder::new(
+        client,
+        pool.clone(),
+        AlwaysResolver { config: evm, calls: resolves.clone() },
+        base,
+    );
+    let config = PayloadConfig::new(parent, attrs.clone(), attrs.payload_id(&genesis_hash()));
+    FailClosedRig { builder, pool, state, resolves, config }
+}
+
+impl FailClosedRig {
+    fn args(&self) -> BuildArguments<UnicityPayloadAttributes, EthBuiltPayload> {
+        BuildArguments::new(
+            Default::default(),
+            None,
+            None,
+            self.config.clone(),
+            Default::default(),
+            None,
+        )
+    }
+
+    /// Runs one build attempt and returns the error text with the provider reads it cost.
+    fn failed_attempt(&self) -> (String, usize) {
+        let before = self.state.reads();
+        let error = match self.builder.try_build(self.args()) {
+            Err(error) => error.to_string(),
+            Ok(outcome) => panic!("corrupt state produced a build outcome: {outcome:?}"),
+        };
+        (error, self.state.reads() - before)
+    }
+}
+
+/// Imported bad registry state makes the builder fail closed: every attempt returns the same error
+/// at the same small, pool-independent cost, publishes nothing and leaves the pool alone. The
+/// builder never retries inside one call; repeated attempts are the payload job's one-per-interval,
+/// deadline-bounded cadence, so a node with a corrupt registry stalls quietly instead of spinning.
+#[tokio::test]
+async fn corrupt_imported_registry_state_fails_the_builder_closed_without_spinning() {
+    use reth_unicity_b1::fixed_slot;
+    let healthy = FixtureProvider::signed_genesis();
+    {
+        let rig = fail_closed_rig(healthy.clone(), 3).await;
+        assert!(
+            matches!(rig.builder.try_build(rig.args()), Ok(BuildOutcome::Better { .. })),
+            "the uncorrupted state builds, so each failure below is the corruption"
+        );
+    }
+    let corruptions: [(&str, &[(&str, U256)]); 3] = [
+        ("layout word is not the permanent format", &[("b1.format", U256::from(1))]),
+        ("registry reports uninitialized", &[("b1.initialized", U256::ZERO)]),
+        (
+            "ready usable origin differs from the imported tip",
+            &[("b1.originReady", U256::from(1)), ("origin.rootEpoch", U256::from(7))],
+        ),
+    ];
+    for (name, words) in corruptions {
+        let mut corrupt = healthy.clone();
+        for (word, value) in words {
+            corrupt.set_storage(SEAL_REGISTRY, fixed_slot(word), *value);
+        }
+        let mut costs = Vec::new();
+        for txs in [0, 3, 40] {
+            let rig = fail_closed_rig(corrupt.clone(), txs).await;
+            let pooled = rig.pool.pool_size().total;
+            let (first, first_reads) = rig.failed_attempt();
+            // Many attempts: identical error, identical cost, one resolve each, no growth.
+            for _ in 0..5 {
+                let (error, reads) = rig.failed_attempt();
+                assert_eq!(error, first, "{name}: the error is deterministic");
+                assert_eq!(reads, first_reads, "{name}: every attempt costs the same");
+            }
+            assert_eq!(rig.resolves.load(Ordering::Relaxed), 6, "{name}: no retry inside a call");
+            assert!(rig.builder.build_empty_payload(rig.config.clone()).is_err(), "{name}");
+            assert_eq!(rig.pool.pool_size().total, pooled, "{name}: the pool is untouched");
+            costs.push(first_reads);
+        }
+        assert!(costs.windows(2).all(|w| w[0] == w[1]), "{name}: cost is independent of the pool");
+        assert!(costs[0] < 64, "{name}: a refused attempt reads only the registry header words");
+    }
+}
