@@ -30,7 +30,7 @@ use serde_json::{json, Value};
 use std::sync::Arc;
 
 const MANIFEST: &str = include_str!("../../b1/tests/testdata/go-b3reprice.json");
-const GENESIS: &str = include_str!("../testdata/signed-beacon-genesis.json");
+const GENESIS: &str = include_str!("../../execution/testdata/signed-beacon-genesis.json");
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
 
 fn hex(s: &str) -> Vec<u8> {
