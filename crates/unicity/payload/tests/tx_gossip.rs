@@ -30,11 +30,9 @@ use std::{
     time::Duration,
 };
 
-/// Hardhat account #1: funded in the test genesis.
-const SENDER_KEY: [u8; 32] = [
-    0x59, 0xc6, 0x99, 0x5e, 0x99, 0x8f, 0x97, 0xa5, 0xa0, 0x04, 0x49, 0x66, 0xf0, 0x94, 0x53, 0x89,
-    0xdc, 0x9e, 0x86, 0xda, 0xe8, 0x8a, 0x7c, 0x84, 0x12, 0xf4, 0x60, 0x3b, 0x6b, 0x78, 0x69, 0x0d,
-];
+/// Hardhat account #1 (0x7099...79C8): funded in the test genesis.
+const SENDER_KEY: [u8; 32] =
+    alloy_primitives::hex!("59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d");
 
 fn chain_spec() -> Arc<ChainSpec> {
     let genesis: Genesis = serde_json::from_str(include_str!("assets/genesis.json")).unwrap();
@@ -110,6 +108,11 @@ fn transfer(nonce: u64, gas_price: u128, signer_key: [u8; 32]) -> TransactionSig
 
 fn pooled(tx: TransactionSigned) -> EthPooledTransaction {
     let recovered = tx.try_into_recovered().expect("valid signature");
+    assert_eq!(
+        recovered.signer(),
+        alloy_primitives::address!("70997970C51812dc3A010C7d01b50e0d17dc79C8"),
+        "the test key is the funded genesis account"
+    );
     let len = alloy_eips::eip2718::Encodable2718::encode_2718_len(&recovered);
     EthPooledTransaction::new(recovered, len)
 }
@@ -331,7 +334,7 @@ async fn a_hostile_block_announcement_cannot_advance_the_head() -> eyre::Result<
     let block = Block { header, body: BlockBody::default() };
     let hash = block.header.hash_slow();
     hostile_handle.announce_block(
-        reth_eth_wire_types::NewBlock { block, td: alloy_primitives::U128::from(1) }.into(),
+        reth_eth_wire_types::NewBlock { block, td: alloy_primitives::U128::from(1) },
         hash,
     );
 
@@ -346,9 +349,16 @@ async fn a_hostile_block_announcement_cannot_advance_the_head() -> eyre::Result<
     );
     // And nothing can be fetched from peers on behalf of the engine.
     use reth_network_api::BlockDownloaderProvider;
-    use reth_network_p2p::headers::client::HeadersClient;
+    use reth_network_p2p::headers::client::{HeadersClient, HeadersRequest};
     let client = a.network.fetch_client().await?;
     assert_eq!(reth_network_p2p::download::DownloadClient::num_connected_peers(&client), 0);
-    let _ = client.get_header(alloy_eips::BlockHashOrNumber::Number(1));
+    let headers = client
+        .get_headers(HeadersRequest {
+            start: alloy_eips::BlockHashOrNumber::Number(1),
+            limit: 1,
+            direction: reth_eth_wire_types::HeadersDirection::Rising,
+        })
+        .await?;
+    assert!(headers.1.is_empty(), "the engine's downloader gets nothing from a peer");
     Ok(())
 }
