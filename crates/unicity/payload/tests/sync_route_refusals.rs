@@ -4,7 +4,9 @@ use alloy_genesis::Genesis;
 use alloy_primitives::{Address, B256, B512};
 use reth_chainspec::{ChainSpecBuilder, MAINNET};
 use reth_eth_wire_types::snap::GetAccountRangeMessage;
-use reth_network_api::{noop::NoopNetwork, BlockDownloaderProvider, NetworkInfo, Peers, PeersInfo};
+use reth_ethereum_primitives::{EthPrimitives, PooledTransactionVariant};
+use reth_network::primitives::BasicNetworkPrimitives;
+use reth_network_api::{BlockDownloaderProvider, NetworkInfo, Peers, PeersInfo};
 use reth_network_p2p::{error::RequestError, snap::client::SnapClient};
 use reth_node_builder::{NodeBuilder, NodeHandle};
 use reth_node_core::{
@@ -13,10 +15,12 @@ use reth_node_core::{
 };
 use reth_tasks::Runtime;
 use reth_unicity_execution::{block::BlockProfile, pairing::PairPins, update::B1Context};
-use reth_unicity_payload::{SealJobRegistry, UnicityNode, UnicitySealConfig};
+use reth_unicity_payload::{SealJobRegistry, TxGossipNetwork, UnicityNode, UnicitySealConfig};
 use std::{net::SocketAddr, sync::Arc};
 
-async fn launch_unicity_network() -> eyre::Result<NoopNetwork> {
+type GossipNet = TxGossipNetwork<BasicNetworkPrimitives<EthPrimitives, PooledTransactionVariant>>;
+
+async fn launch_unicity_network() -> eyre::Result<GossipNet> {
     let genesis: Genesis = serde_json::from_str(include_str!("assets/genesis.json"))?;
     let chain_spec = Arc::new(
         ChainSpecBuilder::default()
@@ -62,7 +66,8 @@ async fn launch_unicity_network() -> eyre::Result<NoopNetwork> {
         .launch()
         .await?;
     // The concrete return type makes this a production-builder assertion: changing the Unicity
-    // node back to Reth's normal network builder makes this regression test stop compiling.
+    // node to Reth's normal network builder (or back to the no-op one) makes this regression test
+    // stop compiling.
     Ok(node.network)
 }
 
@@ -70,17 +75,20 @@ async fn launch_unicity_network() -> eyre::Result<NoopNetwork> {
 async fn generic_el_p2p_sync_is_refused() -> eyre::Result<()> {
     let network = launch_unicity_network().await?;
 
+    // Transaction gossip needs a real peer set, so a peer can now be added; nothing listens at
+    // this address, so nothing connects, and what a connected peer could do is tested in
+    // `tx_gossip.rs`.
     let peer = B512::repeat_byte(0x44);
     let address: SocketAddr = "127.0.0.1:30303".parse()?;
     network.add_peer(peer, address);
     network.connect_peer(peer, address);
-    assert_eq!(network.num_connected_peers(), 0, "generic EL P2P cannot add a peer");
-    assert!(network.get_all_peers().await?.is_empty());
+    assert_eq!(network.num_connected_peers(), 0, "nothing listens at the peer's address");
+    // Before any authenticated seal request the gate is closed: the network stays in its initial
+    // syncing state, whatever the launcher reports, so no peer's transactions are imported.
     assert!(
-        !network.is_initially_syncing(),
-        "the generic execution pipeline has no network sync source"
+        network.is_initially_syncing(),
+        "the network reports Idle only after authenticated seal progress"
     );
-    assert!(!network.is_syncing());
     Ok(())
 }
 

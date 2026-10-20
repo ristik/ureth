@@ -25,7 +25,7 @@ use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_node_builder::{
     components::{
         BasicPayloadServiceBuilder, ComponentsBuilder, ConsensusBuilder, ExecutorBuilder,
-        NoopNetworkBuilder, PayloadBuilderBuilder,
+        PayloadBuilderBuilder,
     },
     rpc::{BasicEngineValidatorBuilder, Identity, PayloadValidatorBuilder, RpcAddOns, RpcContext},
     AddOnsContext, BuilderContext, FullNodeComponents, FullNodeTypes, Node, NodeAdapter, NodeTypes,
@@ -54,6 +54,7 @@ use reth_unicity_execution::{
 use reth_unicity_store::CompanionStore;
 
 use crate::{
+    gossip::{GossipGate, UnicityNetworkBuilder},
     prune::run_companion_pruner,
     registry::UnicityParentAccountings,
     rpc::{companion_store, unicity_rpc_module, SealBuildState, UnicityEngineApiBuilder},
@@ -128,6 +129,7 @@ pub struct UnicityNode {
     proof_source: bool,
     repair_limit: u64,
     companion_store: Arc<OnceLock<Arc<CompanionStore>>>,
+    gossip: GossipGate,
 }
 
 impl UnicityNode {
@@ -143,7 +145,14 @@ impl UnicityNode {
             proof_source: true,
             repair_limit: crate::recovery::DEFAULT_REPAIR_LIMIT,
             companion_store: Arc::new(OnceLock::new()),
+            gossip: GossipGate::new(),
         }
+    }
+
+    /// The gate that starts transaction gossip: closed until an authenticated seal request is
+    /// accepted (see [`crate::gossip`]).
+    pub const fn gossip_gate(&self) -> &GossipGate {
+        &self.gossip
     }
 
     /// Sets the companion retention policy.
@@ -231,7 +240,7 @@ where
         N,
         EthereumPoolBuilder,
         BasicPayloadServiceBuilder<UnicityPayloadBuilderBuilder>,
-        NoopNetworkBuilder,
+        UnicityNetworkBuilder,
         UnicityExecutorBuilder,
         UnicityConsensusBuilder,
     >;
@@ -248,10 +257,10 @@ where
                 self.parent_accounting.clone(),
                 self.companion_store.clone(),
             )))
-            // M1 blocks P2P block admission here, but this also disables transaction gossip.
-            // Transactions must reach the leader directly until ristik/ureth#34 restores
-            // gossip without admitting P2P blocks.
-            .network(NoopNetworkBuilder::eth())
+            // Transaction-only gossip among the configured (trusted) validator peers: the real
+            // network, with every header/body download refused and `Idle` reported only after
+            // authenticated seal progress (ristik/ureth#34). P2P still cannot admit a block.
+            .network(UnicityNetworkBuilder::new(self.gossip.clone()))
             .consensus(
                 UnicityConsensusBuilder::new(
                     self.seal,
@@ -282,7 +291,8 @@ where
                     retention: self.retention,
                 },
                 self.companion_store.clone(),
-            ),
+            )
+            .with_gossip_gate(self.gossip.clone()),
             BasicEngineValidatorBuilder::default(),
             Default::default(),
             Identity::new(),

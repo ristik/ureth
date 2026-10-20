@@ -87,6 +87,7 @@ use reth_unicity_store::{open as open_companion_store, CompanionStore, Lookup, S
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    gossip::GossipGate,
     node::{
         UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityNode, UnicityRetentionConfig,
         UnicitySealConfig,
@@ -659,6 +660,8 @@ pub struct UnicityEngineApiImpl<Provider> {
     context: SealBuildContext,
     validator: UnicityEngineValidator,
     payload_store: PayloadStore<UnicityEngineTypes>,
+    /// Opened by an accepted authenticated seal request; see [`GossipGate`].
+    gossip: Option<GossipGate>,
 }
 
 impl<Provider> UnicityEngineApiImpl<Provider> {
@@ -671,7 +674,22 @@ impl<Provider> UnicityEngineApiImpl<Provider> {
         validator: UnicityEngineValidator,
         payload_store: PayloadStore<UnicityEngineTypes>,
     ) -> Self {
-        Self { provider, beacon_consensus, context, validator, payload_store }
+        Self { provider, beacon_consensus, context, validator, payload_store, gossip: None }
+    }
+
+    /// Opens `gate` when an authenticated seal request is accepted: an imported seal payload the
+    /// engine found valid, or a seal build the engine accepted on an authenticated parent. That is
+    /// the node's evidence that it has caught up through the shard's authenticated path, and the
+    /// network then reports `Idle` so that transaction gossip starts.
+    pub fn with_gossip_gate(mut self, gate: GossipGate) -> Self {
+        self.gossip = Some(gate);
+        self
+    }
+
+    fn authenticated_progress(&self) {
+        if let Some(gate) = &self.gossip {
+            gate.open();
+        }
     }
 }
 
@@ -847,6 +865,9 @@ where
             );
         }
 
+        if status.is_valid() {
+            self.authenticated_progress();
+        }
         Ok(status)
     }
 
@@ -1043,6 +1064,10 @@ where
             .fork_choice_updated(fork_choice_state, Some(attributes))
             .await
             .map_err(EngineApiError::ForkChoiceUpdate)?;
+        // `prepare_seal_build` accepted the authenticated input and the engine took the update.
+        if updated.payload_status.is_valid() {
+            self.authenticated_progress();
+        }
         Ok(updated)
     }
 
@@ -1143,13 +1168,21 @@ where
 pub struct UnicityEngineApiBuilder {
     state: SealBuildState,
     store: Arc<OnceLock<Arc<CompanionStore>>>,
+    gossip: Option<GossipGate>,
 }
 
 impl UnicityEngineApiBuilder {
     /// Creates the builder from the store-independent state and shared store cell [`UnicityNode`]
     /// holds.
     pub const fn new(state: SealBuildState, store: Arc<OnceLock<Arc<CompanionStore>>>) -> Self {
-        Self { state, store }
+        Self { state, store, gossip: None }
+    }
+
+    /// Gives the seal methods the gate that starts transaction gossip when they accept
+    /// authenticated progress.
+    pub fn with_gossip_gate(mut self, gate: GossipGate) -> Self {
+        self.gossip = Some(gate);
+        self
     }
 }
 
@@ -1241,13 +1274,16 @@ where
             ctx.config.engine.accept_execution_requests_hash,
             ctx.node.network().clone(),
         );
-        let sibling = UnicityEngineApiImpl::new(
+        let mut sibling = UnicityEngineApiImpl::new(
             ctx.node.provider().clone(),
             ctx.beacon_engine_handle.clone(),
             context,
             validator,
             PayloadStore::new(ctx.node.payload_builder_handle().clone()),
         );
+        if let Some(gate) = self.gossip {
+            sibling = sibling.with_gossip_gate(gate);
+        }
         Ok(UnicityEngineApiModule::new(inner, sibling))
     }
 }

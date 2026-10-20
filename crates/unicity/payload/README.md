@@ -8,8 +8,10 @@ attributes end to end and use that builder with a bounded `SealJobRegistry`. The
 
 The three seal methods are reachable and advertised together. The M1 node does not register or
 advertise stock `engine_newPayloadV1` through `engine_newPayloadV5`: those routes have no
-authenticated root input or checked parent-accounting preflight. Network admission uses a no-op
-network, so autonomous P2P and pipeline header sync cannot advance this node. General stock
+authenticated root input or checked parent-accounting preflight. The node's network is transaction-only
+(`gossip`): the real reth network, so pending transactions propagate among the configured validator
+peers, with every header and body download refused (`fetch_client` returns a client that fetches
+nothing), so autonomous P2P and pipeline header sync cannot advance this node. General stock
 Engine import and headers-first sync are deferred capabilities. Seal imports and builds remain the
 authenticated advancement path; missing local accounting answers `SYNCING` and can be retried.
 
@@ -48,7 +50,7 @@ completion path; a payload ID or caller-provided gas scalar cannot mint one.
 
 ## Node wiring
 
-`UnicityNode` implements `NodeTypes` with `UnicityEngineTypes`, a no-op network, and
+`UnicityNode` implements `NodeTypes` with `UnicityEngineTypes`, the transaction-only gossip network, and
 `UnicityConsensus`, which retains the Ethereum checks except for ordinary-gas fee feedback. Its payload component uses `UnicityExecutionPayloadBuilder` with a
 `SealJobRegistry` the node holds, and its executor component is `UnicityExecutorBuilder`, which
 supplies `UnicityNodeEvmConfig`. All clones of the registry see the same entries, so the payload
@@ -211,3 +213,30 @@ verdict, and the advertised capability set. The fake engine does not execute or 
 RPC; it does not demonstrate certificate authentication,
 certificate authentication, real persistence or public activation. `v0` and the bft-core
 execution-client pin are unchanged.
+
+## Transaction gossip (ristik/ureth#34)
+
+`gossip.rs`: `UnicityNetworkBuilder` builds the real reth network over the pool (so the stock
+`TransactionsManager` validates, deduplicates and propagates with its bounded announce/fetch
+machinery) and wraps the handle as `TxGossipNetwork`:
+
+- **No downloads.** `fetch_client` returns `NoopFullBlockClient`; the pipeline and the engine's block
+  downloader take their client from there. `NewBlock`/`NewBlockHashes` are already refused after the
+  merge. A block advances the canonical head only through the authenticated seal methods.
+- **The configured peer set.** The network is built with `trusted_nodes_only`: only peers added as
+  *trusted* (`--trusted-peers`, `admin_addTrustedPeer`, or the shard node on membership changes;
+  `admin_addPeer` adds a static, not a trusted, peer and is not enough) connect, in either direction.
+  Membership changes are `admin_addTrustedPeer` / `admin_removePeer` calls; keep the admin, operator
+  and Engine RPCs private.
+- **Sync readiness.** The transaction manager imports nothing while the network reports
+  `is_initially_syncing`. The launcher's own reasons for `Idle` (a finished backfill, a canonical
+  head event, the startup flag) are not forwarded; `Idle` is reported only once the `GossipGate` is
+  open, and the gate is opened by an accepted authenticated seal request (a valid seal import, or a
+  seal build accepted on an authenticated parent). A node that restarts is `Syncing` again until the
+  next such request.
+- **What a peer can still do.** The `eth` request handler stays on, so connected peers may fetch
+  headers and bodies from this node: serving is not admission. Validators need not hold identical
+  pools; sharing signed pending transactions does not authorize another validator to build, import
+  or finalize a block, and gossip is not encrypted order flow or MEV protection.
+
+Tests: `tests/tx_gossip.rs` (two or more real nodes in one process), `tests/sync_route_refusals.rs`.
