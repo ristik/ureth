@@ -82,5 +82,5 @@ fn every_journal_is_decoded_or_refused_as_go_and_round_trips() {
         }
     }
     assert_eq!(valid, 4);
-    assert!(refused >= 16);
+    assert_eq!(refused, 18);
 }
