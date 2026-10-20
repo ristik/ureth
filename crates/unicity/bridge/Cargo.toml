@@ -1,0 +1,24 @@
+[package]
+name = "reth-unicity-bridge"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "Native composition of one bridge redemption (B7 direct path)"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+alloy-evm.workspace = true
+revm.workspace = true
+sha2.workspace = true
+reth-unicity-b1.workspace = true
+reth-unicity-b2.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

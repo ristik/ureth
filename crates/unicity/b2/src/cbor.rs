@@ -2,11 +2,11 @@
 use crate::{Error, Result};
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Item<'a> {
-    pub(crate) raw: &'a [u8],
-    pub(crate) major: u8,
-    pub(crate) arg: u64,
-    pub(crate) data: &'a [u8],
+pub struct Item<'a> {
+    pub raw: &'a [u8],
+    pub major: u8,
+    pub arg: u64,
+    pub data: &'a [u8],
 }
 fn head(data: &mut &[u8]) -> Result<(u8, u64)> {
     let first = *data.first().ok_or(Error::Truncated)?;
@@ -60,7 +60,7 @@ fn scan(data: &mut &[u8], depth: usize, tokens: &mut usize) -> Result<()> {
     }
     Ok(())
 }
-pub(crate) fn one<'a>(data: &'a [u8], tokens: &mut usize) -> Result<Item<'a>> {
+pub fn one<'a>(data: &'a [u8], tokens: &mut usize) -> Result<Item<'a>> {
     let mut rest = data;
     scan(&mut rest, 0, tokens)?;
     if !rest.is_empty() {
@@ -74,10 +74,10 @@ fn item(data: &[u8]) -> Result<Item<'_>> {
     Ok(Item { raw: data, major, arg, data: rest })
 }
 impl<'a> Item<'a> {
-    pub(crate) const fn null(self) -> bool {
+    pub const fn null(self) -> bool {
         self.major == 7 && self.arg == 22
     }
-    pub(crate) const fn uint(self, max: u64) -> Result<u64> {
+    pub const fn uint(self, max: u64) -> Result<u64> {
         if self.major != 0 {
             return Err(Error::Shape);
         }
@@ -86,7 +86,7 @@ impl<'a> Item<'a> {
         }
         Ok(self.arg)
     }
-    pub(crate) const fn bytes(self, n: usize) -> Result<&'a [u8]> {
+    pub const fn bytes(self, n: usize) -> Result<&'a [u8]> {
         if self.major != 2 {
             return Err(Error::Shape);
         }
@@ -95,7 +95,7 @@ impl<'a> Item<'a> {
         }
         Ok(self.data)
     }
-    pub(crate) const fn blob(self, max: usize) -> Result<&'a [u8]> {
+    pub const fn blob(self, max: usize) -> Result<&'a [u8]> {
         if self.major != 2 {
             return Err(Error::Shape);
         }
@@ -104,7 +104,7 @@ impl<'a> Item<'a> {
         }
         Ok(self.data)
     }
-    pub(crate) const fn count(self, max: u64) -> Result<u64> {
+    pub const fn count(self, max: u64) -> Result<u64> {
         if self.major != 4 {
             return Err(Error::Shape);
         }
@@ -113,7 +113,7 @@ impl<'a> Item<'a> {
         }
         Ok(self.arg)
     }
-    pub(crate) fn array<const N: usize>(self) -> Result<[Self; N]> {
+    pub fn array<const N: usize>(self) -> Result<[Self; N]> {
         if self.major != 4 || self.arg != N as u64 {
             return Err(Error::Shape);
         }
@@ -123,7 +123,7 @@ impl<'a> Item<'a> {
         }
         Ok(out)
     }
-    pub(crate) fn tagged<const N: usize>(self, tag: u64, version: u64) -> Result<[Self; N]> {
+    pub fn tagged<const N: usize>(self, tag: u64, version: u64) -> Result<[Self; N]> {
         if self.major != 6 {
             return Err(Error::Shape);
         }
@@ -136,11 +136,12 @@ impl<'a> Item<'a> {
         }
         Ok(a)
     }
-    pub(crate) const fn children(self) -> Children<'a> {
+    pub const fn children(self) -> Children<'a> {
         Children { rest: self.data }
     }
 }
-pub(crate) struct Children<'a> {
+#[derive(Debug)]
+pub struct Children<'a> {
     rest: &'a [u8],
 }
 impl<'a> Iterator for Children<'a> {
@@ -155,7 +156,7 @@ impl<'a> Iterator for Children<'a> {
     }
 }
 
-pub(crate) fn uint(n: u64) -> Vec<u8> {
+pub fn uint(n: u64) -> Vec<u8> {
     header(0, n)
 }
 fn header(major: u8, n: u64) -> Vec<u8> {
@@ -177,19 +178,19 @@ fn header(major: u8, n: u64) -> Vec<u8> {
     }
     out
 }
-pub(crate) fn bytes(b: &[u8]) -> Vec<u8> {
+pub fn bytes(b: &[u8]) -> Vec<u8> {
     let mut out = header(2, b.len() as u64);
     out.extend_from_slice(b);
     out
 }
-pub(crate) fn array(parts: &[&[u8]]) -> Vec<u8> {
+pub fn array(parts: &[&[u8]]) -> Vec<u8> {
     let mut out = header(4, parts.len() as u64);
     for p in parts {
         out.extend_from_slice(p);
     }
     out
 }
-pub(crate) fn tag(n: u64, body: &[u8]) -> Vec<u8> {
+pub fn tag(n: u64, body: &[u8]) -> Vec<u8> {
     let mut out = header(6, n);
     out.extend_from_slice(body);
     out

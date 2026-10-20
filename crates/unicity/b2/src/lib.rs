@@ -5,7 +5,9 @@
 //! Composition must authenticate the anchor and its `InputRecord` opening with B1,
 //! compare each reference time to that timestamp and prove every raw leaf value.
 mod abi;
-mod cbor;
+/// Borrowed CBOR views, shared with the composition (`reth-unicity-bridge`); not a stable API.
+#[doc(hidden)]
+pub mod cbor;
 pub mod provider;
 mod semantics;
 
@@ -205,6 +207,29 @@ pub fn run(input: &[u8], gas: u64) -> Result<Output> {
         }),
         Err(e) => Err(e),
     }
+}
+/// The relation of one composed redemption (`reth-unicity-bridge`), without ABI or gas: the same
+/// scan, count and evaluation as [`run`]. `charge` receives the leaf count once it is known,
+/// before any point parse, key derivation, hash or recovery, and may refuse it.
+#[doc(hidden)]
+pub fn relation(
+    op: u8,
+    cfg: &[u8],
+    payload: &[u8],
+    charge: impl FnOnce(u64) -> Result<()>,
+) -> Result<Outcome> {
+    let mut tokens = 0;
+    let cfg = cbor::one(cfg, &mut tokens)?;
+    semantics::check_cfg_network(cfg)?;
+    let payload = cbor::one(payload, &mut tokens)?;
+    let m = if op == 0 {
+        0
+    } else {
+        let h = payload.array::<2>()?;
+        1 + h[1].count(MAX_TRANSFERS)?
+    };
+    charge(m)?;
+    semantics::evaluate(op, cfg, payload, &mut tokens)
 }
 fn hash(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()

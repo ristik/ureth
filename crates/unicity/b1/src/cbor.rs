@@ -3,7 +3,7 @@
 use crate::{Malformed, Reader};
 
 #[derive(Clone, Copy, Debug)]
-pub(crate) struct Item<'a> {
+pub struct Item<'a> {
     pub raw: &'a [u8],
     pub major: u8,
     pub arg: u64,
@@ -81,7 +81,7 @@ fn scan(r: &mut Reader<'_>, depth: usize, tokens: &mut usize) -> Result<(), Malf
     Ok(())
 }
 
-pub(crate) fn one<'a>(data: &'a [u8], tokens: &mut usize) -> Result<Item<'a>, Malformed> {
+pub fn one<'a>(data: &'a [u8], tokens: &mut usize) -> Result<Item<'a>, Malformed> {
     let mut r = Reader { data };
     scan(&mut r, 0, tokens)?;
     if !r.data.is_empty() {
@@ -95,21 +95,16 @@ fn item(data: &[u8]) -> Result<Item<'_>, Malformed> {
     Ok(Item { raw: data, major, arg, data: r.data })
 }
 impl<'a> Item<'a> {
-    pub(crate) const fn null(self) -> bool {
+    pub const fn null(self) -> bool {
         self.major == 7 && self.arg == 22
     }
-    pub(crate) const fn uint(self, max: u64) -> Result<u64, Malformed> {
+    pub const fn uint(self, max: u64) -> Result<u64, Malformed> {
         if self.major != 0 || self.arg > max {
             return Err(Malformed::Shape);
         }
         Ok(self.arg)
     }
-    pub(crate) const fn blob(
-        self,
-        major: u8,
-        min: usize,
-        max: usize,
-    ) -> Result<&'a [u8], Malformed> {
+    pub const fn blob(self, major: u8, min: usize, max: usize) -> Result<&'a [u8], Malformed> {
         if self.major != major || self.data.len() < min {
             return Err(Malformed::Shape);
         }
@@ -118,13 +113,13 @@ impl<'a> Item<'a> {
         }
         Ok(self.data)
     }
-    pub(crate) const fn bytes(self, n: usize) -> Result<&'a [u8], Malformed> {
+    pub const fn bytes(self, n: usize) -> Result<&'a [u8], Malformed> {
         if self.major != 2 || self.arg != n as u64 {
             return Err(Malformed::Shape);
         }
         Ok(self.data)
     }
-    pub(crate) fn array<const N: usize>(self) -> Result<[Self; N], Malformed> {
+    pub fn array<const N: usize>(self) -> Result<[Self; N], Malformed> {
         if self.major != 4 || self.arg != N as u64 {
             return Err(Malformed::Shape);
         }
@@ -134,7 +129,7 @@ impl<'a> Item<'a> {
         }
         Ok(out)
     }
-    pub(crate) fn tagged<const N: usize>(self, tag: u64) -> Result<[Self; N], Malformed> {
+    pub fn tagged<const N: usize>(self, tag: u64) -> Result<[Self; N], Malformed> {
         if self.major != 6 || self.arg != tag {
             return Err(Malformed::Shape);
         }
@@ -144,7 +139,7 @@ impl<'a> Item<'a> {
         }
         Ok(a)
     }
-    pub(crate) const fn collection(self, major: u8, max: u64) -> Result<u64, Malformed> {
+    pub const fn collection(self, major: u8, max: u64) -> Result<u64, Malformed> {
         if self.null() {
             return Ok(0);
         }
@@ -156,11 +151,12 @@ impl<'a> Item<'a> {
         }
         Ok(self.arg)
     }
-    pub(crate) const fn children(self) -> Children<'a> {
+    pub const fn children(self) -> Children<'a> {
         Children { rest: if self.null() { &[] } else { self.data } }
     }
 }
-pub(crate) struct Children<'a> {
+#[derive(Debug)]
+pub struct Children<'a> {
     rest: &'a [u8],
 }
 impl<'a> Iterator for Children<'a> {

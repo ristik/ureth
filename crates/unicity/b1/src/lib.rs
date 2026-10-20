@@ -3,7 +3,10 @@
 //! Authority comes exclusively from the current EVM journal after authenticated
 //! block admission. This crate neither authenticates history nor enables a fork.
 pub mod batch;
-mod cbor;
+/// Borrowed native CBOR views, shared with the composition (`reth-unicity-bridge`); not a stable
+/// API.
+#[doc(hidden)]
+pub mod cbor;
 mod certificate;
 pub mod provider;
 mod registry;
