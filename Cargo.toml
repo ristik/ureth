@@ -45,6 +45,7 @@ members = [
     "crates/unicity/execution/",
     "crates/unicity/b1/",
     "crates/unicity/b2/",
+    "crates/unicity/b7/",
     "crates/unicity/store/",
     "crates/ethereum/primitives/",
     "crates/ethereum/reth/",
@@ -360,6 +361,7 @@ reth-eth-wire-types = { path = "crates/net/eth-wire-types" }
 reth-ethereum-payload-builder = { path = "crates/ethereum/payload" }
 reth-unicity-b1 = { path = "crates/unicity/b1" }
 reth-unicity-b2 = { path = "crates/unicity/b2" }
+reth-unicity-b7 = { path = "crates/unicity/b7" }
 reth-unicity-execution = { path = "crates/unicity/execution" }
 reth-unicity-payload = { path = "crates/unicity/payload" }
 reth-unicity-store = { path = "crates/unicity/store" }

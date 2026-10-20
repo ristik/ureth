@@ -10802,6 +10802,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "reth-unicity-b7"
+version = "2.5.0"
+dependencies = [
+ "alloy-primitives",
+ "serde_json",
+]
+
+[[package]]
 name = "reth-unicity-execution"
 version = "2.5.0"
 dependencies = [

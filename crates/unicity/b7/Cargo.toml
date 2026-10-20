@@ -1,0 +1,19 @@
+[package]
+name = "reth-unicity-b7"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+description = "B7 succinct redemption relation interface: candidate limits, the per-epoch registry commitment and the public journal codec (inactive)"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+alloy-primitives.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true
