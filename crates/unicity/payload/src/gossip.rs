@@ -12,15 +12,17 @@
 //!   authenticated seal input anyway. Blocks advance the chain only through the authenticated seal
 //!   methods.
 //! - The peer set is the configured one: the network is built with `trusted_nodes_only`, so only
-//!   peers the operator (or the shard node, through `admin_addPeer` / `admin_removePeer` as
-//!   validator membership changes) added are connected to; discovery stays whatever the node's
-//!   network arguments say.
+//!   peers the operator (or the shard node, through `admin_addTrustedPeer` /
+//!   `admin_removeTrustedPeer` as validator membership changes) added as *trusted* peers are
+//!   connected to (`admin_addPeer` adds a static peer, which is not enough); discovery stays
+//!   whatever the node's network arguments say.
 //! - Sync readiness: the transaction manager ignores gossip while the network reports
 //!   `is_initially_syncing`, and the launcher moves the network to `Idle` on its own signals (a
-//!   backfill, or a canonical head event). The wrapper does not forward those: `Idle` is passed on
-//!   only once the [`GossipGate`] is open, and the gate is opened by the authenticated seal methods
-//!   (an accepted seal import or an accepted seal build on an authenticated parent), i.e. when the
-//!   node has caught up through the shard's authenticated path. `Syncing` is always forwarded.
+//!   backfill, or a canonical head event). The wrapper does not forward those: the network is
+//!   `Syncing` until the [`GossipGate`] is open and `Idle` afterwards, and the gate is opened by
+//!   the authenticated seal methods (an accepted seal import or an accepted seal build on an
+//!   authenticated parent), i.e. when the node has caught up through the shard's authenticated
+//!   path.
 //!
 //! Serving headers and bodies to connected peers (the `eth` request handler) stays enabled. That is
 //! a deliberate choice: serving is not admission, and a peer can only use what it fetches through
@@ -130,6 +132,10 @@ pub struct TxGossipNetwork<N: NetworkPrimitives = EthNetworkPrimitives> {
 impl<N: NetworkPrimitives> TxGossipNetwork<N> {
     /// Wraps `inner`; the gate decides when it reports `Idle`.
     pub fn new(inner: NetworkHandle<N>, gate: GossipGate) -> Self {
+        // Until the gate opens the node has not caught up through the authenticated path.
+        if !gate.is_open() {
+            inner.update_sync_state(SyncState::Syncing);
+        }
         let handle = inner.clone();
         gate.on_open(move || handle.update_sync_state(SyncState::Idle));
         Self { inner, gate }
@@ -285,18 +291,21 @@ impl<N: NetworkPrimitives> NetworkEventListenerProvider for TxGossipNetwork<N> {
 }
 
 impl<N: NetworkPrimitives> NetworkSyncUpdater for TxGossipNetwork<N> {
+    /// While the gate is closed the network is `Syncing` whatever the launcher reports; once it is
+    /// open the network is `Idle` whatever the launcher reports.
+    ///
+    /// The launcher's own reasons for `Idle` (a finished backfill, a canonical head event, the
+    /// startup flag) are not the reason that matters here, so while the gate is closed they are not
+    /// forwarded. Its "assume syncing after a restart" signal says nothing about a gate that is
+    /// already open (the gate belongs to this process and opens only on authenticated progress), so
+    /// once it is open that is not forwarded either: the network must not fall back to `Syncing`
+    /// after the node has caught up.
     fn update_sync_state(&self, state: SyncState) {
-        match state {
-            // The launcher says "syncing" after every restart: always honoured.
-            SyncState::Syncing => self.inner.update_sync_state(SyncState::Syncing),
-            // Its own reasons for "idle" (a finished backfill, a canonical head event, the
-            // startup flag) are not the reason that matters here: only the gate moves the
-            // network to Idle.
-            SyncState::Idle => {
-                if self.gate.is_open() {
-                    self.inner.update_sync_state(SyncState::Idle)
-                }
-            }
+        if self.gate.is_open() {
+            self.inner.update_sync_state(SyncState::Idle)
+        } else {
+            let _ = state;
+            self.inner.update_sync_state(SyncState::Syncing)
         }
     }
 
