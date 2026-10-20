@@ -2,9 +2,9 @@
 
 This crate contains the bounded execution kernel and shared Reth block-execution adapter for the
 single B1 profile: full authenticated root members in deterministically pruned ordinary EVM state.
-It pins the `SealRegistry` of unicity-pos-contracts (B1 plus the authenticated root-record log,
-`30bc153`), whose runtime is in `testdata/seal-registry.json` with code hash
-`0x1c660647c1dc27aff97d9e9d5315e2ff60208ea8446253164d831c3ae0cd2611`. There is no layout version
+It pins the `SealRegistry` of unicity-pos-contracts (B1, the authenticated root-record log and
+the B7 epoch-commitment cache at entry field 11, `10f2cc3`), whose runtime is in `testdata/seal-registry.json` with code hash
+`0xd9203c57504d34ba762de428907c11fc3907d2ed4ee9bdbab88ee07df53c9584`. There is no layout version
 and no older registry: the fixed words, the circular live-set queue and the entry and member words
 are the one layout, and a genesis that does not carry it is refused.
 
@@ -82,7 +82,7 @@ that immutable exact parent.
 `testdata/p85-import-vectors.json` is bft-core's `rootrecords/testdata/import-vectors.json`: canonical
 import companions with their `rootRecordsHash`, decoded and charged here to the unit.
 
-`testdata/generate-b1-vectors_test.go` is run from bft-core's Go module at the commit of the same-named PR (`p85/pr1c-pin`; see the
+`testdata/generate-b1-vectors_test.go` is run from bft-core's Go module at the commit that pins this registry (`dev4/b7-trust-cache`, ristik/bft-core#715; see the
 file header). It builds the funded, EIP-4788-equipped B1 genesis (`signed-beacon-genesis.json` and
 its oracle), the K=2 scenario `b1-vectors.json` (Updates, root inputs, acknowledgement
 transitions and every changed registry word, all from bft-core's `b1state` model and `evmroot`

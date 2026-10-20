@@ -154,7 +154,9 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 		{"supersession-installs-two", 45, 6},
 		{"installs-the-wide-entry", 60, 7},
 	}
-	genesisWords, err := b1state.GenesisWords(p, genesis[0])
+	// Every entry caches C_e at field 11 under this deployment (B7 trust cache); the universe includes those words.
+	deployment := f.Genesis.B1Deployment()
+	genesisWords, err := b1state.GenesisWords(p, genesis[0], deployment.GenesisCommitment)
 	require.NoError(t, err)
 	universe := map[[32]byte]bool{}
 	mark := func(m map[[32]byte][32]byte) {
@@ -163,7 +165,7 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 		}
 	}
 	for _, e := range history {
-		m, err := b1state.EntryStorage(e)
+		m, err := b1state.EntryStorage(e, deployment)
 		require.NoError(t, err)
 		mark(m)
 	}
@@ -171,7 +173,7 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 		universe[b1state.FixedSlot(n)] = true
 	}
 
-	reg, err := b1state.NewRegistry(genesis[0])
+	reg, err := b1state.NewRegistry(genesis[0], deployment)
 	require.NoError(t, err)
 	var steps []stepOut
 	// The registry's assignment as the previous block left it.
@@ -256,7 +258,7 @@ func TestGenerateUrethPR4Vectors(t *testing.T) {
 	sort.Strings(keys)
 	vec := map[string]any{
 		"format": "unicity-b1-pr4-vectors",
-		"source": "bft-core p85/pr1c-pin b1state model, evmroot encoder, rootrecords import, registrygenesis.GenerateB1; contracts 30bc153",
+		"source": "bft-core dev4/b7-trust-cache (ristik/bft-core#715) b1state model, evmroot encoder, rootrecords import, registrygenesis.GenerateB1; contracts 10f2cc3",
 		"world": map[string]any{
 			"network": p.Network, "executionChainId": p.ExecutionChainID, "maxEpochsPerUpdate": b, "rootGenesisId": hx32(p.RootGenesisID),
 			"runtimeHash": hx32(p.RuntimeHash), "profileHash": hx32(profileHash), "systemGas": p.SystemGas, "maxGas": p.MaxGas,

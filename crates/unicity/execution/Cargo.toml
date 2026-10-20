@@ -52,6 +52,7 @@ test-utils = [
 
 [dev-dependencies]
 alloy-genesis.workspace = true
+reth-unicity-b7.workspace = true
 alloy-trie = { workspace = true, features = ["std"] }
 reth-storage-errors.workspace = true
 reth-trie-common = { workspace = true, features = ["std"] }

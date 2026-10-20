@@ -212,6 +212,61 @@ fn every_step_reproduces_bft_cores_registry_words_and_admission_gas() {
     }
 }
 
+/// The B7 trust cache under the real runtime: after every step each installed epoch's word
+/// `E(e, 11)` is `C_e` as `reth-unicity-b7` derives it from the words the runtime stored, and it
+/// never changes once written (closing an epoch rewrites only `end` and `hasEnd`).
+#[test]
+fn the_runtime_caches_each_entrys_commitment_as_b7_derives_it() {
+    fn fixed(name: &str) -> B256 {
+        keccak256(format!("unicity.seal-registry/{name}"))
+    }
+    fn derived(prefix: &str, indices: &[u64]) -> B256 {
+        let mut b = fixed(prefix).to_vec();
+        for i in indices {
+            b.extend_from_slice(&B256::from(U256::from(*i)).0);
+        }
+        keccak256(b)
+    }
+    let v = vectors();
+    let mut db = testing::genesis_db();
+    let mut cached: BTreeMap<u64, B256> = BTreeMap::new();
+    let mut check = |db: &CacheDB<EmptyDB>, tip: u64, at: &str| {
+        let genesis_commitment = word(db, fixed("genesisCommitment"));
+        let profile_hash = word(db, fixed("b1.profileHash"));
+        for e in 1..=tip {
+            let meta: [B256; 11] =
+                core::array::from_fn(|f| word(db, derived("b1.entry", &[e, f as u64])));
+            let m = U256::from_be_bytes(meta[9].0).to::<u64>();
+            let members: Vec<[B256; 8]> = (0..m)
+                .map(|j| {
+                    core::array::from_fn(|f| word(db, derived("b1.member", &[e, j, f as u64])))
+                })
+                .collect();
+            let want = reth_unicity_b7::epoch_commitment(
+                genesis_commitment,
+                profile_hash,
+                e,
+                &meta,
+                &members,
+            );
+            let got = word(db, derived("b1.entry", &[e, 11]));
+            assert_eq!(got, want, "{at}: epoch {e}");
+            assert_eq!(*cached.entry(e).or_insert(got), got, "{at}: epoch {e} cache rewritten");
+        }
+    };
+    check(&db, 1, "genesis");
+    let mut closed = 0;
+    for step in &v.steps {
+        let input = RootInputV2::from_canonical_cbor(&hex(&step.root_input)).unwrap();
+        db = run_bytes(&input, &hex(&step.update), step.parent_number, &db, world().system_gas)
+            .unwrap()
+            .1;
+        check(&db, step.imported_tip, &step.name);
+        closed = step.imported_tip - 1;
+    }
+    assert!(closed >= 5, "premise: the scenario closes epochs after caching them");
+}
+
 #[test]
 fn the_gross_total_is_the_whole_system_budget() {
     let case = Case::at(INSTALLS_ONE);
@@ -651,10 +706,10 @@ fn an_unmeasured_or_unsafe_epoch_count_is_refused_never_truncated() {
     }
     let edge = B1Context { max_epochs: 2, ..testing::b1_context() };
     assert_eq!(edge.b(), Ok(2));
-    // 155,936 + 2*(505,244 + 177,800*16) + 1,150,000 + 2*250,000 + import envelope.
+    // 155,936 + 2*(527,344 + 177,800*16) + 1,150,000 + 2*250,000 + import envelope.
     assert_eq!(
         edge.required_system_gas().unwrap(),
-        155_936 + 1_150_000 + (3_350_044 + 250_000) * 2 + crate::records::IMPORT_ENVELOPE_GAS
+        155_936 + 1_150_000 + (3_372_144 + 250_000) * 2 + crate::records::IMPORT_ENVELOPE_GAS
     );
     assert_eq!(edge.max_update_bytes().unwrap(), 4096 + 16384 * 2);
     assert_eq!(edge.max_tokens().unwrap(), 32 + 266 * 2);

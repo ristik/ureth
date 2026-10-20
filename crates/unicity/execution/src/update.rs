@@ -38,9 +38,9 @@ pub const MEMBER_GAS: u64 = 1000;
 /// Fixed admission and finalize reservation of an update.
 pub const UPDATE_GAS_BASE: u64 = 155_936;
 /// Per-epoch fixed part of the write allowance: admission scan and member debit, authentication,
-/// the predecessor closure and the cursor writes.
-pub const EPOCH_GAS_FIXED: u64 = 505_244;
-/// Per-member part of the write allowance of one installed epoch (the full 11 + 8N word entry).
+/// the entry's `C_e` cache word (B7), the predecessor closure and the cursor writes.
+pub const EPOCH_GAS_FIXED: u64 = 527_344;
+/// Per-member part of the write allowance of one installed epoch (the full 12 + 8N word entry).
 pub const EPOCH_GAS_PER_MEMBER: u64 = 177_800;
 /// The reservation of one installed entry at the committee ceiling. The registry keeps every
 /// entry forever, so there is no deletion term.
@@ -111,7 +111,7 @@ impl B1Context {
     /// The least `g_sys` the pinned profile admits: the admission base, the per-epoch gross write
     /// allowance at the committee ceiling, the measured `G_rest(B)` of the registry runtime, the
     /// root-record import envelope (`records::IMPORT_ENVELOPE_GAS`) and the records hook's
-    /// envelope: `155936 + 3350044*B + 1150000 + 250000*B + import + hook`. A smaller reservation
+    /// envelope: `155936 + 3372144*B + 1150000 + 250000*B + import + hook`. A smaller reservation
     /// is refused at startup, never truncated at runtime.
     pub fn required_system_gas(&self) -> Result<u64, UpdateError> {
         let b = self.b()?;
