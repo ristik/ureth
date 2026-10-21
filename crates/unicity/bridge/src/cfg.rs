@@ -31,7 +31,7 @@ fn fields(b: &[u8]) -> Result<Fields<'_>, Status> {
     if b.len() > MAX_CFG_BYTES {
         return Err(Status::InputTooLarge);
     }
-    let root = cbor::one(b, &mut cbor::Items::shared()).map_err(status_of_b2)?;
+    let root = cbor::one(b, &mut cbor::Items::default()).map_err(status_of_b2)?;
     let k = root.array::<16>().map_err(|_| Status::Shape)?;
     if k[0].major != 2 || k[0].data != DOMAIN {
         return Err(Status::Shape);

@@ -182,7 +182,7 @@ pub fn run(input: &[u8], gas: u64) -> Result<Output> {
         return Err(Error::OutOfGas);
     }
     let call = abi::decode(input)?;
-    let mut tokens = cbor::Items::shared();
+    let mut tokens = cbor::Items::default();
     let cfg = cbor::one(call.cfg, &mut tokens)?;
     semantics::check_cfg_network(cfg)?;
     let payload = cbor::one(call.payload, &mut tokens)?;

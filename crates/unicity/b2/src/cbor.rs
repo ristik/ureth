@@ -28,30 +28,25 @@ fn head(data: &mut &[u8]) -> Result<(u8, u64)> {
     };
     Ok((first >> 5, n))
 }
-/// The CBOR item budget of a scan. The standalone kernel shares one 32,768-item budget over the
-/// Cfg, the payload and every embedded object ([`Items::shared`]); the composition gives each
-/// object a fresh budget instead ([`Items::per_object`]), the history root an unbounded one.
+/// The CBOR item budget of each scanned object (bft-core: every object is scanned on its own
+/// budget). The Cfg, the payload and every embedded object get a fresh budget of `cap` items; the
+/// composition scans its history root with no ceiling, its items being paid.
 #[derive(Clone, Copy, Debug)]
 pub struct Items {
     count: usize,
     cap: usize,
-    fresh: bool,
 }
 impl Items {
-    /// The item ceiling of one budget.
+    /// The item ceiling of one object.
     pub const MAX: usize = 32768;
-    /// One budget shared by every scan.
-    pub const fn shared() -> Self {
-        Self { count: 0, cap: Self::MAX, fresh: false }
-    }
     /// A fresh budget of `cap` items for each scanned object.
     pub const fn per_object(cap: usize) -> Self {
-        Self { count: 0, cap, fresh: true }
+        Self { count: 0, cap }
     }
 }
 impl Default for Items {
     fn default() -> Self {
-        Self::shared()
+        Self::per_object(Self::MAX)
     }
 }
 fn scan(data: &mut &[u8], depth: usize, tokens: &mut Items) -> Result<()> {
@@ -87,9 +82,7 @@ fn scan(data: &mut &[u8], depth: usize, tokens: &mut Items) -> Result<()> {
     Ok(())
 }
 pub fn one<'a>(data: &'a [u8], tokens: &mut Items) -> Result<Item<'a>> {
-    if tokens.fresh {
-        tokens.count = 0;
-    }
+    tokens.count = 0;
     let mut rest = data;
     scan(&mut rest, 0, tokens)?;
     if !rest.is_empty() {

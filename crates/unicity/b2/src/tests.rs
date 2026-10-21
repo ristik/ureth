@@ -488,7 +488,7 @@ fn canonical_scanner_limits_and_errors() {
     // A per-object budget is fresh for each scan; under an uncapped parent a child above the
     // ceiling is rescanned without one.
     let wide = [vec![0x81, 0x99, 0x9c, 0x41], vec![0; 40001]].concat();
-    assert_eq!(cbor::one(&wide, &mut cbor::Items::shared()).unwrap_err(), E::TooManyItems);
+    assert_eq!(cbor::one(&wide, &mut cbor::Items::default()).unwrap_err(), E::TooManyItems);
     let root = cbor::one(&wide, &mut cbor::Items::per_object(usize::MAX)).unwrap();
     assert_eq!(root.children().next().unwrap().arg, 40001);
     let mut each = cbor::Items::per_object(2);

@@ -115,3 +115,55 @@ fn sealed_corpus_exact_kernel_outcomes() {
     assert!(expected.is_empty(), "unreplayed Kernel expectations");
     assert!(failures.is_empty(), "{}", failures.join("\n"));
 }
+
+/// Every 0x0104 kernel case of the current sealed corpus (`testdata/kernel-cases.json`, extracted
+/// from native-bridge-plugins `protocol/vectors`): the Go Kernel's exact output, or its reason as
+/// a shaped invalid output or a halt.
+#[test]
+fn current_corpus_kernel_cases() {
+    let c: Value = serde_json::from_str(include_str!("../testdata/kernel-cases.json")).unwrap();
+    let mut failures = Vec::new();
+    let cases = c["cases"].as_array().unwrap();
+    for c in cases {
+        let (id, op, cfg) = (c["id"].as_str().unwrap(), c["op"].as_str().unwrap(), raw(&c["cfg"]));
+        let payload = raw(&c["input"]);
+        let (operation, payload) = match op {
+            "prepareLock" => {
+                let n = c["aux"]["n"].as_str().unwrap().parse::<u64>().unwrap();
+                let amount = alloy_primitives::U256::from_str_radix(
+                    c["aux"]["amount"].as_str().unwrap(),
+                    10,
+                )
+                .unwrap()
+                .to_be_bytes::<32>();
+                let first = amount.iter().position(|b| *b != 0).unwrap_or(32);
+                (0, cbor::array(&[&cbor::uint(n), &cbor::bytes(&amount[first..]), &payload]))
+            }
+            "mint" => (1, payload),
+            _ => (2, payload),
+        };
+        // The API layer refuses a zero prepare amount (ErrLockInput); the Kernel cannot encode it
+        // and reads the empty amount as ErrIntRange, which kernel-expectations.json pins
+        // for the Go Kernel.
+        let want = if id == "prepare-zero-amount" {
+            serde_json::json!({"status": "error", "reason": "ErrIntRange"})
+        } else {
+            c["expected"].clone()
+        };
+        let got = run(&request(operation, &cfg, &payload), u64::MAX);
+        let ok = match (&got, want["status"].as_str().unwrap()) {
+            (Ok(out), "ok") => out.invalid.is_none() && out.bytes == raw(&want["output"]),
+            (Ok(out), "error") => {
+                out.invalid.is_some_and(|e| format!("Err{e:?}") == want["reason"].as_str().unwrap())
+            }
+            (Err(e), "error") => format!("Err{e:?}") == want["reason"].as_str().unwrap(),
+            _ => false,
+        };
+        if !ok {
+            let got = got.map(|o| o.invalid);
+            failures.push(format!("{id}: got {got:?}, want {want}"));
+        }
+    }
+    assert!(cases.len() >= 99, "{} cases", cases.len());
+    assert!(failures.is_empty(), "{} of {}:\n{}", failures.len(), cases.len(), failures.join("\n"));
+}

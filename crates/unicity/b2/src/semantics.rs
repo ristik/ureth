@@ -162,13 +162,6 @@ fn derive(cfg: &Cfg<'_>, n: u64, amt: &[u8], p: Item<'_>) -> Result<Outcome> {
 // This only parses the immutable witness, bounds it and binds its cfg. Authority,
 // UC trees, header and Ethereum MPT verification belong to offline issuance, not
 // the pure 0x0104 kernel. Return composition compares the permanent on-chain lock.
-const fn preserve_budget(e: E, fallback: E) -> E {
-    if matches!(e, E::TooManyItems | E::TooDeep | E::ProofTooLarge | E::InputTooLarge) {
-        e
-    } else {
-        fallback
-    }
-}
 fn proof_blob(it: Item<'_>, max: usize) -> Result<&[u8]> {
     let b = it.blob(max).map_err(|e| {
         if e == E::ProofTooLarge {
@@ -186,9 +179,9 @@ fn justification(cfg: &Cfg<'_>, b: &[u8], tokens: &mut Items) -> Result<u64> {
     if b.len() > 65536 {
         return Err(E::JustificationTooLarge);
     }
-    let j = cbor::one(b, tokens)
-        .and_then(|it| it.tagged::<6>(39049, 2))
-        .map_err(|e| preserve_budget(e, E::MintJustif))?;
+    // An embedded object that does not scan is that object's error, whatever the scan reports.
+    let j =
+        cbor::one(b, tokens).and_then(|it| it.tagged::<6>(39049, 2)).map_err(|_| E::MintJustif)?;
     let n = (|| {
         if j[1].uint(u64::MAX)? != cfg.chain ||
             j[2].bytes(20)? != cfg.vault ||
@@ -244,7 +237,7 @@ fn mint_data<'a>(cfg: &Cfg<'_>, b: &'a [u8], tokens: &mut Items) -> Result<&'a [
         }
         amount(a[1])
     })()
-    .map_err(|e| preserve_budget(e, E::MintData))
+    .map_err(|_| E::MintData)
 }
 struct Tx<'a> {
     raw: &'a [u8],
@@ -342,25 +335,28 @@ fn burn_inner(cfg: &Cfg<'_>, out: &mut Outcome, tx: &Tx<'_>, tokens: &mut Items)
         return Err(E::NotBurn);
     }
     let data = tx.data.ok_or(E::ReturnData)?;
+    // The field order of bft-core `checkReturn`: the identity fields and the recipient's shape,
+    // then the amount (any malformed or different amount is ReturnAmount), then the fixed fee
+    // slots.
     let r = cbor::one(data, tokens)?.tagged::<11>(39048, 1)?;
     if r[1].uint(u64::MAX)? != cfg.chain ||
         r[2].bytes(20)? != cfg.vault ||
         r[3].bytes(20)? != [0; 20] ||
         r[4].bytes(32)? != cfg.ty ||
-        r[5].bytes(32)? != cfg.aid ||
-        r[8].bytes(20)? != [0; 20] ||
-        !r[9].bytes(0)?.is_empty() ||
-        r[10].uint(u64::MAX)? != 0
+        r[5].bytes(32)? != cfg.aid
     {
         return Err(E::ReturnData);
     }
-    let a = amount(r[7])?;
+    let to = r[6].bytes(20)?;
+    let a = amount(r[7]).map_err(|_| E::ReturnAmount)?;
     let mut aw = [0; 32];
     aw[32 - a.len()..].copy_from_slice(a);
     if aw != out.amount {
         return Err(E::ReturnAmount);
     }
-    let to = r[6].bytes(20)?;
+    if r[8].bytes(20)? != [0; 20] || !r[9].bytes(0)?.is_empty() || r[10].uint(u64::MAX)? != 0 {
+        return Err(E::ReturnData);
+    }
     if to == [0; 20] || to == cfg.vault {
         return Err(E::ReturnRecip);
     }
@@ -371,13 +367,7 @@ fn burn_inner(cfg: &Cfg<'_>, out: &mut Outcome, tx: &Tx<'_>, tokens: &mut Items)
     Ok(())
 }
 fn burn(cfg: &Cfg<'_>, out: &mut Outcome, tx: &Tx<'_>, tokens: &mut Items) -> Result<()> {
-    burn_inner(cfg, out, tx, tokens).map_err(|e| {
-        if e.is_invalid() {
-            e
-        } else {
-            preserve_budget(e, E::ReturnData)
-        }
-    })
+    burn_inner(cfg, out, tx, tokens).map_err(|e| if e.is_invalid() { e } else { E::ReturnData })
 }
 pub(crate) fn evaluate(
     op: u8,
@@ -414,7 +404,7 @@ pub(crate) fn evaluate(
             E::MintJustif
         }
     })?;
-    let d = m[6].blob(IN_PAYLOAD).map_err(|e| preserve_budget(e, E::MintData))?;
+    let d = m[6].blob(IN_PAYLOAD).map_err(|_| E::MintData)?;
     let e = deadline(m[7])?;
     let cd0 = cd(g[1])?;
     let t0 = g[2].uint(u64::MAX)?;
@@ -433,7 +423,7 @@ pub(crate) fn evaluate(
         if i + 1 == count as usize &&
             let Some(data) = tx.data
         {
-            cbor::one(data, tokens).map_err(|e| preserve_budget(e, E::ReturnData))?;
+            cbor::one(data, tokens).map_err(|_| E::ReturnData)?;
         }
         transfers.push((tx, cert, t));
     }
