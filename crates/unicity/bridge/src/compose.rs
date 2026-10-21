@@ -124,7 +124,7 @@ fn check_policy(cfg: &Cfg, env: &Envelope<'_>) -> Result<u32, Status> {
     if hash(env.policy_body) != cfg.aggregator_policy_hash {
         return Err(Status::PolicyHash);
     }
-    let root = cbor::one(env.policy_body, &mut cbor::Items::shared()).map_err(status_of_b2)?;
+    let root = cbor::one(env.policy_body, &mut cbor::Items::default()).map_err(status_of_b2)?;
     let k = root.array::<3>().map_err(|_| Status::Shape)?;
     if k[0].major != 2 || k[0].data != POLICY_DOMAIN {
         return Err(Status::Shape);
@@ -280,11 +280,11 @@ fn open_anchor(a: &Anchor<'_>) -> Result<u64, Status> {
         return Err(Status::IROpening);
     }
     let shape = || -> Option<(u64, &[u8])> {
-        let root = cbor::one(a.input_record, &mut cbor::Items::shared()).ok()?;
+        let root = cbor::one(a.input_record, &mut cbor::Items::default()).ok()?;
         if root.major != 6 || root.arg != 39002 {
             return None;
         }
-        let k = cbor::one(root.data, &mut cbor::Items::shared()).ok()?.array::<10>().ok()?;
+        let k = cbor::one(root.data, &mut cbor::Items::default()).ok()?.array::<10>().ok()?;
         if k[0].uint(u64::MAX).ok()? != 1 {
             return None;
         }
