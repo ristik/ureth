@@ -228,3 +228,18 @@ fn an_actual_staticcall_warms_the_downstream_sload() {
         );
     }
 }
+
+/// The composition's anchor table is grouped under `Limits::COMPOSED`: seventeen occurrences of one
+/// claim exceed the standalone claim bound but group into one claim, one seal and one epoch.
+#[test]
+fn composed_limits_admit_more_claims() {
+    let (single, _, _) = vector("cert.single.ok");
+    let one = batch::dimensions_with(&single, &batch::Limits::COMPOSED).unwrap();
+    let mut input = vec![2, 0, 0, 17];
+    for _ in 0..17 {
+        input.extend_from_slice(&single[4..]);
+    }
+    assert_eq!(batch::dimensions(&input), Err(reth_unicity_b1::Malformed::Count));
+    let d = batch::dimensions_with(&input, &batch::Limits::COMPOSED).unwrap();
+    assert_eq!((d.k, d.a, d.s, d.e, d.q, d.p), (17, 1, 1, 1, one.q, one.p));
+}

@@ -45,7 +45,14 @@ impl Verdict for Registry<'_, '_, '_> {
     type Error = EvmInternalsError;
     fn batch(&mut self, request: &[u8]) -> Result<bool, Halt<Self::Error>> {
         // The composition pays the batch by its own schedule; the B1 charge is not applied twice.
-        match batch::run(request, u64::MAX, self.pins, &mut self.journal, None) {
+        match batch::run_with(
+            request,
+            u64::MAX,
+            self.pins,
+            &mut self.journal,
+            None,
+            &batch::Limits::COMPOSED,
+        ) {
             Ok(out) => Ok(out.bytes[63] == 1),
             // The request passed the same scan already (its dimensions); B1 would refuse it.
             Err(reth_unicity_b1::Error::Malformed(_)) => Ok(false),

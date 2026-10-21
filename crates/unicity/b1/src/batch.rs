@@ -28,6 +28,42 @@ pub const MAX_SIGNATURES: u64 = 256;
 pub const MAX_SEAL_SIGNATURES: u64 = 16;
 /// Largest cumulative sibling plus step count over all raw occurrences.
 pub const MAX_RAW_PATHS: u64 = 4_608;
+/// The aggregate bounds of one scan. A standalone call uses [`Limits::STANDARD`]; the composition
+/// (`reth-unicity-bridge`) groups and evaluates its anchor table under [`Limits::COMPOSED`]: the
+/// claim count is bounded by the u16 wire count, the request by the envelope, and the CBOR item
+/// budget applies to each UC on its own; its gas pays for all of it (bft-core `b1ref.Composed`).
+/// The per-object bounds (UC bytes, shard, signatures per seal) are the same in both.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Limits {
+    /// Largest request, in bytes.
+    pub bytes: usize,
+    /// Largest claim count.
+    pub claims: usize,
+    /// Largest signature count over the distinct seals.
+    pub signatures: u64,
+    /// Largest cumulative sibling plus step count over all raw occurrences.
+    pub raw_paths: u64,
+    /// Whether the CBOR item budget is per UC instead of shared by the call.
+    pub per_uc_items: bool,
+}
+impl Limits {
+    /// A standalone `CERT_BATCH_V2` call.
+    pub const STANDARD: Self = Self {
+        bytes: MAX_BYTES,
+        claims: MAX_CLAIMS,
+        signatures: MAX_SIGNATURES,
+        raw_paths: MAX_RAW_PATHS,
+        per_uc_items: false,
+    };
+    /// The composition's anchor table.
+    pub const COMPOSED: Self = Self {
+        bytes: usize::MAX,
+        claims: u16::MAX as usize,
+        signatures: u64::MAX,
+        raw_paths: u64::MAX,
+        per_uc_items: true,
+    };
+}
 /// Price of one registry word, subsidised and provisional until `any_age_cold_registry_v1` passes.
 pub const READ_GAS: u64 = 100;
 /// The registry words of one epoch at the committee ceiling: 11 metadata and 8 per member.
@@ -101,7 +137,11 @@ struct Scanned<'a> {
     dims: Dimensions,
 }
 
-fn scan(input: &[u8], gas: u64) -> Result<Scanned<'_>, Error<core::convert::Infallible>> {
+fn scan<'a>(
+    input: &'a [u8],
+    gas: u64,
+    lim: &Limits,
+) -> Result<Scanned<'a>, Error<core::convert::Infallible>> {
     let mut r = Reader { data: input };
     if r.uint(1)? != 2 {
         return Err(Malformed::Version.into());
@@ -110,7 +150,7 @@ fn scan(input: &[u8], gas: u64) -> Result<Scanned<'_>, Error<core::convert::Infa
         return Err(Malformed::Flags.into());
     }
     let k = r.uint(2)? as usize;
-    if k == 0 || k > MAX_CLAIMS {
+    if k == 0 || k > lim.claims {
         return Err(Malformed::Count.into());
     }
     let c = input.len() as u64;
@@ -124,11 +164,14 @@ fn scan(input: &[u8], gas: u64) -> Result<Scanned<'_>, Error<core::convert::Infa
     let mut paths = Vec::with_capacity(k);
     let mut sigs = Vec::with_capacity(k);
     for _ in 0..k {
+        if lim.per_uc_items {
+            tokens = 0;
+        }
         let before = r.data;
         let p = parse_claim(&mut r, &mut tokens)?;
         packed.push(&before[..before.len() - r.data.len()]);
         raw_paths += p.paths;
-        if raw_paths > MAX_RAW_PATHS || p.sigs > MAX_SEAL_SIGNATURES {
+        if raw_paths > lim.raw_paths || p.sigs > MAX_SEAL_SIGNATURES {
             return Err(Malformed::Limit.into());
         }
         // The shard's own depth fixes the sibling count; a different count is structural.
@@ -157,7 +200,7 @@ fn scan(input: &[u8], gas: u64) -> Result<Scanned<'_>, Error<core::convert::Infa
         }
         epochs.insert(claims[i].seal_fields[3].arg);
     }
-    if q > MAX_SIGNATURES {
+    if q > lim.signatures {
         return Err(Malformed::Limit.into());
     }
     let dims =
@@ -174,10 +217,15 @@ fn distinct(packed: &[&[u8]]) -> Vec<usize> {
 /// Scan and group a request without touching any state, returning its dimensions and charge.
 /// Used by oracles, gate preflights and tests; consensus code calls [`run`].
 pub fn dimensions(input: &[u8]) -> Result<Dimensions, Malformed> {
-    if input.len() > MAX_BYTES {
+    dimensions_with(input, &Limits::STANDARD)
+}
+
+/// [`dimensions`] under explicit aggregate bounds.
+pub fn dimensions_with(input: &[u8], lim: &Limits) -> Result<Dimensions, Malformed> {
+    if input.len() > lim.bytes {
         return Err(Malformed::Limit);
     }
-    match scan(input, u64::MAX) {
+    match scan(input, u64::MAX, lim) {
         Ok(s) => Ok(s.dims),
         Err(Error::Malformed(m)) => Err(m),
         Err(_) => unreachable!("scan reads no state and has unlimited gas"),
@@ -192,16 +240,28 @@ pub fn run<R: RegistryRead>(
     state: &mut R,
     counters: Option<&mut Counters>,
 ) -> Result<Out, Error<R::Error>> {
+    run_with(input, gas, pins, state, counters, &Limits::STANDARD)
+}
+
+/// [`run`] under explicit aggregate bounds.
+pub fn run_with<R: RegistryRead>(
+    input: &[u8],
+    gas: u64,
+    pins: &Pins,
+    state: &mut R,
+    counters: Option<&mut Counters>,
+    lim: &Limits,
+) -> Result<Out, Error<R::Error>> {
     let mut local = Counters::default();
     let counters = counters.unwrap_or(&mut local);
     *counters = Counters::default();
-    if input.len() > MAX_BYTES {
+    if input.len() > lim.bytes {
         return Err(Malformed::Limit.into());
     }
-    if gas < 60_000 + 16 * input.len() as u64 {
+    if gas < 60_000u64.saturating_add(16u64.saturating_mul(input.len() as u64)) {
         return Err(Error::OutOfGas);
     }
-    let scanned = scan(input, gas).map_err(widen)?;
+    let scanned = scan(input, gas, lim).map_err(widen)?;
     let charge = scanned.dims.gas();
     if gas < charge {
         return Err(Error::OutOfGas);

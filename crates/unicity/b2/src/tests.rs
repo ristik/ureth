@@ -32,18 +32,19 @@ fn config() -> Vec<u8> {
     ])
 }
 fn fields(data: &[u8]) -> Vec<Vec<u8>> {
-    let it = cbor::one(data, &mut 0).unwrap();
-    let it = if it.major == 6 { cbor::one(it.data, &mut 0).unwrap() } else { it };
+    let it = cbor::one(data, &mut cbor::Items::default()).unwrap();
+    let it =
+        if it.major == 6 { cbor::one(it.data, &mut cbor::Items::default()).unwrap() } else { it };
     it.children().map(|v| v.raw.to_vec()).collect()
 }
 fn field(data: &[u8], n: usize) -> Vec<u8> {
     fields(data)[n].clone()
 }
 fn blob(data: &[u8]) -> &[u8] {
-    cbor::one(data, &mut 0).unwrap().data
+    cbor::one(data, &mut cbor::Items::default()).unwrap().data
 }
 fn rebuild(data: &[u8], parts: &[Vec<u8>]) -> Vec<u8> {
-    let it = cbor::one(data, &mut 0).unwrap();
+    let it = cbor::one(data, &mut cbor::Items::default()).unwrap();
     let refs: Vec<_> = parts.iter().map(Vec::as_slice).collect();
     if it.major == 6 {
         tag(it.arg, &a(&refs))
@@ -476,17 +477,28 @@ fn canonical_scanner_limits_and_errors() {
         (&[0], E::Shape),
     ] {
         let e = if input == [0] {
-            cbor::one(input, &mut 0).unwrap().array::<2>().unwrap_err()
+            cbor::one(input, &mut cbor::Items::default()).unwrap().array::<2>().unwrap_err()
         } else {
-            assert_eq!(cbor::one(input, &mut 0).unwrap_err(), e);
+            assert_eq!(cbor::one(input, &mut cbor::Items::default()).unwrap_err(), e);
             e
         };
         assert!(matches!(e, E::NonCanonical | E::ForbiddenCBOR | E::Truncated | E::Shape));
     }
-    assert_eq!(cbor::one(&[0, 0], &mut 0).unwrap_err(), E::Trailing);
-    assert_eq!(cbor::one(&[0], &mut 32768).unwrap_err(), E::TooManyItems);
-    assert_eq!(cbor::one(&[vec![0x81; 17], vec![0]].concat(), &mut 0).unwrap_err(), E::TooDeep);
-    assert!(cbor::one(&[vec![0x81; 16], vec![0]].concat(), &mut 0).is_ok());
+    assert_eq!(cbor::one(&[0, 0], &mut cbor::Items::default()).unwrap_err(), E::Trailing);
+    // A per-object budget is fresh for each scan; under an uncapped parent a child above the
+    // ceiling is rescanned without one.
+    let wide = [vec![0x81, 0x99, 0x9c, 0x41], vec![0; 40001]].concat();
+    assert_eq!(cbor::one(&wide, &mut cbor::Items::shared()).unwrap_err(), E::TooManyItems);
+    let root = cbor::one(&wide, &mut cbor::Items::per_object(usize::MAX)).unwrap();
+    assert_eq!(root.children().next().unwrap().arg, 40001);
+    let mut each = cbor::Items::per_object(2);
+    assert!(cbor::one(&[0x81, 0], &mut each).is_ok() && cbor::one(&[0x81, 0], &mut each).is_ok());
+    assert_eq!(cbor::one(&[0], &mut cbor::Items::per_object(0)).unwrap_err(), E::TooManyItems);
+    assert_eq!(
+        cbor::one(&[vec![0x81; 17], vec![0]].concat(), &mut cbor::Items::default()).unwrap_err(),
+        E::TooDeep
+    );
+    assert!(cbor::one(&[vec![0x81; 16], vec![0]].concat(), &mut cbor::Items::default()).is_ok());
 }
 
 impl Fixture {
@@ -777,7 +789,7 @@ fn export_independent_constructor_cases() {
 }
 #[test]
 fn scanner_schema_guard_errors() {
-    let it = |b| cbor::one(b, &mut 0).unwrap();
+    let it = |b| cbor::one(b, &mut cbor::Items::default()).unwrap();
     assert_eq!(it(&[0]).uint(0), Ok(0));
     assert_eq!(it(&[1]).uint(0), Err(E::IntRange));
     assert_eq!(it(&[0x40]).uint(0), Err(E::Shape));
@@ -793,9 +805,9 @@ fn scanner_schema_guard_errors() {
     let tagged = tag(39032, &a(&[&u(1)]));
     assert_eq!(it(&tagged).tagged::<1>(39033, 1).unwrap_err(), E::Tag);
     assert_eq!(it(&tagged).tagged::<1>(39032, 2).unwrap_err(), E::Version);
-    assert_eq!(cbor::one(&[0x82, 0], &mut 0).unwrap_err(), E::Truncated);
-    assert_eq!(cbor::one(&[], &mut 0).unwrap_err(), E::Truncated);
-    assert_eq!(cbor::one(&[0x18], &mut 0).unwrap_err(), E::Truncated);
+    assert_eq!(cbor::one(&[0x82, 0], &mut cbor::Items::default()).unwrap_err(), E::Truncated);
+    assert_eq!(cbor::one(&[], &mut cbor::Items::default()).unwrap_err(), E::Truncated);
+    assert_eq!(cbor::one(&[0x18], &mut cbor::Items::default()).unwrap_err(), E::Truncated);
     let f = Fixture::new(0, None, 100);
     assert_eq!(run(&f.request(256), u64::MAX), Err(E::ABIFraming));
 }
@@ -851,5 +863,5 @@ fn sdk_network_range_with_reconstructed_signed_mint() {
 fn scanner_count_precheck_preserves_exact_diagnostic() {
     let mut input = vec![0x99, 0x80, 0x01]; // 32769 elements, only 32768 bytes
     input.resize(3 + 32768, 0);
-    assert_eq!(cbor::one(&input, &mut 0).unwrap_err(), E::Truncated);
+    assert_eq!(cbor::one(&input, &mut cbor::Items::default()).unwrap_err(), E::Truncated);
 }

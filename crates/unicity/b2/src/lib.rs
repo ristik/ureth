@@ -182,7 +182,7 @@ pub fn run(input: &[u8], gas: u64) -> Result<Output> {
         return Err(Error::OutOfGas);
     }
     let call = abi::decode(input)?;
-    let mut tokens = 0;
+    let mut tokens = cbor::Items::shared();
     let cfg = cbor::one(call.cfg, &mut tokens)?;
     semantics::check_cfg_network(cfg)?;
     let payload = cbor::one(call.payload, &mut tokens)?;
@@ -197,7 +197,7 @@ pub fn run(input: &[u8], gas: u64) -> Result<Output> {
     if gas < charge {
         return Err(Error::OutOfGas);
     }
-    let evaluated = semantics::evaluate(call.op, cfg, payload, &mut tokens);
+    let evaluated = semantics::evaluate(call.op, cfg, payload, MAX_TRANSFERS, &mut tokens);
     match evaluated {
         Ok(out) => Ok(Output { gas: charge, bytes: abi::encode(true, &out), invalid: None }),
         Err(e) if e.is_invalid() => Ok(Output {
@@ -208,9 +208,12 @@ pub fn run(input: &[u8], gas: u64) -> Result<Output> {
         Err(e) => Err(e),
     }
 }
-/// The relation of one composed redemption (`reth-unicity-bridge`), without ABI or gas: the same
-/// scan, count and evaluation as [`run`]. `charge` receives the leaf count once it is known,
-/// before any point parse, key derivation, hash or recovery, and may refuse it.
+/// The relation of one composed redemption (`reth-unicity-bridge`), without ABI or gas: the
+/// evaluation of [`run`] with the composition's bounds (bft-core `ComposedHistory`). The history
+/// has no transfer or item aggregate: the envelope bounds it and its items and leaves are paid
+/// before the call. The Cfg and every embedded object keep a fresh 32,768-item budget each.
+/// `charge` receives the leaf count once it is known, before any point parse, key derivation,
+/// hash or recovery, and may refuse it.
 #[doc(hidden)]
 pub fn relation(
     op: u8,
@@ -218,18 +221,18 @@ pub fn relation(
     payload: &[u8],
     charge: impl FnOnce(u64) -> Result<()>,
 ) -> Result<Outcome> {
-    let mut tokens = 0;
-    let cfg = cbor::one(cfg, &mut tokens)?;
+    let mut objects = cbor::Items::per_object(cbor::Items::MAX);
+    let cfg = cbor::one(cfg, &mut objects)?;
     semantics::check_cfg_network(cfg)?;
-    let payload = cbor::one(payload, &mut tokens)?;
+    let payload = cbor::one(payload, &mut cbor::Items::per_object(usize::MAX))?;
     let m = if op == 0 {
         0
     } else {
         let h = payload.array::<2>()?;
-        1 + h[1].count(MAX_TRANSFERS)?
+        1 + h[1].count(u64::MAX)?
     };
     charge(m)?;
-    semantics::evaluate(op, cfg, payload, &mut tokens)
+    semantics::evaluate(op, cfg, payload, u64::MAX, &mut objects)
 }
 fn hash(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()

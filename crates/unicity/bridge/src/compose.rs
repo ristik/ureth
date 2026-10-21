@@ -4,8 +4,7 @@ use crate::{
     abi::{self, Anchor, Call, Envelope, LeafProof},
     cfg::{self, hash, Cfg},
     status_of_b2, Fixed, Halt, Meter, Status, Verdict, MAX_ANCHORS, MAX_ANCHOR_UC_BYTES,
-    MAX_INPUT_RECORD_BYTES, MAX_POLICY_BYTES, MAX_RSMT_SIBLINGS, MAX_SEMANTIC_BYTES,
-    MAX_SUMMARY_BYTES, MAX_TRANSFERS,
+    MAX_INPUT_RECORD_BYTES, MAX_POLICY_BYTES, MAX_RSMT_SIBLINGS, MAX_SUMMARY_BYTES,
 };
 use reth_unicity_b1::{batch, cbor as native};
 use reth_unicity_b2::{cbor, Outcome};
@@ -38,10 +37,8 @@ pub(crate) fn compose<V: Verdict>(
     let partition = check_policy(&cfg, &env)?;
     pay(Meter::PER_ITEM * items(env.policy_body))?;
     // The kernel: the history's items and its leaf count are paid before any of its work.
-    pay(Meter::PER_ITEM * items(env.history) + Meter::PER_LEAF * history_leaves(env.history))?;
-    if env.history.len() > MAX_SEMANTIC_BYTES {
-        return Err(Status::InputTooLarge.into());
-    }
+    pay(Meter::PER_ITEM * history_items(env.history) +
+        Meter::PER_LEAF * history_leaves(env.history))?;
     let outcome = reth_unicity_b2::relation(call.op, call.cfg, env.history, |_| Ok(()))
         .map_err(status_of_b2)?;
     let leaf_anchor = plan_anchors(partition, &env, &outcome)?;
@@ -53,7 +50,8 @@ pub(crate) fn compose<V: Verdict>(
     pay(Meter::PER_ITEM *
         env.anchors.iter().map(|a| items(a.uc) + items(a.input_record)).sum::<u64>())?;
     let request = batch_request(&env.anchors);
-    let dims = batch::dimensions(&request).map_err(|_| Status::AnchorAuth)?;
+    let dims = batch::dimensions_with(&request, &batch::Limits::COMPOSED)
+        .map_err(|_| Status::AnchorAuth)?;
     pay(Meter::batch(&dims))?;
     let mut steps = Vec::with_capacity(env.leaf_proofs.len());
     for p in &env.leaf_proofs {
@@ -94,12 +92,23 @@ fn items(b: &[u8]) -> u64 {
     native::one(b, &mut n).map_or(0, |_| n as u64)
 }
 
-/// `historyLeaves`: one plus the transfers of a history that scans as `[genesis, [tx...]]` within
-/// the transfer bound, otherwise zero (the kernel then refuses it).
+/// The history's native scan: no item ceiling, its items are paid (`historyScan`).
+fn history_scan(history: &[u8]) -> Option<(native::Item<'_>, u64)> {
+    let mut n = 0;
+    native::one_capped(history, &mut n, usize::MAX).ok().map(|it| (it, n as u64))
+}
+
+/// `historyItems`: the history's J, zero if it does not scan.
+fn history_items(history: &[u8]) -> u64 {
+    history_scan(history).map_or(0, |(_, n)| n)
+}
+
+/// `historyLeaves`: one plus the transfers of a history that scans as `[genesis, [tx...]]`,
+/// otherwise zero (the kernel then refuses it).
 fn history_leaves(history: &[u8]) -> u64 {
-    let Ok(root) = native::one(history, &mut 0) else { return 0 };
+    let Some((root, _)) = history_scan(history) else { return 0 };
     let Ok([_, txs]) = root.array::<2>() else { return 0 };
-    if txs.major != 4 || txs.arg > MAX_TRANSFERS {
+    if txs.major != 4 {
         return 0;
     }
     1 + txs.arg
@@ -115,7 +124,7 @@ fn check_policy(cfg: &Cfg, env: &Envelope<'_>) -> Result<u32, Status> {
     if hash(env.policy_body) != cfg.aggregator_policy_hash {
         return Err(Status::PolicyHash);
     }
-    let root = cbor::one(env.policy_body, &mut 0).map_err(status_of_b2)?;
+    let root = cbor::one(env.policy_body, &mut cbor::Items::shared()).map_err(status_of_b2)?;
     let k = root.array::<3>().map_err(|_| Status::Shape)?;
     if k[0].major != 2 || k[0].data != POLICY_DOMAIN {
         return Err(Status::Shape);
@@ -271,11 +280,11 @@ fn open_anchor(a: &Anchor<'_>) -> Result<u64, Status> {
         return Err(Status::IROpening);
     }
     let shape = || -> Option<(u64, &[u8])> {
-        let root = cbor::one(a.input_record, &mut 0).ok()?;
+        let root = cbor::one(a.input_record, &mut cbor::Items::shared()).ok()?;
         if root.major != 6 || root.arg != 39002 {
             return None;
         }
-        let k = cbor::one(root.data, &mut 0).ok()?.array::<10>().ok()?;
+        let k = cbor::one(root.data, &mut cbor::Items::shared()).ok()?.array::<10>().ok()?;
         if k[0].uint(u64::MAX).ok()? != 1 {
             return None;
         }

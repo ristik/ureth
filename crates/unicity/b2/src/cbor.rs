@@ -28,9 +28,35 @@ fn head(data: &mut &[u8]) -> Result<(u8, u64)> {
     };
     Ok((first >> 5, n))
 }
-fn scan(data: &mut &[u8], depth: usize, tokens: &mut usize) -> Result<()> {
-    *tokens += 1;
-    if *tokens > 32768 {
+/// The CBOR item budget of a scan. The standalone kernel shares one 32,768-item budget over the
+/// Cfg, the payload and every embedded object ([`Items::shared`]); the composition gives each
+/// object a fresh budget instead ([`Items::per_object`]), the history root an unbounded one.
+#[derive(Clone, Copy, Debug)]
+pub struct Items {
+    count: usize,
+    cap: usize,
+    fresh: bool,
+}
+impl Items {
+    /// The item ceiling of one budget.
+    pub const MAX: usize = 32768;
+    /// One budget shared by every scan.
+    pub const fn shared() -> Self {
+        Self { count: 0, cap: Self::MAX, fresh: false }
+    }
+    /// A fresh budget of `cap` items for each scanned object.
+    pub const fn per_object(cap: usize) -> Self {
+        Self { count: 0, cap, fresh: true }
+    }
+}
+impl Default for Items {
+    fn default() -> Self {
+        Self::shared()
+    }
+}
+fn scan(data: &mut &[u8], depth: usize, tokens: &mut Items) -> Result<()> {
+    tokens.count += 1;
+    if tokens.count > tokens.cap {
         return Err(Error::TooManyItems);
     }
     if data.first().is_some_and(|b| b >> 5 == 7 && *b != 0xf6) {
@@ -60,7 +86,10 @@ fn scan(data: &mut &[u8], depth: usize, tokens: &mut usize) -> Result<()> {
     }
     Ok(())
 }
-pub fn one<'a>(data: &'a [u8], tokens: &mut usize) -> Result<Item<'a>> {
+pub fn one<'a>(data: &'a [u8], tokens: &mut Items) -> Result<Item<'a>> {
+    if tokens.fresh {
+        tokens.count = 0;
+    }
     let mut rest = data;
     scan(&mut rest, 0, tokens)?;
     if !rest.is_empty() {
@@ -151,7 +180,7 @@ impl<'a> Iterator for Children<'a> {
             return None;
         }
         let start = self.rest;
-        scan(&mut self.rest, 0, &mut 0).expect("validated CBOR child");
+        scan(&mut self.rest, 0, &mut Items::per_object(usize::MAX)).expect("validated CBOR child");
         Some(item(&start[..start.len() - self.rest.len()]).expect("validated CBOR head"))
     }
 }

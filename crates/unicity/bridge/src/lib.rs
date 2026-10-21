@@ -23,12 +23,10 @@ pub const MARKER: [u8; 32] = *b"UNICITY_BRIDGE_COMPOSE_V1\0\0\0\0\0\0\0";
 /// Exactly twelve words.
 pub const OUTPUT_BYTES: usize = 384;
 
-// The resource policy of bft-core `bridgeprofile/limits.go` (owner §36): the aggregate bounds are
-// the native kernels' own, the envelope bound is the ingress bound, the rest are per-object.
-pub(crate) const MAX_ANCHORS: usize = 16;
-pub(crate) const MAX_TRANSFERS: u64 = 64;
-pub(crate) const MAX_LEAVES: usize = MAX_TRANSFERS as usize + 1;
-pub(crate) const MAX_SEMANTIC_BYTES: usize = 128 << 10;
+// The resource policy of bft-core `bridgeprofile/limits.go` (owner §36): the composition streams
+// the history and the anchor table. It is bounded by the envelope (the ingress bound), the u16
+// anchor wire width and its gas; the rest are per-object bounds.
+pub(crate) const MAX_ANCHORS: usize = u16::MAX as usize;
 pub(crate) const MAX_ENVELOPE_BYTES: usize = 512 << 10;
 pub(crate) const MAX_CFG_BYTES: usize = 1024;
 pub(crate) const MAX_POLICY_BYTES: usize = 512;
