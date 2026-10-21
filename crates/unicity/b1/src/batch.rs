@@ -10,6 +10,7 @@ use crate::{
     Error, Malformed, Reader, RegistryRead,
 };
 use secp256k1::{ecdsa::Signature, Message, Secp256k1};
+use std::collections::{HashMap, HashSet};
 
 pub use crate::Output;
 
@@ -142,27 +143,19 @@ fn scan(input: &[u8], gas: u64) -> Result<Scanned<'_>, Error<core::convert::Infa
     if !r.data.is_empty() {
         return Err(Malformed::Trailing.into());
     }
-    // Canonical grouping: first-occurrence indexing on exact byte identities.
+    // Canonical grouping: first-occurrence indexing on exact byte identities, by set lookup.
     let mut a = 0;
     let mut p = 0;
-    let mut seals: Vec<&[u8]> = Vec::new();
-    let mut epochs: Vec<u64> = Vec::new();
+    let mut seals: HashSet<&[u8]> = HashSet::with_capacity(k);
+    let mut epochs: HashSet<u64> = HashSet::with_capacity(k);
     let mut q = 0;
-    for i in 0..k {
-        if (0..i).any(|j| packed[j] == packed[i]) {
-            continue;
-        }
+    for i in distinct(&packed) {
         a += 1;
         p += paths[i];
-        let raw = claims[i].seal.raw;
-        if !seals.contains(&raw) {
-            seals.push(raw);
+        if seals.insert(claims[i].seal.raw) {
             q += sigs[i];
         }
-        let epoch = claims[i].seal_fields[3].arg;
-        if !epochs.contains(&epoch) {
-            epochs.push(epoch);
-        }
+        epochs.insert(claims[i].seal_fields[3].arg);
     }
     if q > MAX_SIGNATURES {
         return Err(Malformed::Limit.into());
@@ -170,6 +163,12 @@ fn scan(input: &[u8], gas: u64) -> Result<Scanned<'_>, Error<core::convert::Infa
     let dims =
         Dimensions { c, k: k as u64, e: epochs.len() as u64, s: seals.len() as u64, q, a, p };
     Ok(Scanned { claims, packed, dims })
+}
+
+/// The first occurrence of each distinct packed claim, in request order.
+fn distinct(packed: &[&[u8]]) -> Vec<usize> {
+    let mut seen = HashSet::with_capacity(packed.len());
+    (0..packed.len()).filter(|&i| seen.insert(packed[i])).collect()
 }
 
 /// Scan and group a request without touching any state, returning its dimensions and charge.
@@ -220,11 +219,6 @@ const fn widen<E>(e: Error<core::convert::Infallible>) -> Error<E> {
     }
 }
 
-struct Loaded {
-    epoch: u64,
-    entry: Entry,
-}
-
 fn evaluate<R: RegistryRead>(
     s: &Scanned<'_>,
     pins: &Pins,
@@ -237,18 +231,15 @@ fn evaluate<R: RegistryRead>(
         return Ok(false);
     }
     // Distinct claims in first-use order, with the declared epochs they use.
-    let k = s.claims.len();
-    let distinct: Vec<usize> =
-        (0..k).filter(|&i| !(0..i).any(|j| s.packed[j] == s.packed[i])).collect();
-    let mut epochs: Vec<u64> = Vec::new();
-    for &i in &distinct {
-        let e = s.claims[i].seal_fields[3].arg;
-        if !epochs.contains(&e) {
-            epochs.push(e);
-        }
-    }
+    let distinct = distinct(&s.packed);
+    let mut first_use = HashSet::with_capacity(distinct.len());
+    let epochs: Vec<u64> = distinct
+        .iter()
+        .map(|&i| s.claims[i].seal_fields[3].arg)
+        .filter(|&e| first_use.insert(e))
+        .collect();
     // Load and validate every requested epoch inside [g,U] before any cryptography.
-    let mut loaded: Vec<Loaded> = Vec::new();
+    let mut loaded: HashMap<u64, Entry> = HashMap::with_capacity(epochs.len());
     for &e in &epochs {
         if e < common.genesis || e > common.origin {
             continue;
@@ -268,9 +259,8 @@ fn evaluate<R: RegistryRead>(
         if impossible {
             return Err(Error::Registry);
         }
-        loaded.push(Loaded { epoch: e, entry });
+        loaded.insert(e, entry);
     }
-    let find = |e: u64| loaded.iter().find(|l| l.epoch == e).map(|l| &l.entry);
     let mut valid = true;
     // Distinct claims: every one is folded, whatever the others do.
     for &i in &distinct {
@@ -279,24 +269,22 @@ fn evaluate<R: RegistryRead>(
         valid &= folds(&s.claims[i]);
     }
     // Two different claims for one shard under one seal can never both hold.
-    for (n, &i) in distinct.iter().enumerate() {
-        for &j in &distinct[..n] {
-            let (a, b) = (&s.claims[j], &s.claims[i]);
-            if a.seal.raw == b.seal.raw && a.partition == b.partition && a.shard == b.shard {
-                valid = false;
-            }
+    let mut slots = HashSet::with_capacity(distinct.len());
+    for &i in &distinct {
+        let c = &s.claims[i];
+        if !slots.insert((c.seal.raw, c.partition, c.shard)) {
+            valid = false;
         }
     }
     // Distinct seals, each evaluated once.
-    let mut seen: Vec<&[u8]> = Vec::new();
+    let mut seen = HashSet::with_capacity(distinct.len());
     for &i in &distinct {
         let c = &s.claims[i];
-        if seen.contains(&c.seal.raw) {
+        if !seen.insert(c.seal.raw) {
             continue;
         }
-        seen.push(c.seal.raw);
         let f = c.seal_fields;
-        let Some(entry) = find(f[3].arg) else {
+        let Some(entry) = loaded.get(&f[3].arg) else {
             valid = false;
             continue;
         };

@@ -5,6 +5,7 @@ use crate::{
 use k256::ecdsa::{
     signature::hazmat::PrehashVerifier, RecoveryId, Signature, SigningKey, VerifyingKey,
 };
+use std::collections::HashSet;
 
 struct Cfg<'a> {
     raw: &'a [u8],
@@ -303,7 +304,7 @@ fn step(
     cd: &Cd<'_>,
     t: u64,
     k: &VerifyingKey,
-    seen: &mut Vec<[u8; 32]>,
+    seen: &mut HashSet<[u8; 32]>,
 ) -> Result<Leaf> {
     let th = hash(raw);
     if cd.pred.raw != pred || cd.source != source || cd.tx != th {
@@ -320,11 +321,10 @@ fn step(
     insert_sid(seen, sid)?;
     Ok(Leaf { sid, tx_hash: th, reference_time: t, value: hash_array(&[&bytes(&th), &uint(t)]) })
 }
-fn insert_sid(seen: &mut Vec<[u8; 32]>, sid: [u8; 32]) -> Result<()> {
-    if seen.contains(&sid) {
+fn insert_sid(seen: &mut HashSet<[u8; 32]>, sid: [u8; 32]) -> Result<()> {
+    if !seen.insert(sid) {
         return Err(E::RepeatedSID);
     }
-    seen.push(sid);
     Ok(())
 }
 fn output_state(source: &[u8; 32], mask: &[u8]) -> [u8; 32] {
@@ -446,7 +446,7 @@ pub(crate) fn evaluate(
     let mk = SigningKey::from_slice(&secret).map_err(|_| E::MinterKey)?;
     let mp = signature_pred(mk.verifying_key());
     let source = hash_array(&[&bytes(&out.token_id), &bytes(&hash(b"TOKENID"))]);
-    let mut seen = Vec::with_capacity(count as usize + 1);
+    let mut seen = HashSet::with_capacity(count as usize + 1);
     out.leaves.push(step(&mp, &source, g[0].raw, e, &cd0, t0, mk.verifying_key(), &mut seen)?);
     let mut state = output_state(&source, &out.token_id);
     let mut owner = m[2];
@@ -488,7 +488,7 @@ mod tests {
     use super::*;
     #[test]
     fn repeated_sid_is_exact_error() {
-        let mut seen = Vec::new();
+        let mut seen = HashSet::new();
         assert_eq!(insert_sid(&mut seen, [1; 32]), Ok(()));
         assert_eq!(insert_sid(&mut seen, [1; 32]), Err(E::RepeatedSID));
         assert_eq!(insert_sid(&mut seen, [2; 32]), Ok(()));
