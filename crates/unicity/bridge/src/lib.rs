@@ -27,7 +27,7 @@ pub const OUTPUT_BYTES: usize = 384;
 // the history and the anchor table. It is bounded by the envelope (the ingress bound), the u16
 // anchor wire width and its gas; the rest are per-object bounds.
 pub(crate) const MAX_ANCHORS: usize = u16::MAX as usize;
-pub(crate) const MAX_ENVELOPE_BYTES: usize = 512 << 10;
+pub(crate) const MAX_ENVELOPE_BYTES: usize = 2 << 20;
 pub(crate) const MAX_CFG_BYTES: usize = 1024;
 pub(crate) const MAX_POLICY_BYTES: usize = 512;
 pub(crate) const MAX_ANCHOR_UC_BYTES: usize = 8 << 10;
