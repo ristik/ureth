@@ -1,11 +1,15 @@
 use crate::{
-    cbor::{self, array, bytes, tag, uint, Item},
+    cbor::{self, array, bytes, tag, uint, Item, Items},
     hash, Error as E, Leaf, Outcome, Result,
 };
 use k256::ecdsa::{
     signature::hazmat::PrehashVerifier, RecoveryId, Signature, SigningKey, VerifyingKey,
 };
 use std::collections::HashSet;
+
+/// A byte-string field is bounded by the payload that carries it: the standalone kernel's ABI
+/// bounds the payload (`MAX_HISTORY`), the composition's envelope bounds the history.
+const IN_PAYLOAD: usize = usize::MAX;
 
 struct Cfg<'a> {
     raw: &'a [u8],
@@ -79,7 +83,7 @@ pub(crate) fn check_cfg_network(it: Item<'_>) -> Result<()> {
     Ok(())
 }
 fn amount(it: Item<'_>) -> Result<&[u8]> {
-    let b = it.blob(crate::MAX_HISTORY)?;
+    let b = it.blob(IN_PAYLOAD)?;
     if b.is_empty() || b.len() > 32 || b[0] == 0 {
         return Err(E::IntRange);
     }
@@ -99,8 +103,8 @@ fn predicate(it: Item<'_>) -> Result<(u8, &[u8])> {
     let a = it.tagged::<3>(39032, 1).map_err(|e| if e == E::Version { E::Predicate } else { e })?;
     // Code and key lengths describe the supported predicate relation, not a
     // proof budget. The complete outer CBOR was already bounded and scanned.
-    let code = a[1].blob(crate::MAX_HISTORY)?;
-    let params = a[2].blob(crate::MAX_HISTORY)?;
+    let code = a[1].blob(IN_PAYLOAD)?;
+    let params = a[2].blob(IN_PAYLOAD)?;
     match code {
         [1] if params.len() == 33 && matches!(params[0], 2 | 3) => Ok((1, params)),
         [2] if params.len() == 32 => Ok((2, params)),
@@ -178,7 +182,7 @@ fn proof_blob(it: Item<'_>, max: usize) -> Result<&[u8]> {
     }
     Ok(b)
 }
-fn justification(cfg: &Cfg<'_>, b: &[u8], tokens: &mut usize) -> Result<u64> {
+fn justification(cfg: &Cfg<'_>, b: &[u8], tokens: &mut Items) -> Result<u64> {
     if b.len() > 65536 {
         return Err(E::JustificationTooLarge);
     }
@@ -231,7 +235,7 @@ fn justification(cfg: &Cfg<'_>, b: &[u8], tokens: &mut usize) -> Result<u64> {
     }
     Ok(n)
 }
-fn mint_data<'a>(cfg: &Cfg<'_>, b: &'a [u8], tokens: &mut usize) -> Result<&'a [u8]> {
+fn mint_data<'a>(cfg: &Cfg<'_>, b: &'a [u8], tokens: &mut Items) -> Result<&'a [u8]> {
     (|| {
         let d = cbor::one(b, tokens)?.tagged::<3>(39050, 1)?;
         let a = d[1].array::<1>()?[0].array::<2>()?;
@@ -274,7 +278,7 @@ fn transfer(it: Item<'_>) -> Result<Tx<'_>> {
         raw: it.raw,
         pred: a[1],
         mask: a[2].bytes(32)?,
-        data: if a[3].null() { None } else { Some(a[3].blob(crate::MAX_HISTORY)?) },
+        data: if a[3].null() { None } else { Some(a[3].blob(IN_PAYLOAD)?) },
         e: deadline(a[4])?,
     })
 }
@@ -332,7 +336,7 @@ fn output_state(source: &[u8; 32], mask: &[u8]) -> [u8; 32] {
     imprint[2..].copy_from_slice(source);
     hash_array(&[&bytes(&imprint), &bytes(mask)])
 }
-fn burn_inner(cfg: &Cfg<'_>, out: &mut Outcome, tx: &Tx<'_>, tokens: &mut usize) -> Result<()> {
+fn burn_inner(cfg: &Cfg<'_>, out: &mut Outcome, tx: &Tx<'_>, tokens: &mut Items) -> Result<()> {
     let (typ, params) = predicate(tx.pred)?;
     if typ != 2 {
         return Err(E::NotBurn);
@@ -366,7 +370,7 @@ fn burn_inner(cfg: &Cfg<'_>, out: &mut Outcome, tx: &Tx<'_>, tokens: &mut usize)
     out.release_to.copy_from_slice(to);
     Ok(())
 }
-fn burn(cfg: &Cfg<'_>, out: &mut Outcome, tx: &Tx<'_>, tokens: &mut usize) -> Result<()> {
+fn burn(cfg: &Cfg<'_>, out: &mut Outcome, tx: &Tx<'_>, tokens: &mut Items) -> Result<()> {
     burn_inner(cfg, out, tx, tokens).map_err(|e| {
         if e.is_invalid() {
             e
@@ -379,7 +383,8 @@ pub(crate) fn evaluate(
     op: u8,
     cfg: Item<'_>,
     payload: Item<'_>,
-    tokens: &mut usize,
+    transfers: u64,
+    tokens: &mut Items,
 ) -> Result<Outcome> {
     let cfg = Cfg::parse(cfg)?;
     if op == 0 {
@@ -388,7 +393,7 @@ pub(crate) fn evaluate(
     }
     let h = payload.array::<2>()?;
     let g = h[0].array::<3>()?;
-    let count = h[1].count(crate::MAX_TRANSFERS)?;
+    let count = h[1].count(transfers)?;
     if op == 1 && count != 0 {
         return Err(E::HasTransfers);
     }
@@ -409,7 +414,7 @@ pub(crate) fn evaluate(
             E::MintJustif
         }
     })?;
-    let d = m[6].blob(crate::MAX_HISTORY).map_err(|e| preserve_budget(e, E::MintData))?;
+    let d = m[6].blob(IN_PAYLOAD).map_err(|e| preserve_budget(e, E::MintData))?;
     let e = deadline(m[7])?;
     let cd0 = cd(g[1])?;
     let t0 = g[2].uint(u64::MAX)?;

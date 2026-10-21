@@ -26,9 +26,11 @@ fn head(r: &mut Reader<'_>) -> Result<(u8, u64), Malformed> {
     }
     Ok((first >> 5, n))
 }
-fn scan(r: &mut Reader<'_>, depth: usize, tokens: &mut usize) -> Result<(), Malformed> {
+/// The item ceiling of one scan budget.
+pub const MAX_ITEMS: usize = 32768;
+fn scan(r: &mut Reader<'_>, depth: usize, tokens: &mut usize, cap: usize) -> Result<(), Malformed> {
     *tokens += 1;
-    if *tokens > 32768 {
+    if *tokens > cap {
         return Err(Malformed::Limit);
     }
     if r.data.first().is_some_and(|b| b >> 5 == 7 && *b != 0xf6) {
@@ -64,7 +66,7 @@ fn scan(r: &mut Reader<'_>, depth: usize, tokens: &mut usize) -> Result<(), Malf
             let mut keys: [&[u8]; 64] = [&[]; 64];
             for i in 0..count {
                 let start = r.data;
-                scan(r, depth + 1, tokens)?;
+                scan(r, depth + 1, tokens, cap)?;
                 if m == 5 && i % 2 == 0 {
                     let key = &start[..start.len() - r.data.len()];
                     let idx = (i / 2) as usize;
@@ -82,8 +84,17 @@ fn scan(r: &mut Reader<'_>, depth: usize, tokens: &mut usize) -> Result<(), Malf
 }
 
 pub fn one<'a>(data: &'a [u8], tokens: &mut usize) -> Result<Item<'a>, Malformed> {
+    one_capped(data, tokens, MAX_ITEMS)
+}
+/// [`one`] under an explicit item ceiling for the budget `tokens` (the composition's history root
+/// has none: its items are paid).
+pub fn one_capped<'a>(
+    data: &'a [u8],
+    tokens: &mut usize,
+    cap: usize,
+) -> Result<Item<'a>, Malformed> {
     let mut r = Reader { data };
-    scan(&mut r, 0, tokens)?;
+    scan(&mut r, 0, tokens, cap)?;
     if !r.data.is_empty() {
         return Err(Malformed::Trailing);
     }
@@ -169,7 +180,8 @@ impl<'a> Iterator for Children<'a> {
         let mut r = Reader { data: start };
         // All views originate in the successful full-tree scan. Rescanning a
         // child only locates its boundary; it cannot observe new caller bytes.
-        scan(&mut r, 0, &mut 0).expect("validated CBOR child");
+        // A child of a validated item, whatever budget the parent had: no ceiling here.
+        scan(&mut r, 0, &mut 0, usize::MAX).expect("validated CBOR child");
         self.rest = r.data;
         Some(item(&start[..start.len() - r.data.len()]).expect("validated CBOR head"))
     }
@@ -185,6 +197,11 @@ mod tests {
         let allowed = [vec![0x81; 16], vec![0xf6]].concat();
         assert!(one(&allowed, &mut 0).is_ok());
         assert_eq!(one(&[0], &mut 32768).unwrap_err(), Malformed::Limit);
+        // Under an uncapped parent, iterating a child above the ceiling rescans it without one.
+        let wide = [vec![0x81, 0x99, 0x9c, 0x41], vec![0; 40001]].concat();
+        let root = one_capped(&wide, &mut 0, usize::MAX).unwrap();
+        assert_eq!(one(&wide, &mut 0).unwrap_err(), Malformed::Limit);
+        assert_eq!(root.children().next().unwrap().arg, 40001);
         for data in [
             &[0x18, 0x17][..],
             &[0x19, 0, 255],

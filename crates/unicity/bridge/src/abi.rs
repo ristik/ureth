@@ -1,7 +1,7 @@
 //! Strict canonical ABI: the call input and the proof envelope. Every offset must be the one the
 //! canonical encoder writes, every padding byte zero, every narrow integer in range and nothing may
 //! follow the last element; counts are bounded before anything is collected.
-use crate::{Status, MAX_ANCHORS, MAX_ENVELOPE_BYTES, MAX_LEAVES};
+use crate::{Status, MAX_ANCHORS, MAX_ENVELOPE_BYTES};
 
 /// `abi.encode(uint8 op, bytes cfg, bytes envelope)`.
 #[derive(Clone, Copy, Debug)]
@@ -107,8 +107,8 @@ pub(crate) fn decode_envelope(b: &[u8]) -> Result<Envelope<'_>, Status> {
     layout(b).ok_or(Status::ABIFraming)
 }
 
-/// `boundEnvelopeCounts`: the declared anchor and leaf counts and the declared siblings in sum,
-/// which can never exceed the envelope's words.
+/// `boundEnvelopeCounts`: the declared anchor count within the u16 wire width, and the declared
+/// leaf count and siblings in sum, which can never exceed the envelope's bytes and words.
 fn bound_counts(b: &[u8]) -> Result<(), Status> {
     let n = b.len() as u64;
     let w = |off: u64| -> Result<u64, Status> {
@@ -129,9 +129,6 @@ fn bound_counts(b: &[u8]) -> Result<(), Status> {
     let nl = w(off_leaves)?;
     if nl > n {
         return Err(Status::ABIFraming);
-    }
-    if nl > MAX_LEAVES as u64 {
-        return Err(Status::TooManyPaths);
     }
     let (room, mut steps) = (n / 32, 0u64);
     for i in 0..nl {
