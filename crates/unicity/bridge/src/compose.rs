@@ -9,6 +9,7 @@ use crate::{
 };
 use reth_unicity_b1::{batch, cbor as native};
 use reth_unicity_b2::{cbor, Outcome};
+use std::collections::HashSet;
 
 /// A stage's outcome: a relation status, or a halt that ends the call.
 pub(crate) enum Stop<E> {
@@ -155,7 +156,7 @@ fn in_shard(shard: &[u8], sid: &[u8; 32]) -> bool {
 
 /// `PlanAnchors`: each leaf's anchor, numbered by first use in leaf order, none unused, the leaf
 /// inside its anchor's shard prefix. Distinctness is by complete UC bytes, compared by digest in a
-/// sorted list (no pairwise scan).
+/// set (no pairwise scan).
 fn plan_anchors(
     partition: u32,
     env: &Envelope<'_>,
@@ -171,16 +172,14 @@ fn plan_anchors(
     if env.anchors.is_empty() || env.anchors.len() > sids.len() {
         return Err(Status::PolicyAnchors);
     }
-    let mut digests = Vec::with_capacity(env.anchors.len());
+    let mut digests = HashSet::with_capacity(env.anchors.len());
     for a in &env.anchors {
         if shard_depth(a.shard).is_none() || a.partition != partition {
             return Err(Status::PolicyTuple);
         }
-        let h = hash(a.uc);
-        if digests.contains(&h) {
+        if !digests.insert(hash(a.uc)) {
             return Err(Status::PolicyAnchors);
         }
-        digests.push(h);
     }
     let mut plan = Vec::with_capacity(sids.len());
     let mut next = 0;
