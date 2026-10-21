@@ -1,9 +1,10 @@
 //! Actual STATICCALL callers of `BRIDGE_COMPOSE_V1` at `0x0105` through the real EVM.
 //!
-//! The oracle's `native-compose` cases whose status is decided before the anchor table's batch (so
-//! independent of the registry) are sent by a contract executing `STATICCALL` against an EVM
-//! created by [`UnicityEvmFactory`]: each returns the oracle's 384 bytes, exactly its metered gas
-//! succeeds and one gas less is an exceptional halt. The non-canonical input halts.
+//! The oracle's `native-compose` cases (sealed native-bridge-plugins corpus) whose status is
+//! decided before the anchor table's batch (so independent of the registry) are sent by a contract
+//! executing `STATICCALL` against an EVM created by [`UnicityEvmFactory`]: each returns the
+//! oracle's 384 bytes, exactly its metered gas succeeds and one gas less is an exceptional halt.
+//! The non-canonical input halts.
 
 use alloy_evm::{precompiles::Precompile, Evm, EvmEnv, EvmFactory};
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
