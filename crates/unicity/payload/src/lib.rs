@@ -35,6 +35,7 @@
 
 pub mod consensus;
 pub mod engine;
+pub mod gossip;
 pub mod node;
 pub mod prune;
 pub mod recovery;
@@ -43,6 +44,7 @@ pub mod rpc;
 
 pub use consensus::UnicityConsensus;
 pub use engine::UnicityEngineTypes;
+pub use gossip::{GossipGate, TxGossipNetwork, UnicityNetworkBuilder};
 pub use node::{
     UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityExecutorBuilder, UnicityNode,
     UnicityNodeAddOns, UnicityPayloadBuilderBuilder, UnicityRetentionConfig, UnicitySealConfig,
