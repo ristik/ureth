@@ -1,0 +1,56 @@
+# B7 PR 3 measurement (bft-core briefs/dev4-b7-pr3-plan.md): BRIDGE_COMPOSE_V1 over the bft-core genbench case matrix through the
+# production provider with the B1 registry in the journal, with ECRECOVER and SHA256 baselines, on a GitHub standard runner.
+#
+# Trigger: push a branch named bench-run/<anything> (workflow_dispatch needs this file on the default branch). The oracle commit is
+# crates/unicity/bridge/bench-oracle.txt of the pushed commit. Three runs of the bench binary are uploaded as one artifact.
+name: b7-bench
+
+on:
+  push:
+    branches: ['bench-run/**']
+
+permissions:
+  contents: read
+
+jobs:
+  bench:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Oracle commit
+        id: oracle
+        run: echo "commit=$(tr -d '[:space:]' < crates/unicity/bridge/bench-oracle.txt)" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ristik/bft-core
+          ref: ${{ steps.oracle.outputs.commit }}
+          path: .oracle
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: .oracle/go.mod
+          cache: false
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Generate the cases
+        working-directory: .oracle
+        run: go run ./cmd/genbench -out "$RUNNER_TEMP/cases.json"
+      - name: Build the bench
+        run: cargo build --release --locked -p reth-unicity-bridge --example bench
+      - name: Run the bench three times
+        env:
+          ORACLE: ${{ steps.oracle.outputs.commit }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/out"
+          lscpu > "$RUNNER_TEMP/out/lscpu.txt"
+          for i in 1 2 3; do
+            target/release/examples/bench "$RUNNER_TEMP/cases.json" 5 "$RUNNER_TEMP/out/run-$i.json"
+          done
+          echo "$ORACLE" > "$RUNNER_TEMP/out/oracle.txt"
+          git rev-parse HEAD > "$RUNNER_TEMP/out/ureth.txt"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: b7-bench
+          path: ${{ runner.temp }}/out
