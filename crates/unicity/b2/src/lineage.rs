@@ -185,7 +185,7 @@ fn inclusion<'a>(it: native::Item<'a>) -> Result<(native::Item<'a>, u64)> {
     let f = it.tagged::<5>(TAG_INCLUSION).map_err(nerr)?;
     // Document order, as the oracle's `decodeProof`: the certification data, then the reference
     // time.
-    cd_strict(cbor::one(f[1].raw, &mut Items::default())?)?;
+    cd_strict(cbor::one(f[1].raw, &mut Items::native(Items::MAX))?)?;
     let t = f[2].uint(u64::MAX).map_err(nerr)?;
     if f[3].major != 2 {
         return Err(E::Shape);
@@ -253,7 +253,7 @@ fn open_token<'a>(token: native::Item<'a>) -> Result<[native::Item<'a>; 3]> {
 fn project(token: native::Item<'_>) -> Result<(Vec<u8>, u64)> {
     let [_, genesis, txs] = open_token(token)?;
     let g = genesis.array::<2>().map_err(nerr)?;
-    decode_mint(cbor::one(g[0].raw, &mut Items::default())?)?;
+    decode_mint(cbor::one(g[0].raw, &mut Items::native(Items::MAX))?)?;
     let (cd0, t0) = inclusion(g[1])?;
     let mut triples = Vec::new();
     if txs.major != 4 {
@@ -262,7 +262,7 @@ fn project(token: native::Item<'_>) -> Result<(Vec<u8>, u64)> {
     let mut count = 0u64;
     for p in txs.children() {
         let pair = p.array::<2>().map_err(nerr)?;
-        transfer_strict(cbor::one(pair[0].raw, &mut Items::default())?)?;
+        transfer_strict(cbor::one(pair[0].raw, &mut Items::native(Items::MAX))?)?;
         let (cd, t) = inclusion(pair[1])?;
         triples.push(array(&[pair[0].raw, cd.raw, &uint(t)]));
         count += 1;
