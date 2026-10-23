@@ -1,4 +1,5 @@
-//! `BRIDGE_COMPOSE_V1` at `0x0105`: the whole composed relation of one bridge redemption, natively
+//! `BRIDGE_COMPOSE_V1` (protocol 5; registered nowhere since protocol 6, whose `BRIDGE_COMPOSE_V2` is served at `0x0105`):
+//! the whole composed relation of one bridge redemption, natively
 //! (B7 direct path, bft-core briefs/dev4-b7-native-compose-spec.md). The relation is exactly
 //! bft-core `bridgeprofile.Compose`: framing and the resource policy, the policy body, the B2
 //! kernel, the anchor table, one `CERT_BATCH_V2` evaluation against the registry in the journal,
