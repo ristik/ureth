@@ -176,6 +176,12 @@ fn justification_tag(j: &[u8]) -> Option<u64> {
 
 fn inclusion<'a>(it: native::Item<'a>) -> Result<(native::Item<'a>, u64)> {
     // tag(39033, [1, CD, t, b(path), UC])
+    if it.major != 6 {
+        return Err(E::Shape);
+    }
+    if it.arg != TAG_INCLUSION {
+        return Err(E::Tag);
+    }
     let f = it.tagged::<5>(TAG_INCLUSION).map_err(nerr)?;
     // Document order, as the oracle's `decodeProof`: the certification data, then the reference
     // time.
@@ -364,14 +370,15 @@ fn level(
         let t = a[2].uint(u64::MAX)?;
         transfers.push((tx, cert, t));
     }
-    let n = if root { Some(semantics::justification(cfg, j, tokens)?) } else { None };
-    let amt = semantics::mint_data(cfg, d, tokens)?;
+    // The oracle's order (`verifyLevel`): network, type, then the lock reason and the data.
     if network != cfg.network {
         return Err(E::MintShape);
     }
     if m[4].data != cfg.ty {
         return Err(E::MintType);
     }
+    let n = if root { Some(semantics::justification(cfg, j, tokens)?) } else { None };
+    let amt = semantics::mint_data(cfg, d, tokens)?;
     let (id, base) = if let Some(n) = n {
         let out = semantics::derive(cfg, n, amt, m[2])?;
         if m[3].data != out.salt {

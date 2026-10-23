@@ -139,7 +139,7 @@ fn every_split_native_case_replays_exactly() {
             ("halt", Err(Halt::Malformed)) => want["values"]["halt"] == "abi",
             ("halt", Err(Halt::OutOfGas)) => want["values"]["halt"] == "out-of-gas",
             ("ok", Ok(out)) => {
-                with_split += usize::from(out.bytes[447] != 0 && out.status == Status::Ok);
+                with_split += usize::from(out.bytes[479] != 0 && out.status == Status::Ok);
                 want["values"]["status"].as_str().unwrap() == out.status.code().to_string() &&
                     want["values"]["statusName"].as_str().unwrap() == out.status.name() &&
                     want["values"]["gas"].as_str().unwrap() == out.gas.to_string() &&

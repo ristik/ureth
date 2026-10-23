@@ -61,6 +61,11 @@ fn scan(
                     if strict && n > 64 {
                         return Err(Malformed::Limit);
                     }
+                    // Each pair needs at least two bytes: bound the head before doubling it (a
+                    // loose scan reaches here with any head).
+                    if n > r.data.len() as u64 {
+                        return Err(Malformed::Truncated);
+                    }
                     n * 2
                 }
                 6 => 1,
@@ -212,6 +217,20 @@ impl<'a> Iterator for Children<'a> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_loose_map_head_is_bounded_before_it_is_doubled() {
+        for head in [
+            [0xbb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            [0xbb, 0x80, 0, 0, 0, 0, 0, 0, 0],
+        ] {
+            assert_eq!(one_loose(&head, &mut 0, usize::MAX).unwrap_err(), Malformed::Truncated);
+        }
+        // The strict scan still refuses the head as over its map bound.
+        assert_eq!(
+            one(&[0xbb, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff], &mut 0).unwrap_err(),
+            Malformed::Limit
+        );
+    }
     #[test]
     fn depth_tokens_and_types_are_bounded_without_allocation() {
         let deep = [vec![0x81; 17], vec![0xf6]].concat();

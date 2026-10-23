@@ -180,7 +180,8 @@ pub(crate) fn folds(c: &Claim<'_>) -> bool {
 /// One Unicity certificate scanned on its own item budget with the structure and sublimits
 /// `parse_claim` applies to a claim's certificate, and nothing else (the bridge's scan of an
 /// embedded ancestor proof, bft-core `b1ref.ScanUC`). `parse_claim` is the authority; the bridge's
-/// split-corpus mutation replay (`every_seeded_mutation_of_a_depth_two_input_replays_exactly`) compares this scan with the oracle's.
+/// split-corpus mutation replay (`every_seeded_mutation_of_a_depth_two_input_replays_exactly`)
+/// compares this scan with the oracle's.
 pub fn scan_certificate(raw: &[u8]) -> Result<(), Malformed> {
     if raw.len() > 24576 {
         return Err(Malformed::Limit);
