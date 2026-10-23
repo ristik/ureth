@@ -311,10 +311,10 @@ pub(crate) fn step(
     if cd.e != e {
         return Err(E::DeadlineMismatch);
     }
+    unlock(k, source, &th, cd.unlock)?;
     if e.is_some_and(|e| t >= e) {
         return Err(E::DeadlineExpired);
     }
-    unlock(k, source, &th, cd.unlock)?;
     let sid = hash_array(&[pred, &bytes(source)]);
     insert_sid(seen, sid)?;
     Ok(Leaf { sid, tx_hash: th, reference_time: t, value: hash_array(&[&bytes(&th), &uint(t)]) })
@@ -375,6 +375,85 @@ pub(crate) fn burn(
 ) -> Result<()> {
     burn_inner(cfg, out, tx, tokens).map_err(|e| if e.is_invalid() { e } else { E::ReturnData })
 }
+/// `decodePredicate`: the shape, and for a signature predicate a key that parses.
+pub(crate) fn pred_strict(it: Item<'_>) -> Result<()> {
+    let (typ, params) = predicate(it)?;
+    if typ == 1 {
+        key(params)?;
+    }
+    Ok(())
+}
+/// `decodeCD`, with its predicate decoded strictly.
+pub(crate) fn cd_strict<'a>(it: Item<'a>) -> Result<Cd<'a>> {
+    let c = cd(it)?;
+    pred_strict(c.pred)?;
+    Ok(c)
+}
+/// `decodeTransfer`, with its recipient decoded strictly.
+pub(crate) fn transfer_strict<'a>(it: Item<'a>) -> Result<Tx<'a>> {
+    let t = transfer(it)?;
+    pred_strict(t.pred)?;
+    Ok(t)
+}
+
+/// The wire fields of a mint transaction (`decodeMint`): nothing of the relation. A null
+/// justification or data is carried as `None` and refused by [`verify_mint`].
+pub(crate) struct Mint<'a> {
+    pub(crate) fields: [Item<'a>; 8],
+    pub(crate) justification: Option<&'a [u8]>,
+    pub(crate) data: Option<&'a [u8]>,
+    pub(crate) deadline: Option<u64>,
+}
+pub(crate) fn decode_mint<'a>(item: Item<'a>) -> Result<Mint<'a>> {
+    let m = item.tagged::<8>(39041, 2)?;
+    network(m[1])?;
+    pred_strict(m[2])?;
+    m[3].bytes(32)?;
+    m[4].bytes(32)?;
+    let nullable = |it: Item<'a>| -> Result<Option<&'a [u8]>> {
+        if it.null() {
+            Ok(None)
+        } else {
+            it.blob(IN_PAYLOAD).map(Some)
+        }
+    };
+    let justification = nullable(m[5])?;
+    let data = nullable(m[6])?;
+    let deadline = deadline(m[7])?;
+    Ok(Mint { fields: m, justification, data, deadline })
+}
+
+/// The mint checks of `verifyHistory` and `verifyLevel`, in the oracle's order: network and
+/// recipient kind, type, then (a root) the lock reason and the derived salt, then the data. Returns
+/// the lock nonce of a root and the mint amount.
+pub(crate) fn verify_mint<'a>(
+    cfg: &Cfg<'_>,
+    m: &Mint<'a>,
+    root: bool,
+    tokens: &mut Items,
+) -> Result<(Option<u64>, &'a [u8])> {
+    let f = &m.fields;
+    if f[1].arg != cfg.network || predicate(f[2])?.0 != 1 {
+        return Err(E::MintShape);
+    }
+    if f[4].data != cfg.ty {
+        return Err(E::MintType);
+    }
+    let nonce = if root {
+        let j = m.justification.ok_or(E::MintJustif)?;
+        let n = justification(cfg, j, tokens)?;
+        let ch = hash(cfg.raw);
+        if f[3].data != hash_array(&[&bytes(b"UNICITY_BR_SALT"), &bytes(&ch), &uint(n)]) {
+            return Err(E::MintSalt);
+        }
+        Some(n)
+    } else {
+        None
+    };
+    let amt = mint_data(cfg, m.data.ok_or(E::MintData)?, tokens)?;
+    Ok((nonce, amt))
+}
+
 pub(crate) fn evaluate(
     op: u8,
     cfg: Item<'_>,
@@ -390,67 +469,44 @@ pub(crate) fn evaluate(
     let h = payload.array::<2>()?;
     let g = h[0].array::<3>()?;
     let count = h[1].count(transfers)?;
+    // The whole history is decoded, in document order, before any of it is verified
+    // (`DecodeHistory`).
+    let m = decode_mint(g[0])?;
+    let cd0 = cd_strict(g[1])?;
+    let t0 = g[2].uint(u64::MAX)?;
+    let mut transfers = Vec::with_capacity(count as usize);
+    for tuple in h[1].children() {
+        let a = tuple.array::<3>()?;
+        let tx = transfer_strict(a[0])?;
+        let cert = cd_strict(a[1])?;
+        let t = a[2].uint(u64::MAX)?;
+        transfers.push((tx, cert, t));
+    }
     if op == 1 && count != 0 {
         return Err(E::HasTransfers);
     }
     if op == 2 && count == 0 {
         return Err(E::NoTransfers);
     }
-    let m = g[0].tagged::<8>(39041, 2)?;
-    let network = network(m[1])?;
-    if predicate(m[2])?.0 != 1 {
-        return Err(E::MintShape);
-    }
-    m[3].bytes(32)?;
-    m[4].bytes(32)?;
-    let j = m[5].blob(65536).map_err(|e| {
-        if e == E::ProofTooLarge {
-            E::JustificationTooLarge
-        } else {
-            E::MintJustif
-        }
-    })?;
-    let d = m[6].blob(IN_PAYLOAD).map_err(|_| E::MintData)?;
-    let e = deadline(m[7])?;
-    let cd0 = cd(g[1])?;
-    let t0 = g[2].uint(u64::MAX)?;
-    // Validate every tuple and embedded CBOR, including malformed-last input,
-    // before minter derivation or any signature recovery.
-    let n = justification(&cfg, j, tokens)?;
-    let amt = mint_data(&cfg, d, tokens)?;
-    let mut transfers = Vec::with_capacity(count as usize);
-    for (i, tuple) in h[1].children().enumerate() {
-        let a = tuple.array::<3>()?;
-        let tx = transfer(a[0])?;
-        let cert = cd(a[1])?;
-        let t = a[2].uint(u64::MAX)?;
-        // Intermediate data is opaque and any non-null value fails the relation.
-        // Only the terminal return reason is embedded CBOR.
-        if i + 1 == count as usize &&
-            let Some(data) = tx.data
-        {
-            cbor::one(data, tokens).map_err(|_| E::ReturnData)?;
-        }
-        transfers.push((tx, cert, t));
-    }
-    if network != cfg.network {
-        return Err(E::MintShape);
-    }
-    if m[4].data != cfg.ty {
-        return Err(E::MintType);
-    }
-    let mut out = derive(&cfg, n, amt, m[2])?;
-    if m[3].data != out.salt {
-        return Err(E::MintSalt);
-    }
+    let (n, amt) = verify_mint(&cfg, &m, true, tokens)?;
+    let mut out = derive(&cfg, n.expect("root"), amt, m.fields[2])?;
     let secret = hash_array(&[&bytes(b"I_AM_UNIVERSAL_MINTER_FOR_"), &bytes(&out.token_id)]);
     let mk = SigningKey::from_slice(&secret).map_err(|_| E::MinterKey)?;
     let mp = signature_pred(mk.verifying_key());
     let source = hash_array(&[&bytes(&out.token_id), &bytes(&hash(b"TOKENID"))]);
     let mut seen = HashSet::with_capacity(count as usize + 1);
-    out.leaves.push(step(&mp, &source, g[0].raw, e, &cd0, t0, mk.verifying_key(), &mut seen)?);
+    out.leaves.push(step(
+        &mp,
+        &source,
+        g[0].raw,
+        m.deadline,
+        &cd0,
+        t0,
+        mk.verifying_key(),
+        &mut seen,
+    )?);
     let mut state = output_state(&source, &out.token_id);
-    let mut owner = m[2];
+    let mut owner = m.fields[2];
     for (i, (tx, cert, t)) in transfers.iter().enumerate() {
         let (_, params) = predicate(owner)?;
         let k = key(params)?;

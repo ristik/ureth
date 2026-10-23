@@ -15,6 +15,7 @@ fn head(r: &mut Reader<'_>) -> Result<(u8, u64), Malformed> {
     let n = match ai {
         0..=23 => u64::from(ai),
         24..=27 => r.uint(1 << (ai - 24))?,
+        28..=30 => return Err(Malformed::Canonical),
         _ => return Err(Malformed::Cbor),
     };
     if (ai == 24 && n < 24) ||

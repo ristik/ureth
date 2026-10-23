@@ -247,7 +247,19 @@ fn scan_anchor(a: &Anchor<'_>) -> Result<(), Status> {
     if a.uc.len() > MAX_ANCHOR_UC_BYTES || a.input_record.len() > MAX_INPUT_RECORD_BYTES {
         return Err(Status::InputTooLarge);
     }
-    let shard = native::one(a.uc, &mut 0)
+    // The oracle's typed unmarshal of the certificate: its shape must hold (not the strict scan's
+    // sublimits, map order or signature widths, which the batch refuses later), and its shard must
+    // be the anchor's.
+    match reth_unicity_b1::certificate_shape(a.uc) {
+        Ok(()) |
+        Err(
+            reth_unicity_b1::Malformed::Limit |
+            reth_unicity_b1::Malformed::Canonical |
+            reth_unicity_b1::Malformed::Signature,
+        ) => {}
+        Err(_) => return Err(Status::AnchorAuth),
+    }
+    let shard = native::one_loose(a.uc, &mut 0, usize::MAX)
         .and_then(|uc| uc.tagged::<7>(39001))
         .and_then(|uc| uc[4].tagged::<3>(39003))
         .map(|sc| sc[1].data)

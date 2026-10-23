@@ -193,3 +193,41 @@ fn every_seeded_mutation_of_a_depth_two_input_replays_exactly() {
     assert!(failures.is_empty(), "{} differ:\n{}", failures.len(), failures.join("\n"));
     assert!(seen.contains("ErrCertScan"), "the certificate scan is exercised: {seen:?}");
 }
+
+// Parity with the oracle on malformed input (ureth#85): the seeded patches on which the verifier
+// once differed in status or gas, replayed through V1 (`run`) and V2 (`run_v2`).
+#[test]
+fn the_cases_of_issue_85_replay_exactly() {
+    let c: Value = serde_json::from_str(include_str!("../testdata/parity-85.json")).unwrap();
+    let mut failures = Vec::new();
+    let mut n = 0;
+    for (key, v2) in [("v1", false), ("v2", true)] {
+        for f in c[key].as_array().unwrap() {
+            let base = hex::decode(f["base"].as_str().unwrap()).unwrap();
+            let aux = serde_json::json!({ "claims": f["claims"] });
+            for case in f["cases"].as_array().unwrap() {
+                n += 1;
+                let id = case["id"].as_str().unwrap();
+                let mut input = base.clone();
+                for p in case["patch"].as_array().unwrap() {
+                    input[p["o"].as_u64().unwrap() as usize] ^= p["x"].as_u64().unwrap() as u8;
+                }
+                let want = &case["expected"];
+                let (status, gas) = if v2 {
+                    run_v2(&input, u64::MAX >> 1, &mut claims(&aux)).map(|o| (o.status, o.gas))
+                } else {
+                    run(&input, u64::MAX >> 1, &mut claims(&aux)).map(|o| (o.status, o.gas))
+                }
+                .unwrap_or((Status::Ok, 0));
+                if want["status"] != "ok" ||
+                    want["values"]["statusName"].as_str().unwrap() != status.name() ||
+                    want["values"]["gas"].as_str().unwrap() != gas.to_string()
+                {
+                    failures.push(format!("{id}: want {want}, got {status:?} gas {gas}"));
+                }
+            }
+        }
+    }
+    assert!(n >= 140, "{n} cases");
+    assert!(failures.is_empty(), "{} of {n} differ:\n{}", failures.len(), failures.join("\n"));
+}

@@ -24,6 +24,9 @@ fn head(data: &mut &[u8]) -> Result<(u8, u64)> {
             }
             n
         }
+        // Reserved additional information 28..=30 is a non-canonical head; only 31 (indefinite) is
+        // forbidden.
+        28..=30 => return Err(Error::NonCanonical),
         _ => return Err(Error::ForbiddenCBOR),
     };
     Ok((first >> 5, n))
@@ -54,7 +57,9 @@ fn scan(data: &mut &[u8], depth: usize, tokens: &mut Items) -> Result<()> {
     if tokens.count > tokens.cap {
         return Err(Error::TooManyItems);
     }
-    if data.first().is_some_and(|b| b >> 5 == 7 && *b != 0xf6) {
+    // Text strings, maps and simple values other than null are refused before the head is read (the
+    // oracle's order), so a malformed head of such an item is `ForbiddenCBOR`, not `NonCanonical`.
+    if data.first().is_some_and(|b| matches!(b >> 5, 3 | 5) || (b >> 5 == 7 && *b != 0xf6)) {
         return Err(Error::ForbiddenCBOR);
     }
     let (m, n) = head(data)?;

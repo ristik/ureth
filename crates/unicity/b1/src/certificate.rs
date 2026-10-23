@@ -219,6 +219,11 @@ pub fn scan_certificate(raw: &[u8]) -> Result<(), Malformed> {
             }
         }
     }
+    scan_body(uc)
+}
+
+/// The field structure and sublimits of a certificate's scanned items.
+fn scan_body(uc: [cbor::Item<'_>; 7]) -> Result<(), Malformed> {
     let ir = uc[1].tagged::<10>(39002)?;
     for i in [1, 2, 6, 8] {
         ir[i].uint(u64::MAX)?;
@@ -263,4 +268,14 @@ pub fn scan_certificate(raw: &[u8]) -> Result<(), Malformed> {
         }
     }
     Ok(())
+}
+
+/// The shape a typed decode of a certificate requires, without the native sublimits, the map order
+/// rules or the signature widths: the tags, arities and field types of every part, and the integer
+/// widths. The bridge's anchor scan (bft-core `ScanAnchor`, a typed unmarshal of the UC) refuses
+/// exactly what fails here with a `Shape`-class error; `Limit`, `Canonical` and `Signature` are the
+/// strict scan's alone and are for the batch to refuse (after its items are charged).
+pub fn certificate_shape(raw: &[u8]) -> Result<(), Malformed> {
+    let uc = cbor::one_loose(raw, &mut 0, cbor::MAX_ITEMS)?.tagged::<7>(39001)?;
+    scan_body(uc)
 }
