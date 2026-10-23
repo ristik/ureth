@@ -1,9 +1,9 @@
-//! Actual STATICCALL callers of `BRIDGE_COMPOSE_V1` at `0x0105` through the real EVM.
+//! Actual STATICCALL callers of `BRIDGE_COMPOSE_V2` at `0x0105` through the real EVM.
 //!
-//! The oracle's `native-compose` cases (sealed native-bridge-plugins corpus) whose status is
+//! The oracle's `native-compose-v2` cases (the split corpus) whose status is
 //! decided before the anchor table's batch (so independent of the registry) are sent by a contract
 //! executing `STATICCALL` against an EVM created by [`UnicityEvmFactory`]: each returns the
-//! oracle's 384 bytes, exactly its metered gas succeeds and one gas less is an exceptional halt.
+//! oracle's 480 bytes, exactly its metered gas succeeds and one gas less is an exceptional halt.
 //! The non-canonical input halts.
 
 use alloy_evm::{precompiles::Precompile, Evm, EvmEnv, EvmFactory};
@@ -21,15 +21,22 @@ use serde_json::Value;
 const SENDER: Address = address!("1000000000000000000000000000000000000001");
 const CALLER: Address = address!("2000000000000000000000000000000000000002");
 const TARGET: Address = address!("0000000000000000000000000000000000000105");
-const CASES: &str = include_str!("../../bridge/testdata/native-compose.json");
+const CASES: &str = include_str!("../../bridge/testdata/split-v2.json");
 /// Statuses decided before the batch verdict: they do not depend on the registry.
-const BEFORE_BATCH: [&str; 6] = [
-    "ErrBadOperation",
-    "ErrPolicyLeafIndex",
-    "ErrPolicyAnchors",
+const BEFORE_BATCH: [&str; 13] = [
     "ErrPolicyLeafCount",
-    "ErrTooManyPaths",
-    "ErrPathBitmap",
+    "ErrMintData",
+    "ErrMintJustif",
+    "ErrMintSalt",
+    "ErrMintShape",
+    "ErrMintType",
+    "ErrSplitBurn",
+    "ErrSplitManifest",
+    "ErrSplitProof",
+    "ErrSplitSum",
+    "ErrReturnAmount",
+    "ErrUnlockKey",
+    "ErrRepeatedSID",
 ];
 
 /// Forwards calldata by `STATICCALL` to `TARGET` and returns `success(32) ++ returndata`.
