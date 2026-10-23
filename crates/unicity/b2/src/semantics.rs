@@ -30,11 +30,10 @@ impl<'a> Cfg<'a> {
         let chain = a[3].uint(u64::MAX)?;
         a[4].bytes(32)?;
         a[5].uint(u64::from(u32::MAX))?;
-        let shard = a[6].blob(33)?;
-        if shard.is_empty() || shard.last() == Some(&0) || (shard.len() == 33 && shard[32] != 0x80)
-        {
-            return Err(E::CfgMismatch);
-        }
+        // The EVM shard is any byte string of at most 33 bytes: the oracle's `DecodeCfg` and
+        // `Validate` read no further (the shard binds through the Cfg hash and the lock
+        // proof, not through a rule of its own).
+        a[6].blob(33)?;
         let vault = a[7].bytes(20)?;
         if vault == [0; 20] || a[8].bytes(20)? != [0; 20] {
             return Err(E::CfgMismatch);

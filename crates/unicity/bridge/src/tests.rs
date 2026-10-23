@@ -228,6 +228,6 @@ fn the_cases_of_issue_85_replay_exactly() {
             }
         }
     }
-    assert!(n >= 180, "{n} cases");
+    assert!(n >= 250, "{n} cases");
     assert!(failures.is_empty(), "{} of {n} differ:\n{}", failures.len(), failures.join("\n"));
 }

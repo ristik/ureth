@@ -253,11 +253,7 @@ fn scan_anchor(a: &Anchor<'_>) -> Result<(), Status> {
     if reth_unicity_b1::certificate_shape(a.uc).is_err() {
         return Err(Status::AnchorAuth);
     }
-    let shard = native::one_loose(a.uc, &mut 0, usize::MAX)
-        .and_then(|uc| uc.tagged::<7>(39001))
-        .and_then(|uc| uc[4].tagged::<3>(39003))
-        .map(|sc| sc[1].data)
-        .map_err(|_| Status::AnchorAuth)?;
+    let shard = reth_unicity_b1::certificate_shard(a.uc).map_err(|_| Status::AnchorAuth)?;
     if shard != a.shard {
         return Err(Status::AnchorAuth);
     }

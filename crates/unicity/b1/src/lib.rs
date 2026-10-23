@@ -8,7 +8,7 @@ pub mod batch;
 #[doc(hidden)]
 pub mod cbor;
 mod certificate;
-pub use certificate::{certificate_shape, scan_certificate};
+pub use certificate::{certificate_shape, certificate_shard, scan_certificate};
 pub mod provider;
 mod registry;
 mod rsmt;
