@@ -5,8 +5,9 @@
 //! [`EvmFactory`]. Giving that factory the B1 precompiles is therefore what makes every route see
 //! the same native certificate and membership kernels, with the same journal-aware registry reads:
 //! there is no second construction path to forget. The stateless B2 relation is installed the same
-//! way at `0x0104`, and the composed bridge relation (`BRIDGE_COMPOSE_V2`, protocol 6: lineage through repeated splits) at
-//! `0x0105`. `0x0103` (S1) stays unregistered until its authority source is accepted.
+//! way at `0x0104`, and the composed bridge relation (`BRIDGE_COMPOSE_V2`, protocol 6: lineage
+//! through repeated splits) at `0x0105`. `0x0103` (S1) stays unregistered until its authority
+//! source is accepted.
 //!
 //! The UC, shared-seal and composition providers are stateful (their verdict depends on the
 //! registry words in the selected block's journal), so they are never result-cached; only the
@@ -45,10 +46,10 @@ pub fn b2_precompile() -> (Address, DynPrecompile) {
     (reth_unicity_b2::ADDRESS, B2Precompile::default().into_dyn())
 }
 
-/// The composed bridge relation (`BRIDGE_COMPOSE_V2`, protocol 6), keyed by its reserved address; its
-/// batch evaluation compares the registry with the deployment `pins`, as `CERT_BATCH_V2` does. A
-/// protocol 5 deployment is replaced, not upgraded, so the V1 provider ([`ComposePrecompile::new`]) is
-/// not registered here.
+/// The composed bridge relation (`BRIDGE_COMPOSE_V2`, protocol 6), keyed by its reserved address;
+/// its batch evaluation compares the registry with the deployment `pins`, as `CERT_BATCH_V2` does.
+/// A protocol 5 deployment is replaced, not upgraded, so the V1 provider
+/// ([`ComposePrecompile::new`]) is not registered here.
 pub fn bridge_precompile(pins: Pins) -> (Address, DynPrecompile) {
     (reth_unicity_bridge::ADDRESS, ComposePrecompile::new_v2(pins).into_dyn())
 }
