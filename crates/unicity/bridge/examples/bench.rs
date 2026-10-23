@@ -1,8 +1,9 @@
-//! B7 PR 3 measurement (bft-core briefs/dev4-b7-pr3-plan.md): each `BRIDGE_COMPOSE_V1` (protocol 5, unregistered since protocol 6) case of
-//! bft-core `cmd/genbench` through the production provider, with the B1 registry in the journal of
-//! a fresh EVM context per call (a cold journal, as for one transaction). It reports wall time per
-//! call, nanoseconds per charged gas and the peak heap allocated during the call, next to ECRECOVER
-//! and SHA256 on the same machine. Status and gas must equal the oracle's.
+//! B7 PR 3 measurement (bft-core briefs/dev4-b7-pr3-plan.md): each `BRIDGE_COMPOSE_V1` (protocol 5,
+//! unregistered since protocol 6) case of bft-core `cmd/genbench` through the production provider,
+//! with the B1 registry in the journal of a fresh EVM context per call (a cold journal, as for one
+//! transaction). It reports wall time per call, nanoseconds per charged gas and the peak heap
+//! allocated during the call, next to ECRECOVER and SHA256 on the same machine. Status and gas must
+//! equal the oracle's.
 //!
 //! `cargo run --release -p reth-unicity-bridge --example bench -- CASES.json ITERATIONS OUT.json`
 use alloy_evm::{
