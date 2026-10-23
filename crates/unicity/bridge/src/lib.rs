@@ -22,6 +22,10 @@ pub const ADDRESS: alloy_primitives::Address =
 pub const MARKER: [u8; 32] = *b"UNICITY_BRIDGE_COMPOSE_V1\0\0\0\0\0\0\0";
 /// Exactly twelve words.
 pub const OUTPUT_BYTES: usize = 384;
+/// `bytes32("UNICITY_BRIDGE_COMPOSE_V2")`.
+pub const MARKER_V2: [u8; 32] = *b"UNICITY_BRIDGE_COMPOSE_V2\0\0\0\0\0\0\0";
+/// Fifteen words: the twelve of V1 (the root's), then partTokenId, partAmount, splitDepth.
+pub const OUTPUT_BYTES_V2: usize = 480;
 
 // The resource policy of bft-core `bridgeprofile/limits.go` (owner §36): the composition streams
 // the history and the anchor table. It is bounded by the envelope (the ingress bound), the u16
@@ -105,6 +109,17 @@ pub enum Status {
     PathBitmap,
     AnchorAuth,
     LeafProof,
+    // Protocol 6 (BRIDGE_COMPOSE_V2): the split reasons, then the certificate-codec reasons of an
+    // embedded ancestor proof. Never produced by BRIDGE_COMPOSE_V1.
+    SplitJustif,
+    SplitProofCount,
+    SplitProofShape,
+    SplitManifest,
+    SplitBurn,
+    SplitProof,
+    SplitSum,
+    CertScan,
+    CertSigLength,
 }
 impl Status {
     /// The oracle's sentinel name of a nonzero status.
@@ -172,6 +187,18 @@ impl Status {
         "ErrAnchorAuth",
         "ErrLeafProof",
     ];
+    /// The names of the codes `BRIDGE_COMPOSE_V2` appends to [`Status::NAMES`], from code 63.
+    pub const NAMES_V2: [&'static str; 9] = [
+        "ErrSplitJustif",
+        "ErrSplitProofCount",
+        "ErrSplitProofShape",
+        "ErrSplitManifest",
+        "ErrSplitBurn",
+        "ErrSplitProof",
+        "ErrSplitSum",
+        "ErrCertScan",
+        "ErrCertSigLength",
+    ];
     /// The numeric code.
     pub const fn code(self) -> u64 {
         self as u64
@@ -180,7 +207,8 @@ impl Status {
     pub const fn name(self) -> &'static str {
         match self {
             Self::Ok => "",
-            s => Self::NAMES[s as usize - 1],
+            s if (s as usize) <= Self::NAMES.len() => Self::NAMES[s as usize - 1],
+            s => Self::NAMES_V2[s as usize - Self::NAMES.len() - 1],
         }
     }
 }
@@ -239,6 +267,15 @@ pub(crate) fn status_of_b2(e: reth_unicity_b2::Error) -> Status {
         E::ZeroDigest => Status::ZeroDigest,
         E::DeadlineExpired => Status::DeadlineExpired,
         E::LockProofCfg => Status::LockProofCfg,
+        E::SplitJustif => Status::SplitJustif,
+        E::SplitProofCount => Status::SplitProofCount,
+        E::SplitProofShape => Status::SplitProofShape,
+        E::SplitManifest => Status::SplitManifest,
+        E::SplitBurn => Status::SplitBurn,
+        E::SplitProof => Status::SplitProof,
+        E::SplitSum => Status::SplitSum,
+        E::CertScan => Status::CertScan,
+        E::CertSigLength => Status::CertSigLength,
         // The composition never lets B2 meter.
         E::OutOfGas => unreachable!("B2 is never metered inside the composition"),
     }
@@ -326,6 +363,40 @@ impl Fixed {
     }
 }
 
+/// The V2 result: the root lock's fields, the leaf count and the redeemed part (protocol 6).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct FixedV2 {
+    /// Words 2 to 11: the root lock's, as [`Fixed`].
+    pub root: Fixed,
+    /// The redeemed token (the root at depth 0).
+    pub part_token_id: [u8; 32],
+    /// Its whole amount.
+    pub part_amount: [u8; 32],
+    /// The split depth.
+    pub depth: u64,
+}
+impl FixedV2 {
+    const fn of(o: &Outcome) -> Self {
+        Self {
+            root: Fixed::of(o),
+            part_token_id: o.part_token_id,
+            part_amount: o.part_amount,
+            depth: o.depth,
+        }
+    }
+    fn encode(&self, status: u64) -> [u8; OUTPUT_BYTES_V2] {
+        let mut out = [0; OUTPUT_BYTES_V2];
+        out[..OUTPUT_BYTES].copy_from_slice(&self.root.encode(status));
+        out[..32].copy_from_slice(&MARKER_V2);
+        if status == 0 {
+            out[384..416].copy_from_slice(&self.part_token_id);
+            out[416..448].copy_from_slice(&self.part_amount);
+            out[472..480].copy_from_slice(&self.depth.to_be_bytes());
+        }
+        out
+    }
+}
+
 /// Incremental metering against the forwarded gas (spec section 4, a trial schedule).
 #[derive(Debug)]
 pub(crate) struct Meter {
@@ -400,6 +471,46 @@ pub fn run<V: Verdict>(input: &[u8], gas: u64, verdict: &mut V) -> Result<Output
         Err(s) => (Fixed::default(), s),
     };
     Ok(Output { gas: meter.used, bytes: fixed.encode(status.code()), status })
+}
+
+/// A complete V2 call: the gas charged, the 480 output bytes and the status.
+#[derive(Debug, PartialEq, Eq)]
+pub struct OutputV2 {
+    /// Gas charged up to the end of the call (or the failed check).
+    pub gas: u64,
+    /// Exactly [`OUTPUT_BYTES_V2`].
+    pub bytes: [u8; OUTPUT_BYTES_V2],
+    /// The status the bytes carry.
+    pub status: Status,
+}
+
+/// Evaluate one `BRIDGE_COMPOSE_V2` call (protocol 6) with `gas` forwarded: [`run`]'s composition
+/// with the lineage relation for a return. A halt consumes all of the gas.
+pub fn run_v2<V: Verdict>(
+    input: &[u8],
+    gas: u64,
+    verdict: &mut V,
+) -> Result<OutputV2, Halt<V::Error>> {
+    let mut meter = Meter { limit: gas, used: 0 };
+    let result = (|| {
+        meter.charge(
+            Meter::BASE.saturating_add(Meter::PER_BYTE.saturating_mul(input.len() as u64)),
+        )?;
+        if input.len() > MAX_INPUT_BYTES {
+            return Ok(Err(Status::InputTooLarge));
+        }
+        let call = abi::decode_call(input).ok_or(Halt::Malformed)?;
+        match compose::compose_v2(call, &mut meter, verdict) {
+            Ok(f) => Ok(Ok(f)),
+            Err(compose::Stop::Status(s)) => Ok(Err(s)),
+            Err(compose::Stop::Halt(h)) => Err(h),
+        }
+    })()?;
+    let (fixed, status) = match result {
+        Ok(f) => (f, Status::Ok),
+        Err(s) => (FixedV2::default(), s),
+    };
+    Ok(OutputV2 { gas: meter.used, bytes: fixed.encode(status.code()), status })
 }
 
 #[cfg(test)]

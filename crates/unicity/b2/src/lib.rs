@@ -8,6 +8,8 @@ mod abi;
 /// Borrowed CBOR views, shared with the composition (`reth-unicity-bridge`); not a stable API.
 #[doc(hidden)]
 pub mod cbor;
+#[doc(hidden)]
+pub mod lineage;
 pub mod provider;
 mod semantics;
 
@@ -79,6 +81,15 @@ pub enum Error {
     ZeroDigest,
     DeadlineExpired,
     LockProofCfg,
+    SplitJustif,
+    SplitProofCount,
+    SplitProofShape,
+    SplitManifest,
+    SplitBurn,
+    SplitProof,
+    SplitSum,
+    CertScan,
+    CertSigLength,
 }
 impl Error {
     /// Relation failures return the canonical all-zero false result. Framing,
@@ -115,7 +126,16 @@ impl Error {
                 Self::DeadlineExpired |
                 Self::LockProofShape |
                 Self::DeadlineMismatch |
-                Self::LockProofCfg
+                Self::LockProofCfg |
+                Self::SplitJustif |
+                Self::SplitProofCount |
+                Self::SplitProofShape |
+                Self::SplitManifest |
+                Self::SplitBurn |
+                Self::SplitProof |
+                Self::SplitSum |
+                Self::CertScan |
+                Self::CertSigLength
         )
     }
 }
@@ -157,6 +177,12 @@ pub struct Outcome {
     pub nullifier: [u8; 32],
     /// Empty for prepare; one for mint; all for return.
     pub leaves: Vec<Leaf>,
+    /// The redeemed part's token ID (protocol 6; the root's at depth 0 and for a mint).
+    pub part_token_id: [u8; 32],
+    /// The redeemed part's whole amount (protocol 6).
+    pub part_amount: [u8; 32],
+    /// Split depth (protocol 6; zero for an ordinary redemption).
+    pub depth: u64,
 }
 /// A fully charged EVM success, including shaped false.
 #[derive(Debug, PartialEq, Eq)]

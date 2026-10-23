@@ -11,16 +11,16 @@ use std::collections::HashSet;
 /// bounds the payload (`MAX_HISTORY`), the composition's envelope bounds the history.
 const IN_PAYLOAD: usize = usize::MAX;
 
-struct Cfg<'a> {
-    raw: &'a [u8],
-    network: u64,
-    chain: u64,
-    vault: &'a [u8],
-    ty: &'a [u8],
-    aid: &'a [u8],
+pub(crate) struct Cfg<'a> {
+    pub(crate) raw: &'a [u8],
+    pub(crate) network: u64,
+    pub(crate) chain: u64,
+    pub(crate) vault: &'a [u8],
+    pub(crate) ty: &'a [u8],
+    pub(crate) aid: &'a [u8],
 }
 impl<'a> Cfg<'a> {
-    fn parse(it: Item<'a>) -> Result<Self> {
+    pub(crate) fn parse(it: Item<'a>) -> Result<Self> {
         let a = it.array::<16>()?;
         if a[0].blob(32)? != b"UNICITY_BR_CFG" {
             return Err(E::CfgMismatch);
@@ -65,7 +65,7 @@ impl<'a> Cfg<'a> {
     }
 }
 // Both SDK 3.0.1 NetworkId codecs require the inclusive range 1..=65535.
-fn network(it: Item<'_>) -> Result<u64> {
+pub(crate) fn network(it: Item<'_>) -> Result<u64> {
     let n = it.uint(65535)?;
     if n == 0 {
         return Err(E::IntRange);
@@ -82,7 +82,7 @@ pub(crate) fn check_cfg_network(it: Item<'_>) -> Result<()> {
     }
     Ok(())
 }
-fn amount(it: Item<'_>) -> Result<&[u8]> {
+pub(crate) fn amount(it: Item<'_>) -> Result<&[u8]> {
     let b = it.blob(IN_PAYLOAD)?;
     if b.is_empty() || b.len() > 32 || b[0] == 0 {
         return Err(E::IntRange);
@@ -99,7 +99,7 @@ fn deadline(it: Item<'_>) -> Result<Option<u64>> {
     }
     Ok(Some(e))
 }
-fn predicate(it: Item<'_>) -> Result<(u8, &[u8])> {
+pub(crate) fn predicate(it: Item<'_>) -> Result<(u8, &[u8])> {
     let a = it.tagged::<3>(39032, 1).map_err(|e| if e == E::Version { E::Predicate } else { e })?;
     // Code and key lengths describe the supported predicate relation, not a
     // proof budget. The complete outer CBOR was already bounded and scanned.
@@ -111,16 +111,16 @@ fn predicate(it: Item<'_>) -> Result<(u8, &[u8])> {
         _ => Err(E::Predicate),
     }
 }
-fn key(params: &[u8]) -> Result<VerifyingKey> {
+pub(crate) fn key(params: &[u8]) -> Result<VerifyingKey> {
     VerifyingKey::from_sec1_bytes(params).map_err(|_| E::Predicate)
 }
-fn signature_pred(key: &VerifyingKey) -> Vec<u8> {
+pub(crate) fn signature_pred(key: &VerifyingKey) -> Vec<u8> {
     tag(39032, &array(&[&uint(1), &bytes(&[1]), &bytes(key.to_encoded_point(true).as_bytes())]))
 }
-fn hash_array(parts: &[&[u8]]) -> [u8; 32] {
+pub(crate) fn hash_array(parts: &[&[u8]]) -> [u8; 32] {
     hash(&array(parts))
 }
-fn derive(cfg: &Cfg<'_>, n: u64, amt: &[u8], p: Item<'_>) -> Result<Outcome> {
+pub(crate) fn derive(cfg: &Cfg<'_>, n: u64, amt: &[u8], p: Item<'_>) -> Result<Outcome> {
     if n == 0 {
         return Err(E::LockInput);
     }
@@ -175,7 +175,7 @@ fn proof_blob(it: Item<'_>, max: usize) -> Result<&[u8]> {
     }
     Ok(b)
 }
-fn justification(cfg: &Cfg<'_>, b: &[u8], tokens: &mut Items) -> Result<u64> {
+pub(crate) fn justification(cfg: &Cfg<'_>, b: &[u8], tokens: &mut Items) -> Result<u64> {
     if b.len() > 65536 {
         return Err(E::JustificationTooLarge);
     }
@@ -203,7 +203,8 @@ fn justification(cfg: &Cfg<'_>, b: &[u8], tokens: &mut Items) -> Result<u64> {
     if p[1].bytes(32).map_err(|_| E::LockProofShape)? != hash(cfg.raw) {
         return Err(E::LockProofCfg);
     }
-    p[2].bytes(32).map_err(|_| E::LockProofShape)?; // opaque trustBaseId; no authority installed here
+    p[2].bytes(32).map_err(|_| E::LockProofShape)?; // opaque trustBaseId; no authority installed
+                                                    // here
     proof_blob(p[3], 16384)?;
     proof_blob(p[4], 16384)?;
     proof_blob(p[5], 2048)?;
@@ -228,7 +229,7 @@ fn justification(cfg: &Cfg<'_>, b: &[u8], tokens: &mut Items) -> Result<u64> {
     }
     Ok(n)
 }
-fn mint_data<'a>(cfg: &Cfg<'_>, b: &'a [u8], tokens: &mut Items) -> Result<&'a [u8]> {
+pub(crate) fn mint_data<'a>(cfg: &Cfg<'_>, b: &'a [u8], tokens: &mut Items) -> Result<&'a [u8]> {
     (|| {
         let d = cbor::one(b, tokens)?.tagged::<3>(39050, 1)?;
         let a = d[1].array::<1>()?[0].array::<2>()?;
@@ -239,21 +240,21 @@ fn mint_data<'a>(cfg: &Cfg<'_>, b: &'a [u8], tokens: &mut Items) -> Result<&'a [
     })()
     .map_err(|_| E::MintData)
 }
-struct Tx<'a> {
-    raw: &'a [u8],
-    pred: Item<'a>,
-    mask: &'a [u8],
-    data: Option<&'a [u8]>,
-    e: Option<u64>,
+pub(crate) struct Tx<'a> {
+    pub(crate) raw: &'a [u8],
+    pub(crate) pred: Item<'a>,
+    pub(crate) mask: &'a [u8],
+    pub(crate) data: Option<&'a [u8]>,
+    pub(crate) e: Option<u64>,
 }
-struct Cd<'a> {
-    pred: Item<'a>,
+pub(crate) struct Cd<'a> {
+    pub(crate) pred: Item<'a>,
     source: &'a [u8],
     tx: &'a [u8],
     e: Option<u64>,
     unlock: &'a [u8],
 }
-fn cd(it: Item<'_>) -> Result<Cd<'_>> {
+pub(crate) fn cd(it: Item<'_>) -> Result<Cd<'_>> {
     let a = it.tagged::<6>(39031, 2)?;
     predicate(a[1])?;
     Ok(Cd {
@@ -264,7 +265,7 @@ fn cd(it: Item<'_>) -> Result<Cd<'_>> {
         unlock: a[5].blob(65)?,
     })
 }
-fn transfer(it: Item<'_>) -> Result<Tx<'_>> {
+pub(crate) fn transfer(it: Item<'_>) -> Result<Tx<'_>> {
     let a = it.tagged::<5>(39045, 2)?;
     predicate(a[1])?;
     Ok(Tx {
@@ -293,7 +294,7 @@ fn unlock(k: &VerifyingKey, source: &[u8], tx: &[u8], u: &[u8]) -> Result<()> {
     k.verify_prehash(&msg, &sig).map_err(|_| E::Unlock)
 }
 #[allow(clippy::too_many_arguments)]
-fn step(
+pub(crate) fn step(
     pred: &[u8],
     source: &[u8; 32],
     raw: &[u8],
@@ -324,7 +325,7 @@ fn insert_sid(seen: &mut HashSet<[u8; 32]>, sid: [u8; 32]) -> Result<()> {
     }
     Ok(())
 }
-fn output_state(source: &[u8; 32], mask: &[u8]) -> [u8; 32] {
+pub(crate) fn output_state(source: &[u8; 32], mask: &[u8]) -> [u8; 32] {
     let mut imprint = [0; 34];
     imprint[2..].copy_from_slice(source);
     hash_array(&[&bytes(&imprint), &bytes(mask)])
@@ -366,7 +367,12 @@ fn burn_inner(cfg: &Cfg<'_>, out: &mut Outcome, tx: &Tx<'_>, tokens: &mut Items)
     out.release_to.copy_from_slice(to);
     Ok(())
 }
-fn burn(cfg: &Cfg<'_>, out: &mut Outcome, tx: &Tx<'_>, tokens: &mut Items) -> Result<()> {
+pub(crate) fn burn(
+    cfg: &Cfg<'_>,
+    out: &mut Outcome,
+    tx: &Tx<'_>,
+    tokens: &mut Items,
+) -> Result<()> {
     burn_inner(cfg, out, tx, tokens).map_err(|e| if e.is_invalid() { e } else { E::ReturnData })
 }
 pub(crate) fn evaluate(

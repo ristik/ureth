@@ -8,6 +8,7 @@ pub mod batch;
 #[doc(hidden)]
 pub mod cbor;
 mod certificate;
+pub use certificate::scan_certificate;
 pub mod provider;
 mod registry;
 mod rsmt;

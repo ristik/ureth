@@ -1,6 +1,6 @@
 //! The precompile provider. It evaluates the anchor table's batch against the registry through the
 //! current journal under the deployment pins, so it is never result-cached.
-use crate::{run, Halt, Verdict};
+use crate::{run, run_v2, Halt, Verdict};
 use alloy_evm::{
     precompiles::{DynPrecompile, Precompile, PrecompileInput},
     EvmInternals, EvmInternalsError,
@@ -16,11 +16,17 @@ use revm::precompile::{
 pub struct ComposePrecompile {
     pins: Pins,
     id: PrecompileId,
+    v2: bool,
 }
 impl ComposePrecompile {
     /// A provider whose batch evaluation compares the registry with `pins`.
     pub fn new(pins: Pins) -> Self {
-        Self { pins, id: PrecompileId::Custom("unicity-bridge-compose-v1".into()) }
+        Self { pins, id: PrecompileId::Custom("unicity-bridge-compose-v1".into()), v2: false }
+    }
+    /// The protocol 6 provider (`BRIDGE_COMPOSE_V2`, lineage). A fresh deployment registers it at
+    /// the address instead of [`Self::new`]'s; nothing is upgraded in place.
+    pub fn new_v2(pins: Pins) -> Self {
+        Self { pins, id: PrecompileId::Custom("unicity-bridge-compose-v2".into()), v2: true }
     }
     /// Wrap for an explicitly supplied map. The result is stateful: no result cache.
     pub fn into_dyn(self) -> DynPrecompile {
@@ -72,10 +78,13 @@ impl Precompile for ComposePrecompile {
     }
     fn call(&self, mut input: PrecompileInput<'_>) -> PrecompileResult {
         let mut registry = Registry { pins: &self.pins, journal: Journal(&mut input.internals) };
-        match run(input.data, input.gas, &mut registry) {
-            Ok(out) => {
-                Ok(PrecompileOutput::new(out.gas, out.bytes.to_vec().into(), input.reservoir))
-            }
+        let result = if self.v2 {
+            run_v2(input.data, input.gas, &mut registry).map(|o| (o.gas, o.bytes.to_vec()))
+        } else {
+            run(input.data, input.gas, &mut registry).map(|o| (o.gas, o.bytes.to_vec()))
+        };
+        match result {
+            Ok((gas, bytes)) => Ok(PrecompileOutput::new(gas, bytes.into(), input.reservoir)),
             Err(Halt::OutOfGas) => {
                 Ok(PrecompileOutput::halt(PrecompileHalt::OutOfGas, input.reservoir))
             }
