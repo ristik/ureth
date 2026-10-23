@@ -9,7 +9,7 @@
 //! reference time the relation reads is the exact byte string its descendant's mint hash commits
 //! to.
 use crate::{
-    cbor::{self, array, bytes, uint, Item, Items},
+    cbor::{self, array, bytes, uint, Items},
     hash,
     semantics::{self, Cfg},
     Error as E, Leaf, Outcome, Result,
@@ -185,7 +185,7 @@ fn inclusion<'a>(it: native::Item<'a>) -> Result<(native::Item<'a>, u64)> {
     let f = it.tagged::<5>(TAG_INCLUSION).map_err(nerr)?;
     // Document order, as the oracle's `decodeProof`: the certification data, then the reference
     // time.
-    cd_strict(cbor::one(f[1].raw, &mut Items::default())?)?;
+    cd_strict(cbor::one(f[1].raw, &mut Items::native(Items::MAX))?)?;
     let t = f[2].uint(u64::MAX).map_err(nerr)?;
     if f[3].major != 2 {
         return Err(E::Shape);
@@ -212,24 +212,7 @@ fn inclusion<'a>(it: native::Item<'a>) -> Result<(native::Item<'a>, u64)> {
     Ok((f[1], t))
 }
 
-/// `decodePredicate`: the shape, and for a signature predicate a key that parses.
-fn pred_strict(it: Item<'_>) -> Result<()> {
-    let (typ, params) = semantics::predicate(it)?;
-    if typ == 1 {
-        semantics::key(params)?;
-    }
-    Ok(())
-}
-fn cd_strict<'a>(it: Item<'a>) -> Result<semantics::Cd<'a>> {
-    let c = semantics::cd(it)?;
-    pred_strict(c.pred)?;
-    Ok(c)
-}
-fn transfer_strict<'a>(it: Item<'a>) -> Result<semantics::Tx<'a>> {
-    let t = semantics::transfer(it)?;
-    pred_strict(t.pred)?;
-    Ok(t)
-}
+use semantics::{cd_strict, decode_mint, transfer_strict};
 
 /// The oracle's `DecodeHistory`: every wire field of the mint and of every tuple, in document
 /// order, and none of the relation.
@@ -238,7 +221,7 @@ fn decode_history(history: &[u8]) -> Result<()> {
     let h = p.array::<2>()?;
     let g = h[0].array::<3>()?;
     h[1].count(u64::MAX)?;
-    decode_mint(g[0].raw)?;
+    decode_mint(g[0])?;
     cd_strict(g[1])?;
     g[2].uint(u64::MAX)?;
     for tuple in h[1].children() {
@@ -247,22 +230,6 @@ fn decode_history(history: &[u8]) -> Result<()> {
         cd_strict(a[1])?;
         a[2].uint(u64::MAX)?;
     }
-    Ok(())
-}
-
-/// The oracle's `decodeMint`: the wire fields of a mint transaction, nothing of the relation.
-fn decode_mint(raw: &[u8]) -> Result<()> {
-    let m = cbor::one(raw, &mut Items::default())?.tagged::<8>(39041, 2)?;
-    semantics::network(m[1])?;
-    pred_strict(m[2])?;
-    m[3].bytes(32)?;
-    m[4].bytes(32)?;
-    for i in [5, 6] {
-        if !m[i].null() {
-            m[i].blob(usize::MAX)?;
-        }
-    }
-    deadline(m[7])?;
     Ok(())
 }
 
@@ -286,7 +253,7 @@ fn open_token<'a>(token: native::Item<'a>) -> Result<[native::Item<'a>; 3]> {
 fn project(token: native::Item<'_>) -> Result<(Vec<u8>, u64)> {
     let [_, genesis, txs] = open_token(token)?;
     let g = genesis.array::<2>().map_err(nerr)?;
-    decode_mint(g[0].raw)?;
+    decode_mint(cbor::one(g[0].raw, &mut Items::native(Items::MAX))?)?;
     let (cd0, t0) = inclusion(g[1])?;
     let mut triples = Vec::new();
     if txs.major != 4 {
@@ -295,7 +262,7 @@ fn project(token: native::Item<'_>) -> Result<(Vec<u8>, u64)> {
     let mut count = 0u64;
     for p in txs.children() {
         let pair = p.array::<2>().map_err(nerr)?;
-        transfer_strict(cbor::one(pair[0].raw, &mut Items::default())?)?;
+        transfer_strict(cbor::one(pair[0].raw, &mut Items::native(Items::MAX))?)?;
         let (cd, t) = inclusion(pair[1])?;
         triples.push(array(&[pair[0].raw, cd.raw, &uint(t)]));
         count += 1;
@@ -334,34 +301,10 @@ fn level(
     let h = payload.array::<2>()?;
     let g = h[0].array::<3>()?;
     let count = h[1].count(u64::MAX)?;
-    if count == 0 {
-        return Err(E::NoTransfers);
-    }
-    let m = g[0].tagged::<8>(39041, 2)?;
-    let network = semantics::network(m[1])?;
-    pred_strict(m[2])?;
-    if semantics::predicate(m[2])?.0 != 1 {
-        return Err(E::MintShape);
-    }
-    m[3].bytes(32)?;
-    m[4].bytes(32)?;
-    let j = if root {
-        m[5].blob(65536).map_err(|e| {
-            if e == E::ProofTooLarge {
-                E::JustificationTooLarge
-            } else {
-                E::MintJustif
-            }
-        })?
-    } else {
-        m[5].blob(usize::MAX).map_err(|_| E::MintJustif)?
-    };
-    let d = m[6].blob(usize::MAX).map_err(|_| E::MintData)?;
-    let e = deadline(m[7])?;
+    // The whole history is decoded before any of it is verified, as `semantics::evaluate` does.
+    let mint = decode_mint(g[0])?;
     let cd0 = cd_strict(g[1])?;
     let t0 = g[2].uint(u64::MAX)?;
-    // Every tuple is decoded before the lock justification and the mint data are read (the oracle
-    // decodes the whole history first).
     let mut transfers = Vec::with_capacity(count as usize);
     for tuple in h[1].children() {
         let a = tuple.array::<3>()?;
@@ -370,20 +313,14 @@ fn level(
         let t = a[2].uint(u64::MAX)?;
         transfers.push((tx, cert, t));
     }
-    // The oracle's order (`verifyLevel`): network, type, then the lock reason and the data.
-    if network != cfg.network {
-        return Err(E::MintShape);
+    if count == 0 {
+        return Err(E::NoTransfers);
     }
-    if m[4].data != cfg.ty {
-        return Err(E::MintType);
-    }
-    let n = if root { Some(semantics::justification(cfg, j, tokens)?) } else { None };
-    let amt = semantics::mint_data(cfg, d, tokens)?;
+    let m = mint.fields;
+    let e = mint.deadline;
+    let (n, amt) = semantics::verify_mint(cfg, &mint, root, tokens)?;
     let (id, base) = if let Some(n) = n {
         let out = semantics::derive(cfg, n, amt, m[2])?;
-        if m[3].data != out.salt {
-            return Err(E::MintSalt);
-        }
         (out.token_id, Some(out))
     } else {
         (semantics::hash_array(&[&bytes(m[3].data), &uint(cfg.network)]), None)
@@ -426,19 +363,8 @@ fn level(
         recipient: m[2].raw.to_vec(),
         salt: m[3].data.try_into().expect("32 bytes"),
         ty: m[4].data.try_into().expect("32 bytes"),
-        data: d.to_vec(),
+        data: mint.data.expect("verified").to_vec(),
     })
-}
-
-fn deadline(it: Item<'_>) -> Result<Option<u64>> {
-    if it.null() {
-        return Ok(None);
-    }
-    let e = it.uint(u64::MAX).map_err(|_| E::Deadline)?;
-    if e == 0 {
-        return Err(E::Deadline);
-    }
-    Ok(Some(e))
 }
 
 /// `splitOutputCommitment`.

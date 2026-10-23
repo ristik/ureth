@@ -219,6 +219,11 @@ pub fn scan_certificate(raw: &[u8]) -> Result<(), Malformed> {
             }
         }
     }
+    scan_body(uc)
+}
+
+/// The field structure and sublimits of a certificate's scanned items.
+fn scan_body(uc: [cbor::Item<'_>; 7]) -> Result<(), Malformed> {
     let ir = uc[1].tagged::<10>(39002)?;
     for i in [1, 2, 6, 8] {
         ir[i].uint(u64::MAX)?;
@@ -263,4 +268,131 @@ pub fn scan_certificate(raw: &[u8]) -> Result<(), Malformed> {
         }
     }
     Ok(())
+}
+
+/// The shape a typed decode of a certificate requires (the oracle's typed CBOR unmarshal of the
+/// certificate): the tags and arities of every part, and for each field what a Go struct field of
+/// that type accepts. A `null` item is the zero value of any field. An integer field takes any
+/// unsigned integer within its width; a version slot takes 0, 1 or null (0 and null mean 1); a
+/// byte-string field takes a byte string of any width or an array of byte-sized unsigned integers
+/// (the empty array included); text must be UTF-8. No native sublimits, map order
+/// rules or shard-depth rule: whatever the strict scan alone refuses is for the batch to refuse,
+/// after its items are charged (the bridge's anchor scan, bft-core `ScanAnchor`).
+pub fn certificate_shape(raw: &[u8]) -> Result<(), Malformed> {
+    let uint_or_null = |it: cbor::Item<'_>, max: u64| -> Result<(), Malformed> {
+        if it.null() {
+            Ok(())
+        } else {
+            it.uint(max).map(|_| ())
+        }
+    };
+    let bytes_like = |it: cbor::Item<'_>| -> Result<(), Malformed> {
+        if it.null() || it.major == 2 {
+            return Ok(());
+        }
+        if it.major != 4 {
+            return Err(Malformed::Shape);
+        }
+        for e in it.children() {
+            e.uint(255)?;
+        }
+        Ok(())
+    };
+    let list_of_bytes = |it: cbor::Item<'_>| -> Result<(), Malformed> {
+        if it.null() {
+            return Ok(());
+        }
+        if it.major != 4 {
+            return Err(Malformed::Shape);
+        }
+        for e in it.children() {
+            bytes_like(e)?;
+        }
+        Ok(())
+    };
+    // tag(n, [version, ...N-1 fields]): the tag number and the arity; the version is any uint (or
+    // null).
+    fn typed<'a>(it: cbor::Item<'a>, tag: u64, n: usize) -> Result<Vec<cbor::Item<'a>>, Malformed> {
+        if it.major != 6 || it.arg != tag {
+            return Err(Malformed::Shape);
+        }
+        let inner = cbor::one_loose(it.data, &mut 0, usize::MAX)?;
+        if inner.major != 4 || inner.arg != n as u64 {
+            return Err(Malformed::Shape);
+        }
+        let kids: Vec<_> = inner.children().collect();
+        // Version 0 (and null) is the default, taken as version 1; any other number is refused.
+        if !kids[0].null() {
+            kids[0].uint(1)?;
+        }
+        Ok(kids)
+    }
+    let root = cbor::one_typed(raw, &mut 0, cbor::MAX_ITEMS)?;
+    let uc = typed(root, 39001, 7)?;
+    let ir = typed(uc[1], 39002, 10)?;
+    // [round, epoch, previousHash, hash, summary, timestamp, blockHash, fees, executedHash] after
+    // the version
+    for i in [1, 2, 6, 8] {
+        uint_or_null(ir[i], u64::MAX)?;
+    }
+    for i in [3, 4, 5, 7, 9] {
+        bytes_like(ir[i])?;
+    }
+    bytes_like(uc[2])?;
+    bytes_like(uc[3])?;
+    let sc = typed(uc[4], 39003, 3)?;
+    bytes_like(sc[1])?;
+    list_of_bytes(sc[2])?;
+    let tc = typed(uc[5], 39004, 3)?;
+    uint_or_null(tc[1], u64::from(u32::MAX))?;
+    if !tc[2].null() {
+        if tc[2].major != 4 {
+            return Err(Malformed::Shape);
+        }
+        for step in tc[2].children() {
+            let pair = step.array::<2>()?;
+            uint_or_null(pair[0], u64::from(u32::MAX))?;
+            bytes_like(pair[1])?;
+        }
+    }
+    // The seal is not a plain struct: its decoder requires version 1 and refuses null integers.
+    let sf = typed(uc[6], 39005, 8)?;
+    if sf[0].uint(1)? != 1 {
+        return Err(Malformed::Version);
+    }
+    sf[1].uint(u64::from(u16::MAX))?;
+    for v in &sf[2..5] {
+        v.uint(u64::MAX)?;
+    }
+    bytes_like(sf[5])?;
+    bytes_like(sf[6])?;
+    if !sf[7].null() {
+        if sf[7].major != 5 {
+            return Err(Malformed::Shape);
+        }
+        let mut kv = sf[7].children();
+        while let Some(k) = kv.next() {
+            k.blob(3, 0, usize::MAX)?;
+            bytes_like(kv.next().ok_or(Malformed::Shape)?)?;
+        }
+    }
+    Ok(())
+}
+
+/// The shard a certificate names (its shard tree certificate's shard ID), read as the typed decode
+/// reads it: no version rule, `null` is the empty shard, an array of byte-sized integers is bytes.
+/// Call after [`certificate_shape`] succeeded.
+pub fn certificate_shard(raw: &[u8]) -> Result<Vec<u8>, Malformed> {
+    let uc = cbor::one_loose(raw, &mut 0, usize::MAX)?;
+    let inner = cbor::one_loose(uc.data, &mut 0, usize::MAX)?;
+    let sc_tag = inner.children().nth(4).ok_or(Malformed::Shape)?;
+    let sc = cbor::one_loose(sc_tag.data, &mut 0, usize::MAX)?;
+    let shard = sc.children().nth(1).ok_or(Malformed::Shape)?;
+    if shard.null() {
+        return Ok(Vec::new());
+    }
+    if shard.major == 2 {
+        return Ok(shard.data.to_vec());
+    }
+    shard.children().map(|e| e.uint(255).map(|v| v as u8)).collect()
 }

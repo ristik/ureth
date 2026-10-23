@@ -24,6 +24,9 @@ fn head(data: &mut &[u8]) -> Result<(u8, u64)> {
             }
             n
         }
+        // Reserved additional information 28..=30 is a non-canonical head; only 31 (indefinite) is
+        // forbidden.
+        28..=30 => return Err(Error::NonCanonical),
         _ => return Err(Error::ForbiddenCBOR),
     };
     Ok((first >> 5, n))
@@ -35,13 +38,21 @@ fn head(data: &mut &[u8]) -> Result<(u8, u64)> {
 pub struct Items {
     count: usize,
     cap: usize,
+    native: bool,
 }
 impl Items {
     /// The item ceiling of one object.
     pub const MAX: usize = 32768;
     /// A fresh budget of `cap` items for each scanned object.
     pub const fn per_object(cap: usize) -> Self {
-        Self { count: 0, cap }
+        Self { count: 0, cap, native: false }
+    }
+    /// A budget of `cap` items for an object scanned as the oracle's native scanner does: definite
+    /// text strings and maps are admitted as structure (their field-type errors come later, as
+    /// `Shape`), with no ordering or UTF-8 rule. Used for the pieces of an embedded SDK token,
+    /// which that scanner reads.
+    pub const fn native(cap: usize) -> Self {
+        Self { count: 0, cap, native: true }
     }
 }
 impl Default for Items {
@@ -54,21 +65,34 @@ fn scan(data: &mut &[u8], depth: usize, tokens: &mut Items) -> Result<()> {
     if tokens.count > tokens.cap {
         return Err(Error::TooManyItems);
     }
-    if data.first().is_some_and(|b| b >> 5 == 7 && *b != 0xf6) {
+    // Text strings, maps and simple values other than null are refused before the head is read (the
+    // oracle's order), so a malformed head of such an item is `ForbiddenCBOR`, not `NonCanonical`.
+    if data
+        .first()
+        .is_some_and(|b| (!tokens.native && matches!(b >> 5, 3 | 5)) || (b >> 5 == 7 && *b != 0xf6))
+    {
         return Err(Error::ForbiddenCBOR);
     }
     let (m, n) = head(data)?;
     match m {
         0 => {}
-        2 => {
+        2 | 3 => {
             let len = usize::try_from(n).map_err(|_| Error::Truncated)?;
             *data = data.get(len..).ok_or(Error::Truncated)?;
         }
-        4 | 6 => {
+        4..=6 => {
             if depth >= 16 {
                 return Err(Error::TooDeep);
             }
-            let count = if m == 6 { 1 } else { n };
+            // Each map pair needs at least two bytes: bound the head before doubling it.
+            if m == 5 && n > data.len() as u64 {
+                return Err(Error::Truncated);
+            }
+            let count = match m {
+                6 => 1,
+                5 => n * 2,
+                _ => n,
+            };
             if count > data.len() as u64 {
                 return Err(Error::Truncated);
             }
@@ -173,7 +197,7 @@ impl<'a> Iterator for Children<'a> {
             return None;
         }
         let start = self.rest;
-        scan(&mut self.rest, 0, &mut Items::per_object(usize::MAX)).expect("validated CBOR child");
+        scan(&mut self.rest, 0, &mut Items::native(usize::MAX)).expect("validated CBOR child");
         Some(item(&start[..start.len() - self.rest.len()]).expect("validated CBOR head"))
     }
 }

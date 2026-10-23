@@ -266,10 +266,12 @@ negative!(cfg_nonzero_vault, 0, CfgMismatch, |f| {
 negative!(cfg_native_asset, 0, CfgMismatch, |f| {
     f.cfg = edit(&f.cfg, &[8], &b(&[1; 20]));
 });
-negative!(cfg_empty_shard, 0, CfgMismatch, |f| {
+// The kernel reads no rule into the EVM shard (the oracle's `DecodeCfg` and `Validate` do not); a
+// changed shard changes the Cfg hash, which the lock proof's embedded cfg then no longer binds.
+negative!(cfg_empty_shard, 0, LockProofCfg, |f| {
     f.cfg = edit(&f.cfg, &[6], &b(&[]));
 });
-negative!(cfg_zero_terminated_shard, 0, CfgMismatch, |f| {
+negative!(cfg_zero_terminated_shard, 0, LockProofCfg, |f| {
     f.cfg = edit(&f.cfg, &[6], &b(&[0]));
 });
 negative!(mint_network, 0, MintShape, |f| {
