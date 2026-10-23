@@ -35,6 +35,7 @@ fn scan(
     tokens: &mut usize,
     cap: usize,
     strict: bool,
+    utf8: bool,
 ) -> Result<(), Malformed> {
     *tokens += 1;
     if *tokens > cap {
@@ -49,7 +50,7 @@ fn scan(
         2 | 3 => {
             let len = usize::try_from(n).map_err(|_| Malformed::Truncated)?;
             let data = r.take(len)?;
-            if strict && m == 3 && core::str::from_utf8(data).is_err() {
+            if (strict || utf8) && m == 3 && core::str::from_utf8(data).is_err() {
                 return Err(Malformed::Utf8);
             }
         }
@@ -78,7 +79,7 @@ fn scan(
             let mut keys: [&[u8]; 64] = [&[]; 64];
             for i in 0..count {
                 let start = r.data;
-                scan(r, depth + 1, tokens, cap, strict)?;
+                scan(r, depth + 1, tokens, cap, strict, utf8)?;
                 if strict && m == 5 && i % 2 == 0 {
                     let key = &start[..start.len() - r.data.len()];
                     let idx = (i / 2) as usize;
@@ -106,7 +107,7 @@ pub fn one_capped<'a>(
     cap: usize,
 ) -> Result<Item<'a>, Malformed> {
     let mut r = Reader { data };
-    scan(&mut r, 0, tokens, cap, true)?;
+    scan(&mut r, 0, tokens, cap, true, true)?;
     if !r.data.is_empty() {
         return Err(Malformed::Trailing);
     }
@@ -122,7 +123,20 @@ pub fn one_loose<'a>(
     cap: usize,
 ) -> Result<Item<'a>, Malformed> {
     let mut r = Reader { data };
-    scan(&mut r, 0, tokens, cap, false)?;
+    scan(&mut r, 0, tokens, cap, false, false)?;
+    if !r.data.is_empty() {
+        return Err(Malformed::Trailing);
+    }
+    item(data)
+}
+/// [`one_loose`] that also refuses text that is not UTF-8: the scan a typed CBOR decoder makes.
+pub fn one_typed<'a>(
+    data: &'a [u8],
+    tokens: &mut usize,
+    cap: usize,
+) -> Result<Item<'a>, Malformed> {
+    let mut r = Reader { data };
+    scan(&mut r, 0, tokens, cap, false, true)?;
     if !r.data.is_empty() {
         return Err(Malformed::Trailing);
     }
@@ -209,7 +223,7 @@ impl<'a> Iterator for Children<'a> {
         // All views originate in the successful full-tree scan. Rescanning a
         // child only locates its boundary; it cannot observe new caller bytes.
         // A child of a validated item, whatever budget the parent had: no ceiling here.
-        scan(&mut r, 0, &mut 0, usize::MAX, false).expect("validated CBOR child");
+        scan(&mut r, 0, &mut 0, usize::MAX, false, false).expect("validated CBOR child");
         self.rest = r.data;
         Some(item(&start[..start.len() - r.data.len()]).expect("validated CBOR head"))
     }

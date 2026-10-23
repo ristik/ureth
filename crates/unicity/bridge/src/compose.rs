@@ -123,13 +123,13 @@ fn compose_outcome<V: Verdict>(
 /// object is paid only once it scans).
 fn items(b: &[u8]) -> u64 {
     let mut n = 0;
-    native::one(b, &mut n).map_or(0, |_| n as u64)
+    native::one_loose(b, &mut n, native::MAX_ITEMS).map_or(0, |_| n as u64)
 }
 
 /// The history's native scan: no item ceiling, its items are paid (`historyScan`).
 fn history_scan(history: &[u8]) -> Option<(native::Item<'_>, u64)> {
     let mut n = 0;
-    native::one_capped(history, &mut n, usize::MAX).ok().map(|it| (it, n as u64))
+    native::one_loose(history, &mut n, usize::MAX).ok().map(|it| (it, n as u64))
 }
 
 /// `historyItems`: the history's J, zero if it does not scan.
@@ -248,16 +248,10 @@ fn scan_anchor(a: &Anchor<'_>) -> Result<(), Status> {
         return Err(Status::InputTooLarge);
     }
     // The oracle's typed unmarshal of the certificate: its shape must hold (not the strict scan's
-    // sublimits, map order or signature widths, which the batch refuses later), and its shard must
-    // be the anchor's.
-    match reth_unicity_b1::certificate_shape(a.uc) {
-        Ok(()) |
-        Err(
-            reth_unicity_b1::Malformed::Limit |
-            reth_unicity_b1::Malformed::Canonical |
-            reth_unicity_b1::Malformed::Signature,
-        ) => {}
-        Err(_) => return Err(Status::AnchorAuth),
+    // widths, sublimits or map order, which the batch refuses later), and its shard must be the
+    // anchor's.
+    if reth_unicity_b1::certificate_shape(a.uc).is_err() {
+        return Err(Status::AnchorAuth);
     }
     let shard = native::one_loose(a.uc, &mut 0, usize::MAX)
         .and_then(|uc| uc.tagged::<7>(39001))
@@ -273,7 +267,7 @@ fn scan_anchor(a: &Anchor<'_>) -> Result<(), Status> {
 /// `bridgeJ`'s refusals: each of the Cfg, the policy body, every anchor UC and every IR opening
 /// scans natively, within its own item bound.
 fn bridge_j(cfg: &[u8], env: &Envelope<'_>) -> Result<(), Status> {
-    let scan = |b: &[u8], malformed: Status| match native::one(b, &mut 0) {
+    let scan = |b: &[u8], malformed: Status| match native::one_loose(b, &mut 0, native::MAX_ITEMS) {
         Ok(_) => Ok(()),
         Err(reth_unicity_b1::Malformed::Limit) => Err(Status::TooManyItems),
         Err(_) => Err(malformed),

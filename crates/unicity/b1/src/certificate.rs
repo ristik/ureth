@@ -270,12 +270,61 @@ fn scan_body(uc: [cbor::Item<'_>; 7]) -> Result<(), Malformed> {
     Ok(())
 }
 
-/// The shape a typed decode of a certificate requires, without the native sublimits, the map order
-/// rules or the signature widths: the tags, arities and field types of every part, and the integer
-/// widths. The bridge's anchor scan (bft-core `ScanAnchor`, a typed unmarshal of the UC) refuses
-/// exactly what fails here with a `Shape`-class error; `Limit`, `Canonical` and `Signature` are the
-/// strict scan's alone and are for the batch to refuse (after its items are charged).
+/// The shape a typed decode of a certificate requires: the tags, arities and field types of every
+/// part, integer widths and UTF-8 text, and nothing else (any byte-string width, no native
+/// sublimits, no map order rules, no shard-depth rule). The bridge's anchor scan (bft-core
+/// `ScanAnchor`, a typed unmarshal of the UC) refuses exactly what fails here; whatever the strict
+/// scan alone refuses is for the batch to refuse, after its items are charged.
 pub fn certificate_shape(raw: &[u8]) -> Result<(), Malformed> {
-    let uc = cbor::one_loose(raw, &mut 0, cbor::MAX_ITEMS)?.tagged::<7>(39001)?;
-    scan_body(uc)
+    let bytes_or_null = |it: cbor::Item<'_>| -> Result<(), Malformed> {
+        if it.null() {
+            Ok(())
+        } else {
+            it.blob(2, 0, usize::MAX).map(|_| ())
+        }
+    };
+    let uc = cbor::one_typed(raw, &mut 0, cbor::MAX_ITEMS)?.tagged::<7>(39001)?;
+    let ir = uc[1].tagged::<10>(39002)?;
+    for i in [1, 2, 6, 8] {
+        ir[i].uint(u64::MAX)?;
+    }
+    for i in [3, 4, 5, 7, 9] {
+        bytes_or_null(ir[i])?;
+    }
+    bytes_or_null(uc[2])?;
+    bytes_or_null(uc[3])?;
+    let sc = uc[4].tagged::<3>(39003)?;
+    bytes_or_null(sc[1])?;
+    if !sc[2].null() {
+        sc[2].collection(4, u64::MAX)?;
+        for sib in sc[2].children() {
+            bytes_or_null(sib)?;
+        }
+    }
+    let tc = uc[5].tagged::<3>(39004)?;
+    tc[1].uint(u64::from(u32::MAX))?;
+    if !tc[2].null() {
+        tc[2].collection(4, u64::MAX)?;
+        for step in tc[2].children() {
+            let pair = step.array::<2>()?;
+            pair[0].uint(u64::from(u32::MAX))?;
+            bytes_or_null(pair[1])?;
+        }
+    }
+    let sf = uc[6].tagged::<8>(39005)?;
+    sf[1].uint(u64::from(u16::MAX))?;
+    for v in &sf[2..5] {
+        v.uint(u64::MAX)?;
+    }
+    bytes_or_null(sf[5])?;
+    bytes_or_null(sf[6])?;
+    if !sf[7].null() {
+        sf[7].collection(5, u64::MAX)?;
+        let mut kv = sf[7].children();
+        while let Some(k) = kv.next() {
+            k.blob(3, 0, usize::MAX)?;
+            bytes_or_null(kv.next().ok_or(Malformed::Shape)?)?;
+        }
+    }
+    Ok(())
 }
