@@ -28,7 +28,13 @@ fn head(r: &mut Reader<'_>) -> Result<(u8, u64), Malformed> {
 }
 /// The item ceiling of one scan budget.
 pub const MAX_ITEMS: usize = 32768;
-fn scan(r: &mut Reader<'_>, depth: usize, tokens: &mut usize, cap: usize) -> Result<(), Malformed> {
+fn scan(
+    r: &mut Reader<'_>,
+    depth: usize,
+    tokens: &mut usize,
+    cap: usize,
+    strict: bool,
+) -> Result<(), Malformed> {
     *tokens += 1;
     if *tokens > cap {
         return Err(Malformed::Limit);
@@ -42,7 +48,7 @@ fn scan(r: &mut Reader<'_>, depth: usize, tokens: &mut usize, cap: usize) -> Res
         2 | 3 => {
             let len = usize::try_from(n).map_err(|_| Malformed::Truncated)?;
             let data = r.take(len)?;
-            if m == 3 && core::str::from_utf8(data).is_err() {
+            if strict && m == 3 && core::str::from_utf8(data).is_err() {
                 return Err(Malformed::Utf8);
             }
         }
@@ -52,7 +58,7 @@ fn scan(r: &mut Reader<'_>, depth: usize, tokens: &mut usize, cap: usize) -> Res
             }
             let count = match m {
                 5 => {
-                    if n > 64 {
+                    if strict && n > 64 {
                         return Err(Malformed::Limit);
                     }
                     n * 2
@@ -66,8 +72,8 @@ fn scan(r: &mut Reader<'_>, depth: usize, tokens: &mut usize, cap: usize) -> Res
             let mut keys: [&[u8]; 64] = [&[]; 64];
             for i in 0..count {
                 let start = r.data;
-                scan(r, depth + 1, tokens, cap)?;
-                if m == 5 && i % 2 == 0 {
+                scan(r, depth + 1, tokens, cap, strict)?;
+                if strict && m == 5 && i % 2 == 0 {
                     let key = &start[..start.len() - r.data.len()];
                     let idx = (i / 2) as usize;
                     if keys[..idx].contains(&key) || (idx > 0 && keys[idx - 1] >= key) {
@@ -94,7 +100,23 @@ pub fn one_capped<'a>(
     cap: usize,
 ) -> Result<Item<'a>, Malformed> {
     let mut r = Reader { data };
-    scan(&mut r, 0, tokens, cap)?;
+    scan(&mut r, 0, tokens, cap, true)?;
+    if !r.data.is_empty() {
+        return Err(Malformed::Trailing);
+    }
+    item(data)
+}
+/// [`one_capped`] without the certificate-level rules: map keys need not be ordered, unique or few,
+/// and text need not be UTF-8. This is the structural scan of a container that merely *carries*
+/// certificates (the bridge's split justification and embedded SDK token); each certificate is
+/// then scanned strictly on its own ([`crate::scan_certificate`]).
+pub fn one_loose<'a>(
+    data: &'a [u8],
+    tokens: &mut usize,
+    cap: usize,
+) -> Result<Item<'a>, Malformed> {
+    let mut r = Reader { data };
+    scan(&mut r, 0, tokens, cap, false)?;
     if !r.data.is_empty() {
         return Err(Malformed::Trailing);
     }
@@ -181,7 +203,7 @@ impl<'a> Iterator for Children<'a> {
         // All views originate in the successful full-tree scan. Rescanning a
         // child only locates its boundary; it cannot observe new caller bytes.
         // A child of a validated item, whatever budget the parent had: no ceiling here.
-        scan(&mut r, 0, &mut 0, usize::MAX).expect("validated CBOR child");
+        scan(&mut r, 0, &mut 0, usize::MAX, false).expect("validated CBOR child");
         self.rest = r.data;
         Some(item(&start[..start.len() - r.data.len()]).expect("validated CBOR head"))
     }

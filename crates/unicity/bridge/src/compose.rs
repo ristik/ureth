@@ -26,6 +26,29 @@ pub(crate) fn compose<V: Verdict>(
     meter: &mut Meter,
     verdict: &mut V,
 ) -> Result<Fixed, Stop<V::Error>> {
+    compose_outcome(call, meter, verdict, false).map(|o| Fixed::of(&o))
+}
+
+/// `BRIDGE_COMPOSE_V2`: the same composition, a return verified as a lineage (protocol 6).
+pub(crate) fn compose_v2<V: Verdict>(
+    call: Call<'_>,
+    meter: &mut Meter,
+    verdict: &mut V,
+) -> Result<crate::FixedV2, Stop<V::Error>> {
+    let mut o = compose_outcome(call, meter, verdict, true)?;
+    if call.op == 1 {
+        o.part_token_id = o.token_id;
+        o.part_amount = o.amount;
+    }
+    Ok(crate::FixedV2::of(&o))
+}
+
+fn compose_outcome<V: Verdict>(
+    call: Call<'_>,
+    meter: &mut Meter,
+    verdict: &mut V,
+    lineage: bool,
+) -> Result<Outcome, Stop<V::Error>> {
     let mut pay = |gas: u64| meter.charge(gas).map_err(Stop::Halt);
     if call.op != 1 && call.op != 2 {
         return Err(Status::BadOperation.into());
@@ -39,8 +62,19 @@ pub(crate) fn compose<V: Verdict>(
     // The kernel: the history's items and its leaf count are paid before any of its work.
     pay(Meter::PER_ITEM * history_items(env.history) +
         Meter::PER_LEAF * history_leaves(env.history))?;
-    let outcome = reth_unicity_b2::relation(call.op, call.cfg, env.history, |_| Ok(()))
-        .map_err(status_of_b2)?;
+    let outcome = if lineage && call.op == 2 {
+        let mut charge = |gas: u64| pay(gas).map_err(|_| reth_unicity_b2::Error::OutOfGas);
+        reth_unicity_b2::lineage::relation(call.cfg, env.history, &mut charge).map_err(|e| {
+            if e == reth_unicity_b2::Error::OutOfGas {
+                Stop::Halt(Halt::OutOfGas)
+            } else {
+                Stop::Status(status_of_b2(e))
+            }
+        })?
+    } else {
+        reth_unicity_b2::relation(call.op, call.cfg, env.history, |_| Ok(()))
+            .map_err(status_of_b2)?
+    };
     let leaf_anchor = plan_anchors(partition, &env, &outcome)?;
     // The scans of `computeGate`, in its order.
     for a in &env.anchors {
@@ -82,7 +116,7 @@ pub(crate) fn compose<V: Verdict>(
             return Err(Status::LeafProof.into());
         }
     }
-    Ok(Fixed::of(&outcome))
+    Ok(outcome)
 }
 
 /// `BridgeItems`: an object's item heads under the native scan, zero if it does not scan (an

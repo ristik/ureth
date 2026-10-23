@@ -102,3 +102,94 @@ fn every_native_compose_case_replays_exactly() {
         failures.join("\n")
     );
 }
+
+// Protocol 6 (BRIDGE_COMPOSE_V2): the oracle's split corpus (bft-core
+// `bridgeprofile/testdata/split-corpus`).
+fn split_corpus() -> Value {
+    serde_json::from_str(include_str!("../testdata/split-v2.json")).unwrap()
+}
+
+#[test]
+fn the_v2_status_table_is_the_oracles() {
+    let c = split_corpus();
+    let table = c["status"].as_array().unwrap();
+    assert_eq!(table.len(), Status::NAMES.len() + Status::NAMES_V2.len() + 1);
+    for (i, name) in Status::NAMES.iter().chain(Status::NAMES_V2.iter()).enumerate() {
+        assert_eq!(table[i + 1]["code"], i as u64 + 1);
+        assert_eq!(table[i + 1]["name"], *name, "code {}", i + 1);
+    }
+    assert_eq!(Status::CertSigLength.name(), "ErrCertSigLength");
+    assert_eq!(Status::LeafProof.name(), "ErrLeafProof");
+}
+
+#[test]
+fn every_split_native_case_replays_exactly() {
+    let c = split_corpus();
+    let cases = c["cases"].as_array().unwrap();
+    assert!(cases.len() >= 45);
+    let mut failures = Vec::new();
+    let mut with_split = 0;
+    for case in cases {
+        let id = case["id"].as_str().unwrap();
+        let input = hex::decode(case["input"].as_str().unwrap()).unwrap();
+        let limit = case["aux"]["gasLimit"].as_str().map_or(u64::MAX, |v| v.parse().unwrap());
+        let got = run_v2(&input, limit, &mut claims(&case["aux"]));
+        let want = &case["expected"];
+        let ok = match (want["status"].as_str().unwrap(), &got) {
+            ("halt", Err(Halt::Malformed)) => want["values"]["halt"] == "abi",
+            ("halt", Err(Halt::OutOfGas)) => want["values"]["halt"] == "out-of-gas",
+            ("ok", Ok(out)) => {
+                with_split += usize::from(out.bytes[447] != 0 && out.status == Status::Ok);
+                want["values"]["status"].as_str().unwrap() == out.status.code().to_string() &&
+                    want["values"]["statusName"].as_str().unwrap() == out.status.name() &&
+                    want["values"]["gas"].as_str().unwrap() == out.gas.to_string() &&
+                    want["output"].as_str().unwrap() == hex::encode(out.bytes)
+            }
+            _ => false,
+        };
+        if !ok {
+            failures.push(format!("{id}: want {want}, got {:?}", got.map(|o| (o.status, o.gas))));
+        }
+    }
+    assert!(
+        failures.is_empty(),
+        "{} of {} differ:\n{}",
+        failures.len(),
+        cases.len(),
+        failures.join("\n")
+    );
+    assert!(with_split > 0, "the corpus exercises successful split redemptions");
+}
+
+#[test]
+fn every_seeded_mutation_of_a_depth_two_input_replays_exactly() {
+    let c = split_corpus();
+    let m = &c["mutation"];
+    let base = hex::decode(m["base"].as_str().unwrap()).unwrap();
+    let aux = serde_json::json!({ "claims": m["claims"] });
+    let mut failures = Vec::new();
+    let mut seen = BTreeSet::new();
+    for case in m["cases"].as_array().unwrap() {
+        let id = case["id"].as_str().unwrap();
+        let mut input = base.clone();
+        for p in case["patch"].as_array().unwrap() {
+            input[p["o"].as_u64().unwrap() as usize] ^= p["x"].as_u64().unwrap() as u8;
+        }
+        let want = &case["expected"];
+        let got = run_v2(&input, u64::MAX >> 1, &mut claims(&aux));
+        let ok = match (want["status"].as_str().unwrap(), &got) {
+            ("halt", Err(Halt::Malformed)) => true,
+            ("ok", Ok(out)) => {
+                seen.insert(out.status.name());
+                want["values"]["statusName"].as_str().unwrap() == out.status.name() &&
+                    want["values"]["gas"].as_str().unwrap() == out.gas.to_string()
+            }
+            _ => false,
+        };
+        if !ok {
+            failures.push(format!("{id}: want {want}, got {:?}", got.map(|o| (o.status, o.gas))));
+        }
+    }
+    assert!(failures.is_empty(), "{} differ:\n{}", failures.len(), failures.join("\n"));
+    assert!(seen.contains("ErrCertScan"), "the certificate scan is exercised: {seen:?}");
+}
