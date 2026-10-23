@@ -9,6 +9,8 @@ extend-exclude = [
     "arena.txt",
     # Exact SDK document; base58 peer IDs are covered by the pinned digest.
     "crates/unicity/b2/protocol/vectors/config/sdk-root-trust-base.json",
+    # Generated differential test data; its source string quotes a directory name.
+    "crates/unicity/bridge/testdata/parity-85.json",
 ]
 
 [default]
