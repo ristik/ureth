@@ -123,7 +123,7 @@ fn registry_independent_compose_cases_return_the_oracles_bytes_at_exactly_the_me
             _ => {}
         }
     }
-    assert!(decided >= 10, "{decided} registry-independent cases");
+    assert_eq!(decided, 23, "registry-independent cases of split-v2.json");
 }
 
 #[test]
