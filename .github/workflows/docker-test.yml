@@ -68,11 +68,11 @@ jobs:
       # Docker build (forks)
       - name: Set up Docker Buildx
         if: steps.fork.outputs.is_fork == 'true'
-        uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
       - name: Build reth image (Docker)
         if: steps.fork.outputs.is_fork == 'true'
-        uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
+        uses: docker/bake-action@59cb1203cd42bcefd40a1b6d73b589e48c86040e # v7.5.0
         env:
           VERGEN_GIT_SHA: ${{ steps.git.outputs.sha }}
           VERGEN_GIT_DESCRIBE: ${{ steps.git.outputs.describe }}
@@ -84,7 +84,7 @@ jobs:
             *.dockerfile=Dockerfile
 
       - name: Upload reth image
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ${{ inputs.artifact_name }}
           path: ./artifacts
