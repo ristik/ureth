@@ -9,7 +9,10 @@ use crate::{
     registry::{self, Entry, Pins},
     Error, Malformed, Reader, RegistryRead,
 };
-use secp256k1::{ecdsa::Signature, Message, Secp256k1};
+use secp256k1::{
+    ecdsa::{RecoverableSignature, RecoveryId},
+    Message, Secp256k1,
+};
 use std::collections::{HashMap, HashSet};
 
 pub use crate::Output;
@@ -363,8 +366,12 @@ fn evaluate<R: RegistryRead>(
     Ok(valid)
 }
 
-/// Verify every supplied signature of one seal and its weighted quorum. No early exit on quorum:
-/// a bad or unknown extra signer fails the seal.
+/// The weighted quorum of one seal under the upstream seal rule. Every supplied signature is evaluated
+/// (and counted) alone: a signer that is not a member counts zero, and so does a signature that is not
+/// exactly 65 bytes `r || s || v` with `1 <= r < n`, `1 <= s <= n/2`, `v` in 0..=3 and a single recovery,
+/// over `SHA-256(seal bytes)`, to the member's key. None of them fails the seal. The one structural
+/// exception is an empty value: the native seal validation refuses it (bft-go-base `UnicitySeal.IsValid`),
+/// so it makes the claim false whatever else is signed.
 fn quorum(c: &Claim<'_>, e: &Entry, counters: &mut Counters) -> bool {
     let sig_map = c.seal_fields[7];
     if sig_map.null() || sig_map.arg == 0 {
@@ -376,26 +383,47 @@ fn quorum(c: &Claim<'_>, e: &Entry, counters: &mut Counters) -> bool {
     let message = Message::from_digest(hash(&[prefix, &[0xf6]]));
     let secp = Secp256k1::verification_only();
     let mut good = 0u64;
-    let mut valid = true;
+    let mut empty = false;
     let mut sigs = sig_map.children();
     while let Some(id) = sigs.next() {
         let sig = sigs.next().expect("scanned signature pair");
-        let Some(member) = e.members.iter().find(|m| m.id.as_bytes() == id.data) else {
-            valid = false;
-            continue;
-        };
-        let Ok(signature) = Signature::from_compact(&sig.data[..64]) else {
-            valid = false;
-            continue;
-        };
-        let mut low = signature;
-        low.normalize_s();
-        counters.signatures += 1;
-        if low != signature || secp.verify_ecdsa(&message, &signature, &member.key).is_err() {
-            valid = false;
+        counters.signatures += 1; // one evaluation per supplied signature, whatever its outcome
+        if sig.data.is_empty() {
+            empty = true;
             continue;
         }
-        good += member.weight;
+        let Some(member) = e.members.iter().find(|m| m.id.as_bytes() == id.data) else {
+            continue;
+        };
+        if recovers_to(&secp, &message, sig.data, &member.key) {
+            good += member.weight;
+        }
     }
-    valid && good >= e.total - (e.total - 1) / 3
+    !empty && good >= e.total - (e.total - 1) / 3
+}
+
+/// Whether `sig` is a canonical recoverable signature of `message` by `key`: exactly 65 bytes, low s,
+/// recovery ID 0..=3, and one recovery that yields `key`. (No normalization, no alternative parity.)
+fn recovers_to(
+    secp: &Secp256k1<secp256k1::VerifyOnly>,
+    message: &Message,
+    sig: &[u8],
+    key: &secp256k1::PublicKey,
+) -> bool {
+    let Ok(sig): Result<&[u8; 65], _> = sig.try_into() else {
+        return false;
+    };
+    let Ok(id) = RecoveryId::try_from(i32::from(sig[64])) else {
+        return false;
+    };
+    let Ok(recoverable) = RecoverableSignature::from_compact(&sig[..64], id) else {
+        return false;
+    };
+    let standard = recoverable.to_standard();
+    let mut low = standard;
+    low.normalize_s();
+    if low != standard {
+        return false; // high s is never normalized into acceptance
+    }
+    secp.recover_ecdsa(message, &recoverable).is_ok_and(|recovered| recovered == *key)
 }

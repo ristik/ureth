@@ -206,7 +206,6 @@ fn inclusion<'a>(it: native::Item<'a>) -> Result<(native::Item<'a>, u64)> {
         return Err(E::Shape);
     }
     reth_unicity_b1::scan_certificate(uc.raw).map_err(|e| match e {
-        Malformed::Signature => E::CertSigLength,
         _ => E::CertScan,
     })?;
     Ok((f[1], t))

@@ -77,7 +77,7 @@ pub(crate) fn reseal(
     epoch: u64,
     round: u64,
     signers: &[&Signer],
-    tamper: impl FnOnce(&mut Vec<[u8; 64]>),
+    tamper: impl FnOnce(&mut Vec<[u8; 65]>),
 ) -> Vec<u8> {
     let sl = u16::from_be_bytes([base[4], base[5]]) as usize;
     let prefix_len = 6 + sl + 96;
@@ -110,10 +110,17 @@ pub(crate) fn reseal(
     let secp = Secp256k1::new();
     let mut sorted: Vec<&&Signer> = signers.iter().collect();
     sorted.sort_by(|a, b| a.id.cmp(&b.id));
-    let mut sigs: Vec<[u8; 64]> = sorted
+    // canonical recoverable r || s || v signatures, the upstream seal rule
+    let mut sigs: Vec<[u8; 65]> = sorted
         .iter()
         .map(|s| {
-            secp.sign_ecdsa(&Message::from_digest(digest.into()), &s.secret).serialize_compact()
+            let (id, compact) = secp
+                .sign_ecdsa_recoverable(&Message::from_digest(digest.into()), &s.secret)
+                .serialize_compact();
+            let mut out = [0u8; 65];
+            out[..64].copy_from_slice(&compact);
+            out[64] = i32::from(id) as u8;
+            out
         })
         .collect();
     tamper(&mut sigs);
@@ -121,7 +128,7 @@ pub(crate) fn reseal(
     for (s, sig) in sorted.iter().zip(&sigs) {
         map.extend(head(3, s.id.len() as u64));
         map.extend(s.id.as_bytes());
-        map.extend(head(2, 64));
+        map.extend(head(2, 65));
         map.extend(sig);
     }
     let new_seal = build(&map);

@@ -43,8 +43,6 @@ pub enum Malformed {
     Shape,
     /// Invalid shard terminator/depth.
     Shard,
-    /// Invalid signature length or recovery suffix.
-    Signature,
 }
 
 /// Full result before EVM status conversion.

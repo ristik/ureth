@@ -103,10 +103,8 @@ pub(crate) fn parse_claim<'a>(
     let mut sigs = sf[7].children();
     while let Some(id) = sigs.next() {
         id.blob(3, 0, 128)?;
-        let sig = sigs.next().ok_or(Malformed::Shape)?.blob(2, 0, usize::MAX)?;
-        if !(sig.len() == 64 || (sig.len() == 65 && sig[64] <= 1)) {
-            return Err(Malformed::Signature);
-        }
+        // any byte string is a well-formed witness: whether it counts is decided at the quorum
+        sigs.next().ok_or(Malformed::Shape)?.blob(2, 0, usize::MAX)?;
     }
     Ok(Parsed {
         claim: Claim {
@@ -188,8 +186,8 @@ pub fn scan_certificate(raw: &[u8]) -> Result<(), Malformed> {
     }
     let uc = cbor::one(raw, &mut 0)?.tagged::<7>(39001)?;
     // The bridge's restrictions run first, in the oracle's order (bft-core `scanCertificate`): the
-    // SDK codec's required majors, the seal network and the seal signature widths. Only a width
-    // that is neither 64 nor 65 is `Signature`; every other failure is `Shape` or `Limit`.
+    // SDK codec's required majors and the seal network. A signature value of any width is a
+    // well-formed witness (the upstream seal rule); the failures are `Shape` or `Limit`.
     for (i, tag, arity, req, major) in
         [(1, 39002, 10, 5, 2), (4, 39003, 3, 2, 4), (5, 39004, 3, 2, 4), (6, 39005, 8, 7, 5)]
     {
@@ -213,9 +211,6 @@ pub fn scan_certificate(raw: &[u8]) -> Result<(), Malformed> {
         if i % 2 == 1 {
             if v.major != 2 {
                 return Err(Malformed::Shape);
-            }
-            if v.data.len() != 64 && v.data.len() != 65 {
-                return Err(Malformed::Signature);
             }
         }
     }
@@ -262,10 +257,7 @@ fn scan_body(uc: [cbor::Item<'_>; 7]) -> Result<(), Malformed> {
     let mut sigs = sf[7].children();
     while let Some(id) = sigs.next() {
         id.blob(3, 0, 128)?;
-        let sig = sigs.next().ok_or(Malformed::Shape)?.blob(2, 0, usize::MAX)?;
-        if sig.len() == 65 && sig[64] > 1 {
-            return Err(Malformed::Shape);
-        }
+        sigs.next().ok_or(Malformed::Shape)?.blob(2, 0, usize::MAX)?;
     }
     Ok(())
 }

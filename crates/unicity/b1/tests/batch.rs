@@ -23,7 +23,7 @@ fn hex(s: &str) -> Vec<u8> {
         .collect()
 }
 fn fixture(id: &str) -> Value {
-    let m: Value = serde_json::from_str(include_str!("testdata/go-b3reprice.json")).unwrap();
+    let m: Value = serde_json::from_str(include_str!("testdata/b1-vectors-anyage.json")).unwrap();
     m["vectors"].as_array().unwrap().iter().find(|v| v["id"] == id).unwrap().clone()
 }
 /// The packed claims of a version 1 request.
@@ -284,7 +284,7 @@ fn phase_one_and_not_ready_are_false_after_only_the_common_reads() {
 }
 
 #[test]
-fn a_bad_signature_or_an_unknown_extra_signer_fails_without_cutting_the_loop_short() {
+fn a_bad_signature_or_an_unknown_signer_counts_zero_and_never_cuts_the_loop_short() {
     let one = claims("cert.single.ok");
     // Flip a bit of the first signature (all three still get verified).
     let mut bad = one[0].clone();
@@ -294,8 +294,8 @@ fn a_bad_signature_or_an_unknown_extra_signer_fails_without_cutting_the_loop_sho
     assert!(!verdict(&out));
     assert_eq!(c.signatures, 3);
 
-    // node02 renamed node09 (still sorted last): unknown signer, though node00+node01 hold 20 of
-    // 21 and the quorum is 15. The seal must fail, not pass on a quorum of the known ones.
+    // node02 renamed node09 (still sorted last): an unknown signer counts zero, and node00+node01
+    // hold 20 of 21 against a quorum of 15: the seal holds on the known ones (the upstream rule).
     let mut ms = members("cert.single.ok");
     ms.truncate(3);
     ms[0].weight = 10;
@@ -307,6 +307,12 @@ fn a_bad_signature_or_an_unknown_extra_signer_fails_without_cutting_the_loop_sho
     let mut renamed = one[0].clone();
     let p = renamed.windows(6).rposition(|w| w == b"node02").unwrap();
     renamed[p + 5] = b'9';
+    let (out, c) = ok(&[renamed.clone()], &mut registry(7, 7, &ms));
+    assert!(verdict(&out));
+    assert_eq!(c.signatures, 3, "the unknown signer is evaluated and charged all the same");
+    // ... and it makes up for nothing: renaming node01 as well leaves node00 + node02 = 11 of 15.
+    let p = renamed.windows(6).position(|w| w == b"node01").unwrap();
+    renamed[p + 5] = b'8';
     let (out, _) = ok(&[renamed], &mut registry(7, 7, &ms));
     assert!(!verdict(&out));
 }
@@ -503,11 +509,28 @@ fn a_seal_outside_its_epochs_interval_or_with_a_short_quorum_is_false_at_the_sam
     let (o, c) = ok(&[two], &mut own_registry(5, 6, &sg, 1000));
     assert!(!verdict(&o));
     assert_eq!(c.signatures, 2);
-    // One damaged signature among four valid ones: the seal fails though three would be a quorum.
+    // One damaged signature among four valid ones counts zero: the other three are a quorum.
     let bad = uc::reseal(&base, 5, 905, &all, |s| s[3][10] ^= 1);
     let (o, c) = ok(&[bad], &mut own_registry(5, 6, &sg, 1000));
-    assert!(!verdict(&o));
+    assert!(verdict(&o));
     assert_eq!(c.signatures, 4);
+    // ... and so does a signature of the wrong width or recovery ID, as an extra beside the three.
+    for damage in [
+        (|s: &mut Vec<[u8; 65]>| s[3][64] = 4) as fn(&mut Vec<[u8; 65]>),
+        |s| s[3][64] ^= 1,
+        |s| s[3][..32].fill(0),
+    ] {
+        let extra = uc::reseal(&base, 5, 905, &all, damage);
+        let (o, _) = ok(&[extra], &mut own_registry(5, 6, &sg, 1000));
+        assert!(verdict(&o));
+    }
+    // ... but two damaged ones leave two of four.
+    let two_bad = uc::reseal(&base, 5, 905, &all, |s| {
+        s[2][10] ^= 1;
+        s[3][10] ^= 1;
+    });
+    let (o, _) = ok(&[two_bad], &mut own_registry(5, 6, &sg, 1000));
+    assert!(!verdict(&o));
 }
 
 /// Nothing in a process may make a call cheaper, dearer or differently decided because earlier
