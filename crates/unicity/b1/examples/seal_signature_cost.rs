@@ -1,6 +1,8 @@
-//! Wall-clock cost of one seal signature under the upstream rule (one key recovery + comparison) against the compact ECDSA verification it
-//! replaced, on the same keys and digests. The price per supplied signature is 6,000 gas (`certgroups`/`b1ref` schedules); this prints the
-//! measured microseconds so the margin can be judged. Run: `cargo run --release -p reth-unicity-b1 --example seal_signature_cost`.
+//! Wall-clock cost of one seal signature under the upstream rule (one key recovery + comparison)
+//! against the compact ECDSA verification it replaced, on the same keys and digests. The price per
+//! supplied signature is 6,000 gas (`certgroups`/`b1ref` schedules); this prints the
+//! measured microseconds so the margin can be judged. Run: `cargo run --release -p reth-unicity-b1
+//! --example seal_signature_cost`.
 use secp256k1::{ecdsa::RecoverableSignature, Message, Secp256k1, SecretKey};
 use std::time::Instant;
 
