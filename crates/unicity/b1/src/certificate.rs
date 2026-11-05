@@ -208,10 +208,8 @@ pub fn scan_certificate(raw: &[u8]) -> Result<(), Malformed> {
         return Err(Malformed::Shape);
     }
     for (i, v) in seal[7].children().enumerate() {
-        if i % 2 == 1 {
-            if v.major != 2 {
-                return Err(Malformed::Shape);
-            }
+        if i % 2 == 1 && v.major != 2 {
+            return Err(Malformed::Shape);
         }
     }
     scan_body(uc)

@@ -366,12 +366,13 @@ fn evaluate<R: RegistryRead>(
     Ok(valid)
 }
 
-/// The weighted quorum of one seal under the upstream seal rule. Every supplied signature is evaluated
-/// (and counted) alone: a signer that is not a member counts zero, and so does a signature that is not
-/// exactly 65 bytes `r || s || v` with `1 <= r < n`, `1 <= s <= n/2`, `v` in 0..=3 and a single recovery,
-/// over `SHA-256(seal bytes)`, to the member's key. None of them fails the seal. The one structural
-/// exception is an empty value: the native seal validation refuses it (bft-go-base `UnicitySeal.IsValid`),
-/// so it makes the claim false whatever else is signed.
+/// The weighted quorum of one seal under the upstream seal rule. Every supplied signature is
+/// evaluated (and counted) alone: a signer that is not a member counts zero, and so does a
+/// signature that is not exactly 65 bytes `r || s || v` with `1 <= r < n`, `1 <= s <= n/2`, `v` in
+/// 0..=3 and a single recovery, over `SHA-256(seal bytes)`, to the member's key. None of them fails
+/// the seal. The one structural exception is an empty signer ID or an empty signature value: the
+/// native seal validation refuses it (bft-go-base `UnicitySeal.IsValid`), so it makes the claim
+/// false whatever else is signed.
 fn quorum(c: &Claim<'_>, e: &Entry, counters: &mut Counters) -> bool {
     let sig_map = c.seal_fields[7];
     if sig_map.null() || sig_map.arg == 0 {
@@ -388,8 +389,8 @@ fn quorum(c: &Claim<'_>, e: &Entry, counters: &mut Counters) -> bool {
     while let Some(id) = sigs.next() {
         let sig = sigs.next().expect("scanned signature pair");
         counters.signatures += 1; // one evaluation per supplied signature, whatever its outcome
-        if sig.data.is_empty() {
-            empty = true;
+        if sig.data.is_empty() || id.data.is_empty() {
+            empty = true; // an empty signer ID or an empty signature value: refused by the native seal validation
             continue;
         }
         let Some(member) = e.members.iter().find(|m| m.id.as_bytes() == id.data) else {
@@ -402,8 +403,9 @@ fn quorum(c: &Claim<'_>, e: &Entry, counters: &mut Counters) -> bool {
     !empty && good >= e.total - (e.total - 1) / 3
 }
 
-/// Whether `sig` is a canonical recoverable signature of `message` by `key`: exactly 65 bytes, low s,
-/// recovery ID 0..=3, and one recovery that yields `key`. (No normalization, no alternative parity.)
+/// Whether `sig` is a canonical recoverable signature of `message` by `key`: exactly 65 bytes, low
+/// s, recovery ID 0..=3, and one recovery that yields `key`. (No normalization, no alternative
+/// parity.)
 fn recovers_to(
     secp: &Secp256k1<secp256k1::VerifyOnly>,
     message: &Message,

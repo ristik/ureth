@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 const CORPUS: &str = include_str!("testdata/b1-vectors-anyage.json");
-const CORPUS_SHA256: &str = "00918ee3bf01f9bf585a13098114bd2f68444fb0598be86da29e864e40ecaead";
+const CORPUS_SHA256: &str = "5f9c378624060832b56b11ccb89bb75b85670deb443d6b6a3227de2c6c57f5d2";
 
 fn hex(s: &str) -> Vec<u8> {
     s.as_bytes()

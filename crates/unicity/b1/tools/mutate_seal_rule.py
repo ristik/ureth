@@ -19,7 +19,8 @@ if not os.environ.get("CARGO_TARGET_DIR"):
     raise SystemExit("set a private CARGO_TARGET_DIR")
 
 CASES = [
-    ("empty value no longer refused", "if sig.data.is_empty() {", "if false {", "anyage_vectors"),
+    ("empty value no longer refused", "if sig.data.is_empty() || id.data.is_empty() {", "if id.data.is_empty() {", "anyage_vectors"),
+    ("empty signer ID no longer refused", "if sig.data.is_empty() || id.data.is_empty() {", "if sig.data.is_empty() {", "anyage_vectors"),
     ("unknown signer poisons the seal",
      "let Some(member) = e.members.iter().find(|m| m.id.as_bytes() == id.data) else { continue; };",
      "let Some(member) = e.members.iter().find(|m| m.id.as_bytes() == id.data) else { return false; };", "anyage_vectors"),
