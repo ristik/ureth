@@ -58,7 +58,6 @@ for expr,test in [
     ("count == 0 || count > 8 || (!shared && count != 1)","vector_enc_header_count_zero"),
     ("sl > 33","vector_res_shard_length_u16max"),
     ("uc_len > 24576","vector_res_uc_length_u32max"),
-    ("!(sig.len() == 64 || (sig.len() == 65 && sig[64] <= 1))","vector_quorum_sig_v2"),
     ("!r.data.is_empty()","vector_enc_trailing"),
     ("common.phase != 2","ordered_source_reads_and_phase_unknown_epoch"),
     ("c.tree_cert[1].arg != u64::from(c.partition)","vector_cert_neg_partition"),
@@ -74,12 +73,11 @@ for expr,test in [
     ("(e.end.is_none() && s[3].arg != common.origin)","vector_time_open_not_origin"),
     ("r > common.round","vector_time_future"),
     ("common.round - r > common.window","vector_time_age_wcert_1"),
-    ("low != signature || secp.verify_ecdsa(&message, &signature, &member.key).is_err()","vector_quorum_bad_extra"),
 ]: guard("certificate.rs",expr,test)
 guard("certificate.rs","c.seal.raw == first.seal.raw","vector_cert_shared_mixed_subsets_false","true")
 guard("certificate.rs","ordered &&","vector_cert_shared_order","true &&")
 guard("certificate.rs","h == sf[6].data","vector_cert_neg_trhash","true")
-guard("certificate.rs","good >= e.total - (e.total - 1) / 3","vector_quorum_short","true")
+# the seal signature rule (quorum, recovery, extras) is gated by tools/mutate_seal_rule.py
 for expr in [
     "w[0].is_zero() ||", "w[5].is_zero() ||", "w[2] != U256::from(1)",
     "!matches!(phase, 1 | 2)", "network > u64::from(u16::MAX)",
@@ -107,10 +105,6 @@ for expr in [
     "((ir[3].data == ir[4].data) == !ir[7].null())",
     "sf[2].arg == 0", "sf[4].arg < 1681971084",
 ]: guard("certificate.rs", expr, "independently_constructed_requests_match_kernel_verdicts")
-guard("certificate.rs",
-      "let Some(member) = e.members.iter().find(|m| m.id.as_bytes() == id.data) else { valid = false; continue; };",
-      "vector_quorum_unknown_signer",
-      "let Some(member) = e.members.iter().find(|m| m.id.as_bytes() == id.data) else { continue; };")
 guard("provider.rs", "Err(PrecompileError::Fatal(e.to_string()))",
       "provider_database_failure_aborts_execution",
       'Ok(PrecompileOutput::halt(PrecompileHalt::Other("ignored host".into()), input.reservoir))')
