@@ -78,12 +78,13 @@ const COMMON_WORDS: u64 = 11;
 pub const fn scan_gas(bytes: u64, claims: u64) -> u64 {
     60_000 + 16 * bytes + 500 * claims * (claims - 1)
 }
-/// The whole charge of a structurally accepted request.
+/// The whole charge of a structurally accepted request. The signature term is 7,200 per supplied signature (profile 7: the earlier 6,000 repriced
+/// by the measured recovery/verification time ratio; a relative repricing, not an absolute execution-time bound).
 pub const fn batch_gas(bytes: u64, k: u64, e: u64, q: u64, a: u64, p: u64) -> u64 {
     scan_gas(bytes, k) +
         READ_GAS * COMMON_WORDS +
         (1_000 * registry::MAX_MEMBERS + READ_GAS * EPOCH_WORDS) * e +
-        6_000 * q +
+        7_200 * q +
         2_000 * a +
         250 * p
 }

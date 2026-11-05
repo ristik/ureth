@@ -183,7 +183,7 @@ fn the_charge_is_the_contract_formula() {
     let expected = 60_000 + 16 * d.c + 500 * d.k * (d.k - 1) // scan and grouping
         + 100 * 11 // common words
         + (16_000 + 100 * (11 + 8 * 16)) * d.e
-        + 6_000 * d.q
+        + 7_200 * d.q
         + 2_000 * d.a
         + 250 * d.p;
     assert_eq!(d.gas(), expected);

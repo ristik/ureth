@@ -409,7 +409,7 @@ impl Meter {
     pub(crate) const PER_BYTE: u64 = 2;
     pub(crate) const PER_ITEM: u64 = 20;
     pub(crate) const PER_LEAF: u64 = 16_000;
-    pub(crate) const PER_SIGNATURE: u64 = 6_000;
+    pub(crate) const PER_SIGNATURE: u64 = 7_200;
     pub(crate) const PER_EPOCH: u64 = 29_900;
     pub(crate) const PER_CLAIM: u64 = 2_000;
     pub(crate) const PER_STEP: u64 = 250;
