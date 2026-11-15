@@ -148,6 +148,16 @@ impl SealJobRegistry {
             .and_then(|job| job.pair_binding)
     }
 
+    /// Returns the authentication witnesses the job with `payload_id` was handed, if it is still
+    /// held. A job built from an input without witnesses returns an empty list.
+    pub fn witnesses(&self, payload_id: &PayloadId) -> Option<Vec<alloy_primitives::Bytes>> {
+        self.lock()
+            .jobs
+            .iter()
+            .find(|job| job.payload_id == *payload_id)
+            .map(|job| job.witnesses.clone())
+    }
+
     /// Installs `job`, accepting an identical retry without replacing the existing job.
     ///
     /// If the registry is full, the entry of the lowest block number is evicted first. Eviction

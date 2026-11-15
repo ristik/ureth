@@ -5,7 +5,7 @@ mod support;
 use alloy_consensus::{transaction::TransactionMeta, Header, SignableTransaction, TxLegacy};
 use alloy_eips::{BlockHashOrNumber, BlockNumHash, BlockNumberOrTag};
 use alloy_genesis::Genesis;
-use alloy_primitives::{Address, BlockNumber, TxHash, TxKind, TxNumber, B256, U256};
+use alloy_primitives::{Address, BlockNumber, Bytes, TxHash, TxKind, TxNumber, B256, U256};
 use alloy_rpc_types_engine::{
     ExecutionData, ExecutionPayloadV3, ForkchoiceState, PayloadAttributes as EthPayloadAttributes,
     PayloadId, PayloadStatus, PayloadStatusEnum,
@@ -1157,6 +1157,7 @@ fn seal_input(
         b1_update: b1::job(root).update,
         records: b1::job(root).records,
         pair_binding: pair_binding(parent, root, build_subject(attrs)).canonical_cbor().into(),
+        witnesses: vec![],
     }
 }
 
@@ -1183,6 +1184,7 @@ fn seal_build_rejects_non_canonical_root_input_as_invalid() {
         b1_update: Default::default(),
         records: Default::default(),
         pair_binding: Default::default(),
+        witnesses: vec![],
     };
 
     let error =
@@ -2310,6 +2312,7 @@ async fn captured_paid_idle_transition_fixture_covers_enabled_routes_and_mutatio
         b1_update: b1::job(&wrong_root).update,
         records: b1::job(&wrong_root).records,
         pair_binding: seal_input(&first.parent, &first.root, &attrs).pair_binding,
+        witnesses: vec![],
     };
     let (_, _, _, _, build_context, build_validator) = seal_fixture();
     let build_error = prepare_seal_build(
@@ -2847,6 +2850,66 @@ async fn get_payload_with_seal_stores_the_companion_it_returns() {
         Lookup::Found(found) => assert_eq!(found, response.seal_companion),
         other => panic!("expected the returned companion to be stored, got {other:?}"),
     }
+}
+
+/// The leader's own store must hold the witnesses its followers retain: the bound certificate in
+/// the companion of block N+1 is the certificate of block N, which wallets fetch through
+/// `unicity_getSealCompanionV1` and restart admission re-authenticates.
+#[tokio::test]
+async fn get_payload_with_seal_retains_the_witnesses_of_the_build_input() {
+    let (client, parent, root, attrs, mut context, validator) = seal_fixture();
+    let (_dir, store) = temp_store();
+    context.store = store.clone();
+
+    let state = ForkchoiceState::same_hash(genesis_hash());
+    let payload_id = attrs.payload_id(&parent.hash());
+    let witnesses =
+        vec![Bytes::from_static(b"bound certificate"), Bytes::from_static(b"bound record")];
+    let input =
+        SealBuildInput { witnesses: witnesses.clone(), ..seal_input(&parent, &root, &attrs) };
+    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input).unwrap();
+    // An identical retry is the same job; one that hands over other witnesses is not.
+    prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &input).unwrap();
+    let other = SealBuildInput { witnesses: vec![], ..input.clone() };
+    assert!(matches!(
+        prepare_seal_build(&client, &context, &validator, &state, Some(&attrs), &other),
+        Err(SealBuildError::DuplicatePayloadId)
+    ));
+    assert_eq!(context.registry.witnesses(&payload_id), Some(witnesses.clone()));
+
+    let base = context.builder_config.get().unwrap().clone();
+    let builder = UnicityExecutionPayloadBuilder::new(
+        client.clone(),
+        test_pool(),
+        context.registry.clone(),
+        base,
+    );
+    let payload = builder
+        .build_empty_payload(PayloadConfig::new(parent.clone(), attrs.clone(), payload_id))
+        .unwrap();
+    let mut expected = build_seal_companion(
+        &root,
+        &b1::job(&root).update,
+        &b1::job(&root).records,
+        &pair_binding(&parent, &root, build_subject(&attrs)),
+    )
+    .unwrap();
+    expected.witnesses = witnesses;
+
+    let response =
+        get_payload_with_seal_response(client.clone(), context, validator, payload_id, payload)
+            .await;
+    assert_eq!(response.seal_companion, expected);
+    let block_hash = declared_block_hash(&response.execution_payload);
+    match store.get(block_hash).unwrap() {
+        Lookup::Found(found) => assert_eq!(found, expected),
+        other => panic!("expected the companion with its witnesses to be stored, got {other:?}"),
+    }
+    let rpc = UnicityRpcModuleImpl::new(client, store);
+    assert_eq!(
+        rpc.get_seal_companion_v1(block_hash).await.unwrap(),
+        SealCompanionLookup::Found { companion: expected }
+    );
 }
 
 #[tokio::test]
@@ -3855,6 +3918,7 @@ async fn apply_go_subset(
         b1_update: b1_update.clone().into(),
         records: records.clone().into(),
         pair_binding: Default::default(),
+        witnesses: vec![],
     };
     let mut companion = SealCompanion {
         root_input: root_input.clone().into(),

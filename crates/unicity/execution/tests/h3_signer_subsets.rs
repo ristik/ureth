@@ -58,6 +58,7 @@ fn apply(witnesses: Vec<Vec<u8>>) -> Outcome {
         b1_update: job.update.clone(),
         records: job.records.clone(),
         pair_binding: Default::default(),
+        witnesses: vec![],
     };
     let companion = SealCompanion {
         root_input: root_input.into(),

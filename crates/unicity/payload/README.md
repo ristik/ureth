@@ -136,7 +136,14 @@ transaction set if the pool changed. Ureth therefore does not guarantee one bloc
 across delivery. The bft-core execution journal is the guard: it prevents publishing a second
 distinct locally built candidate for the same authorization.
 
-The companion's `witnesses` list is empty, and that is correct rather than incomplete.
+The execution client never produces witnesses of its own, and that is correct rather than
+incomplete. `sealBuildInput` may carry an optional `witnesses` list (at most `MAX_BUILD_WITNESSES`
+entries and `MAX_BUILD_WITNESS_BYTES` in total). The build path retains it with the job and attaches
+it unchanged to the companion it stores and returns. The leader's own store therefore serves the
+same `[bound certificate, bound technical record]` pair that its followers retain from
+`newPayloadWithSealV1`, both to `unicity_getSealCompanionV1` (wallet evidence for the parent block)
+and to restart admission. The list is opaque here, exactly as on the import path. Without it the
+companion's list is empty, as before.
 
 D2 §2 "The authentication lifecycle" settles it. The witness is not a commitment-bound field: the
 header commits only to `SHA-256(CBOR(rootInput))`, and D2 states that witnesses authenticate
@@ -156,8 +163,8 @@ The execution client is not the verifier on any path. It holds no trust base, no
 committed cursor, and acquiring them would move the authentication boundary into the execution
 client, which is the surface this fork exists to keep small. So this method returns the companion
 fields the node owns, and bft-core supplies the verifier-owned part before dissemination. This crate
-invents no witnesses, synthesises nothing from material it does not have, and does not widen
-`sealBuildInput`.
+invents no witnesses and synthesises nothing from material it does not have. It retains only what
+the build input handed over.
 
 `engine_newPayloadWithSealV1(executionPayloadV3, expectedBlobVersionedHashes, parentBeaconBlockRoot,
 sealCompanion)` is the import path. It runs its pre-checks (canonical decode, empty blob hash list,

@@ -285,6 +285,7 @@ pub struct ResolvedPayloadJob {
     payload_id: PayloadId,
     evm_config: UnicityEvmConfig,
     pair_binding: Option<PairBinding>,
+    witnesses: Vec<alloy_primitives::Bytes>,
 }
 
 impl ResolvedPayloadJob {
@@ -307,13 +308,27 @@ impl ResolvedPayloadJob {
                 &next_block_attributes(&parent, &attributes, builder_config),
             )
             .map_err(|error| PayloadJobResolutionError(error.message()))?;
-        Ok(Self { parent, attributes, payload_id, evm_config, pair_binding: None })
+        Ok(Self {
+            parent,
+            attributes,
+            payload_id,
+            evm_config,
+            pair_binding: None,
+            witnesses: Vec::new(),
+        })
     }
 
     /// Attaches the verified pair binding the job was admitted under, so the companion the build
     /// path returns carries it. A job without one cannot produce a companion.
     pub const fn with_pair_binding(mut self, binding: PairBinding) -> Self {
         self.pair_binding = Some(binding);
+        self
+    }
+
+    /// Attaches the authentication witnesses the build input handed over, so the companion the
+    /// build path stores and serves carries them. They are opaque and are only retained.
+    pub fn with_witnesses(mut self, witnesses: Vec<alloy_primitives::Bytes>) -> Self {
+        self.witnesses = witnesses;
         self
     }
 
@@ -342,6 +357,7 @@ impl ResolvedPayloadJob {
         self.parent == other.parent &&
             self.attributes == other.attributes &&
             self.pair_binding == other.pair_binding &&
+            self.witnesses == other.witnesses &&
             self.evm_config.root_input() == other.evm_config.root_input()
     }
 }

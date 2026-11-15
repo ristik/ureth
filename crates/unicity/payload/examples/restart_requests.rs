@@ -106,6 +106,7 @@ fn main() {
         b1_update: update,
         records: testing::empty_import(),
         pair_binding: binding.canonical_cbor().into(),
+        witnesses: vec![],
     };
     println!("{}", serde_json::json!({"attributes": attrs, "input": input}));
 }

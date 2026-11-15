@@ -463,7 +463,8 @@ where
     let job =
         ResolvedPayloadJob::new(Arc::new(parent), attributes.clone(), evm_config, builder_config)
             .map_err(SealBuildError::Job)?
-            .with_pair_binding(pair);
+            .with_pair_binding(pair)
+            .with_witnesses(seal_build_input.witnesses.clone());
     context.registry.insert(job).map_err(|_| SealBuildError::DuplicatePayloadId)?;
     Ok(attributes)
 }
@@ -515,9 +516,11 @@ pub fn companion_not_retained_error(payload_id: PayloadId) -> EngineApiError {
 /// re-encoding cannot differ from what the caller supplied. Retaining a second copy would only add
 /// a way for the two to disagree.
 ///
-/// The witness list is empty because the build input carries no witnesses. Witnesses are the
-/// authentication material a follower needs, bft-core holds the authenticated certificate, and it
-/// is the party that can populate them before dissemination. See the crate README.
+/// The witness list is empty here. Witnesses are the authentication material a follower needs;
+/// bft-core holds the authenticated certificate and populates them before dissemination. When the
+/// build input carried witnesses, [`UnicityEngineApiImpl::get_payload_with_seal`] attaches them to
+/// this companion before storing it, so the leader retains what its followers retain. See the
+/// crate README.
 pub fn build_seal_companion(
     root_input: &RootInputV2,
     b1_update: &[u8],
@@ -762,8 +765,18 @@ where
             .registry
             .pair_binding(&payload_id)
             .ok_or_else(|| companion_not_retained_error(payload_id))?;
-        let seal_companion = build_seal_companion(&root_input, &b1_update, &records, &pair_binding)
-            .map_err(|error| EngineApiError::Internal(Box::new(error)))?;
+        let witnesses = self
+            .context
+            .registry
+            .witnesses(&payload_id)
+            .ok_or_else(|| companion_not_retained_error(payload_id))?;
+        let mut seal_companion =
+            build_seal_companion(&root_input, &b1_update, &records, &pair_binding)
+                .map_err(|error| EngineApiError::Internal(Box::new(error)))?;
+        // The witnesses the build input handed over are retained with the companion, so the
+        // leader's own store serves the parent's certificate exactly as a follower's does
+        // (`unicity_getSealCompanionV1`, restart admission). They are opaque here.
+        seal_companion.witnesses = witnesses;
 
         // Capture the key before the payload is consumed by the conversion. The store key is the
         // same block hash the import path will compute for this block.

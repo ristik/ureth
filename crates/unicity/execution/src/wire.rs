@@ -50,8 +50,13 @@ pub const MAX_ROOT_INPUT_BYTES: usize = 32 * 1024;
 pub const MAX_SHARD_ID_BYTES: usize = 32;
 /// Maximum leader identifier length.
 pub const MAX_LEADER_BYTES: usize = 256;
+/// Maximum number of authentication witnesses a build input may hand over for retention. bft-core
+/// writes exactly two (the bound certificate and its technical record).
+pub const MAX_BUILD_WITNESSES: usize = 4;
+/// Maximum total size of the witnesses one build input hands over for retention.
+pub const MAX_BUILD_WITNESS_BYTES: usize = 64 * 1024;
 
-/// Build-path parameter `sealBuildInput = { rootInput, transitions }`.
+/// Build-path parameter `sealBuildInput = { rootInput, transitions, ..., witnesses? }`.
 ///
 /// This is the JSON envelope carried by `engine_forkchoiceUpdatedWithSealV1`. `root_input` is a
 /// CBOR blob, not a structured JSON object, so there is exactly one root-input codec. Call
@@ -73,11 +78,34 @@ pub struct SealBuildInput {
     /// Canonical [`crate::pairing::PairBinding`] the local Go verification produced for this build
     /// job. Required: a request without one is refused before anything is installed.
     pub pair_binding: Bytes,
+    /// Authentication witnesses the local Go side authenticated for this build (bft-core writes
+    /// `[bound certificate, bound technical record]`). They are opaque here, exactly as on the
+    /// import path, and are only retained: the companion the build path stores and serves carries
+    /// them, so the leader's own store holds the certificate of the parent block like every
+    /// follower's does. Optional and omitted when empty, so an envelope without the field is the
+    /// envelope this type accepted before it existed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub witnesses: Vec<Bytes>,
 }
 
 impl SealBuildInput {
     /// Decodes `root_input` and binds the parallel transition envelope to its committed `D[]`.
     pub fn decode_root_input(&self) -> Result<RootInputV2, CanonicalCborError> {
+        if self.witnesses.len() > MAX_BUILD_WITNESSES {
+            return Err(CanonicalCborError::TooLarge {
+                what: "build witness count",
+                len: self.witnesses.len(),
+                limit: MAX_BUILD_WITNESSES,
+            });
+        }
+        let witness_bytes = self.witnesses.iter().map(|witness| witness.len()).sum::<usize>();
+        if witness_bytes > MAX_BUILD_WITNESS_BYTES {
+            return Err(CanonicalCborError::TooLarge {
+                what: "build witness bytes",
+                len: witness_bytes,
+                limit: MAX_BUILD_WITNESS_BYTES,
+            });
+        }
         if self.transitions.len() > MAX_ROOT_TRANSITIONS {
             return Err(CanonicalCborError::TooLarge {
                 what: "envelope transition count",
@@ -981,6 +1009,7 @@ mod tests {
             b1_update: Bytes::from_static(SAMPLE_UPDATE),
             records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::from(vec![0x01]),
+            witnesses: vec![],
         };
         let json = serde_json::to_string(&value).unwrap();
         assert!(json.contains("\"rootInput\":\"0x"), "rootInput is a 0x-hex byte string: {json}");
@@ -996,6 +1025,7 @@ mod tests {
             b1_update: Bytes::from_static(SAMPLE_UPDATE),
             records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::new(),
+            witnesses: vec![],
         };
         assert_eq!(
             value.decode_root_input(),
@@ -1015,6 +1045,7 @@ mod tests {
             b1_update: Bytes::from_static(b"another update"),
             records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::new(),
+            witnesses: vec![],
         };
         assert_eq!(build.decode_root_input(), Err(mismatch.clone()));
         let companion = SealCompanion {
@@ -1061,6 +1092,7 @@ mod tests {
             b1_update: Bytes::from_static(SAMPLE_UPDATE),
             records: Bytes::from_static(b"another import"),
             pair_binding: Bytes::new(),
+            witnesses: vec![],
         };
         assert_eq!(build.decode_root_input(), Err(mismatch.clone()));
         let companion = SealCompanion {
@@ -1100,6 +1132,71 @@ mod tests {
         assert!(json.contains("\"rootInput\":\"0x"));
         assert_eq!(serde_json::from_str::<SealCompanion>(&json).unwrap(), value);
         assert_eq!(value.decode_root_input().unwrap(), sample());
+    }
+
+    #[test]
+    fn seal_build_input_witnesses_are_optional_and_omitted_when_empty() {
+        let root = root_input_hex();
+        let update = update_hex();
+        let records = records_hex();
+        let without = format!(
+            r#"{{"rootInput":"{root}","b1Update":"{update}","records":"{records}","transitions":[],"pairBinding":"0x00"}}"#
+        );
+        let parsed: SealBuildInput = serde_json::from_str(&without).unwrap();
+        assert!(parsed.witnesses.is_empty());
+        assert!(
+            !serde_json::to_string(&parsed).unwrap().contains("witnesses"),
+            "an input without witnesses encodes exactly as before the field existed"
+        );
+
+        let with = format!(
+            r#"{{"rootInput":"{root}","b1Update":"{update}","records":"{records}","transitions":[],"pairBinding":"0x00","witnesses":["0x0a0b","0x"]}}"#
+        );
+        let parsed: SealBuildInput = serde_json::from_str(&with).unwrap();
+        assert_eq!(parsed.witnesses, vec![Bytes::from(vec![0x0a, 0x0b]), Bytes::new()]);
+        assert_eq!(
+            serde_json::from_str::<SealBuildInput>(&serde_json::to_string(&parsed).unwrap())
+                .unwrap(),
+            parsed
+        );
+        assert_eq!(parsed.decode_root_input().unwrap(), sample());
+
+        let bad_hex = format!(
+            r#"{{"rootInput":"{root}","b1Update":"{update}","records":"{records}","transitions":[],"pairBinding":"0x00","witnesses":["0xzz"]}}"#
+        );
+        assert!(serde_json::from_str::<SealBuildInput>(&bad_hex).is_err());
+    }
+
+    #[test]
+    fn seal_build_input_witnesses_are_bounded_before_decoding() {
+        let input = |witnesses: Vec<Bytes>| SealBuildInput {
+            root_input: sample().canonical_cbor().unwrap().into(),
+            transitions: vec![],
+            b1_update: Bytes::from_static(SAMPLE_UPDATE),
+            records: Bytes::from_static(SAMPLE_RECORDS),
+            pair_binding: Bytes::new(),
+            witnesses,
+        };
+        assert!(input(vec![Bytes::new(); MAX_BUILD_WITNESSES]).decode_root_input().is_ok());
+        assert_eq!(
+            input(vec![Bytes::new(); MAX_BUILD_WITNESSES + 1]).decode_root_input(),
+            Err(CanonicalCborError::TooLarge {
+                what: "build witness count",
+                len: MAX_BUILD_WITNESSES + 1,
+                limit: MAX_BUILD_WITNESSES,
+            })
+        );
+        let half = MAX_BUILD_WITNESS_BYTES / 2;
+        assert!(input(vec![Bytes::from(vec![1; half]); 2]).decode_root_input().is_ok());
+        assert_eq!(
+            input(vec![Bytes::from(vec![1; half]), Bytes::from(vec![1; half + 1])])
+                .decode_root_input(),
+            Err(CanonicalCborError::TooLarge {
+                what: "build witness bytes",
+                len: MAX_BUILD_WITNESS_BYTES + 1,
+                limit: MAX_BUILD_WITNESS_BYTES,
+            })
+        );
     }
 
     #[test]
@@ -1174,6 +1271,7 @@ mod tests {
             b1_update: Bytes::new(),
             records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::new(),
+            witnesses: vec![],
         };
         assert_eq!(
             build.decode_root_input(),
@@ -1293,6 +1391,7 @@ mod tests {
             b1_update: Bytes::from_static(SAMPLE_UPDATE),
             records: Bytes::from_static(SAMPLE_RECORDS),
             pair_binding: Bytes::new(),
+            witnesses: vec![],
         };
         assert_eq!(
             build.decode_root_input(),
