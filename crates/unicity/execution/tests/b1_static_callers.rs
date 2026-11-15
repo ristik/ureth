@@ -10,7 +10,7 @@
 //! The pre-state is an injected simulation of authenticated state (the corpus says so too); the
 //! authenticated admission path that produces such state is covered by the registry tests.
 
-use alloy_evm::{precompiles::Precompile, Evm, EvmEnv, EvmFactory};
+use alloy_evm::{eth::EthEvmFactory, precompiles::Precompile, Evm, EvmEnv, EvmFactory};
 use alloy_primitives::{address, Address, Bytes, TxKind, U256};
 use reth_unicity_b1::{Operation, Pins, REGISTRY};
 use reth_unicity_execution::evm_factory::{b1_precompiles, UnicityEvmFactory};
@@ -18,6 +18,7 @@ use revm::{
     context::{BlockEnv, CfgEnv, TxEnv},
     context_interface::result::ExecutionResult,
     database::{CacheDB, EmptyDB},
+    inspector::NoOpInspector,
     primitives::hardfork::SpecId,
     state::{AccountInfo, Bytecode},
 };
@@ -209,16 +210,53 @@ fn every_manifest_request_is_decided_and_priced_identically_through_a_real_stati
 
 #[test]
 fn an_unregistered_address_answers_with_empty_success_that_a_checking_caller_rejects() {
-    // 0x0103 (S1) stays inactive: the STATICCALL succeeds with no returndata, which fails the
-    // callers' length, version and boolean checks.
-    let outcome = call(
-        database(None, caller_code(address!("0000000000000000000000000000000000000103"), None)),
-        pins(None),
-        b"x",
-        1_000_000,
+    // 0x0103 (S1) stays inactive and 0x0105 (the removed protocol 6/7 composition,
+    // bft-core#1106) is no longer registered: an unfunded STATICCALL to either succeeds with no
+    // returndata, which fails the callers' length, version and boolean checks.
+    for target in [
+        address!("0000000000000000000000000000000000000103"),
+        address!("0000000000000000000000000000000000000105"),
+    ] {
+        let outcome = call(database(None, caller_code(target, None)), pins(None), b"x", 1_000_000);
+        assert!(outcome.success, "{target}");
+        assert!(outcome.returndata.is_empty(), "{target}");
+    }
+}
+
+#[test]
+fn both_factory_routes_register_exactly_the_cancun_set_plus_0x0100_0x0102_0x0104() {
+    // The ordinary and the inspector route (every block, eth_call and tracing EVM) install the same
+    // set: the pinned Cancun precompiles and the three Unicity ones; 0x0101, 0x0103 and 0x0105 are
+    // absent.
+    let env = || EvmEnv::new(CfgEnv::new_with_spec(SpecId::CANCUN), BlockEnv::default());
+    let sorted = |it: &mut dyn Iterator<Item = &Address>| {
+        let mut v: Vec<Address> = it.copied().collect();
+        v.sort();
+        v
+    };
+    let mut expected = sorted(
+        &mut EthEvmFactory::default()
+            .create_evm(CacheDB::<EmptyDB>::default(), env())
+            .precompiles()
+            .addresses(),
     );
-    assert!(outcome.success);
-    assert!(outcome.returndata.is_empty());
+    expected.extend([
+        address!("0000000000000000000000000000000000000100"),
+        address!("0000000000000000000000000000000000000102"),
+        address!("0000000000000000000000000000000000000104"),
+    ]);
+    expected.sort();
+    let factory = UnicityEvmFactory::new(pins(None));
+    let ordinary = factory.create_evm(CacheDB::<EmptyDB>::default(), env());
+    let inspected =
+        factory.create_evm_with_inspector(CacheDB::<EmptyDB>::default(), env(), NoOpInspector);
+    assert_eq!(sorted(&mut ordinary.precompiles().addresses()), expected);
+    assert_eq!(sorted(&mut inspected.precompiles().addresses()), expected);
+    for absent in ["0101", "0103", "0105"] {
+        let a: Address = format!("0x000000000000000000000000000000000000{absent}").parse().unwrap();
+        assert!(ordinary.precompiles().get(&a).is_none(), "{a} is registered (ordinary)");
+        assert!(inspected.precompiles().get(&a).is_none(), "{a} is registered (inspector)");
+    }
 }
 
 #[test]
