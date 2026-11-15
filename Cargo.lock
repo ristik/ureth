@@ -10796,7 +10796,6 @@ dependencies = [
  "alloy-evm",
  "alloy-primitives",
  "k256",
- "reth-unicity-b1",
  "revm",
  "serde_json",
  "sha2 0.10.9",
