@@ -5,11 +5,9 @@
 //! Composition must authenticate the anchor and its `InputRecord` opening with B1,
 //! compare each reference time to that timestamp and prove every raw leaf value.
 mod abi;
-/// Borrowed CBOR views, shared with the composition (`reth-unicity-bridge`); not a stable API.
+/// Borrowed CBOR views; not a stable API.
 #[doc(hidden)]
 pub mod cbor;
-#[doc(hidden)]
-pub mod lineage;
 pub mod provider;
 mod semantics;
 
@@ -233,32 +231,6 @@ pub fn run(input: &[u8], gas: u64) -> Result<Output> {
         }),
         Err(e) => Err(e),
     }
-}
-/// The relation of one composed redemption (`reth-unicity-bridge`), without ABI or gas: the
-/// evaluation of [`run`] with the composition's bounds (bft-core `ComposedHistory`). The history
-/// has no transfer or item aggregate: the envelope bounds it and its items and leaves are paid
-/// before the call. The Cfg and every embedded object keep a fresh 32,768-item budget each.
-/// `charge` receives the leaf count once it is known, before any point parse, key derivation,
-/// hash or recovery, and may refuse it.
-#[doc(hidden)]
-pub fn relation(
-    op: u8,
-    cfg: &[u8],
-    payload: &[u8],
-    charge: impl FnOnce(u64) -> Result<()>,
-) -> Result<Outcome> {
-    let mut objects = cbor::Items::per_object(cbor::Items::MAX);
-    let cfg = cbor::one(cfg, &mut objects)?;
-    semantics::check_cfg_network(cfg)?;
-    let payload = cbor::one(payload, &mut cbor::Items::per_object(usize::MAX))?;
-    let m = if op == 0 {
-        0
-    } else {
-        let h = payload.array::<2>()?;
-        1 + h[1].count(u64::MAX)?
-    };
-    charge(m)?;
-    semantics::evaluate(op, cfg, payload, u64::MAX, &mut objects)
 }
 fn hash(data: &[u8]) -> [u8; 32] {
     Sha256::digest(data).into()

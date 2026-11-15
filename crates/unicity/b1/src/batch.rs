@@ -31,11 +31,9 @@ pub const MAX_SIGNATURES: u64 = 256;
 pub const MAX_SEAL_SIGNATURES: u64 = 16;
 /// Largest cumulative sibling plus step count over all raw occurrences.
 pub const MAX_RAW_PATHS: u64 = 4_608;
-/// The aggregate bounds of one scan. A standalone call uses [`Limits::STANDARD`]; the composition
-/// (`reth-unicity-bridge`) groups and evaluates its anchor table under [`Limits::COMPOSED`]: the
-/// claim count is bounded by the u16 wire count, the request by the envelope, and the CBOR item
-/// budget applies to each UC on its own; its gas pays for all of it (bft-core `b1ref.Composed`).
-/// The per-object bounds (UC bytes, shard, signatures per seal) are the same in both.
+/// The aggregate bounds of one scan. A standalone call uses [`Limits::STANDARD`], the only bounds
+/// since the composed bridge relation and its `COMPOSED` bounds were removed (bft-core#1106). The
+/// per-object bounds (UC bytes, shard, signatures per seal) are not part of it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Limits {
     /// Largest request, in bytes.
@@ -57,14 +55,6 @@ impl Limits {
         signatures: MAX_SIGNATURES,
         raw_paths: MAX_RAW_PATHS,
         per_uc_items: false,
-    };
-    /// The composition's anchor table.
-    pub const COMPOSED: Self = Self {
-        bytes: usize::MAX,
-        claims: u16::MAX as usize,
-        signatures: u64::MAX,
-        raw_paths: u64::MAX,
-        per_uc_items: true,
     };
 }
 /// Price of one registry word, subsidised and provisional until `any_age_cold_registry_v1` passes.

@@ -99,8 +99,7 @@ fn scan(
 pub fn one<'a>(data: &'a [u8], tokens: &mut usize) -> Result<Item<'a>, Malformed> {
     one_capped(data, tokens, MAX_ITEMS)
 }
-/// [`one`] under an explicit item ceiling for the budget `tokens` (the composition's history root
-/// has none: its items are paid).
+/// [`one`] under an explicit item ceiling for the budget `tokens`.
 pub fn one_capped<'a>(
     data: &'a [u8],
     tokens: &mut usize,
