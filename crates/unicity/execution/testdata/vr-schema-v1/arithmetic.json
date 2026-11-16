@@ -1,0 +1,988 @@
+{
+ "schema": "unicity.vr.schema/v1",
+ "version": 1,
+ "file": "arithmetic.json",
+ "specification": "docs/design/validator-registry/schema-v1.md",
+ "notes": [
+  "checked arithmetic: levels, timeouts, deadlines, F_r, fee bounds"
+ ],
+ "vectors": [
+  {
+   "name": "deadline open=0 l=9 v=0",
+   "op": "arith.deadline",
+   "input": {
+    "level": 9,
+    "n": 1,
+    "open": "0",
+    "view": "0"
+   },
+   "expect": {
+    "at": "5120",
+    "never": false
+   }
+  },
+  {
+   "name": "deadline open=1000 l=1 v=0",
+   "op": "arith.deadline",
+   "input": {
+    "level": 1,
+    "n": 4,
+    "open": "1000",
+    "view": "0"
+   },
+   "expect": {
+    "at": "1020",
+    "never": false
+   }
+  },
+  {
+   "name": "deadline open=18446744073709551595 l=1 v=0",
+   "op": "arith.deadline",
+   "input": {
+    "level": 1,
+    "n": 4,
+    "open": "18446744073709551595",
+    "view": "0"
+   },
+   "expect": {
+    "at": "18446744073709551615",
+    "never": false
+   }
+  },
+  {
+   "name": "deadline open=18446744073709551610 l=1 v=0",
+   "op": "arith.deadline",
+   "input": {
+    "level": 1,
+    "n": 4,
+    "open": "18446744073709551610",
+    "view": "0"
+   },
+   "expect": {
+    "at": "0",
+    "never": true
+   }
+  },
+  {
+   "name": "deadline open=18446744073709551610 l=36 v=9223372036854775808",
+   "op": "arith.deadline",
+   "input": {
+    "level": 36,
+    "n": 1,
+    "open": "18446744073709551610",
+    "view": "9223372036854775808"
+   },
+   "expect": {
+    "at": "0",
+    "never": true
+   }
+  },
+  {
+   "name": "deadlines from LIFETIME",
+   "op": "arith.deadlines",
+   "input": {
+    "lifetime": 16384,
+    "maxElectionInterval": 1000
+   },
+   "expect": {
+    "expiresAt(reserved=500)": 16884,
+    "forceDeadline": 33768,
+    "parkPeriod": 32768,
+    "stallDeadline": 33768
+   }
+  },
+  {
+   "name": "decLevel(0,0,4)",
+   "op": "arith.decLevel",
+   "input": {
+    "level": 0,
+    "n": 4,
+    "view": "0"
+   },
+   "expect": {
+    "level": 0
+   }
+  },
+  {
+   "name": "decLevel(0,100,1)",
+   "op": "arith.decLevel",
+   "input": {
+    "level": 0,
+    "n": 1,
+    "view": "100"
+   },
+   "expect": {
+    "level": 8
+   }
+  },
+  {
+   "name": "decLevel(1,0,4)",
+   "op": "arith.decLevel",
+   "input": {
+    "level": 1,
+    "n": 4,
+    "view": "0"
+   },
+   "expect": {
+    "level": 0
+   }
+  },
+  {
+   "name": "decLevel(2,8,4)",
+   "op": "arith.decLevel",
+   "input": {
+    "level": 2,
+    "n": 4,
+    "view": "8"
+   },
+   "expect": {
+    "level": 3
+   }
+  },
+  {
+   "name": "decLevel(4,0,4)",
+   "op": "arith.decLevel",
+   "input": {
+    "level": 4,
+    "n": 4,
+    "view": "0"
+   },
+   "expect": {
+    "level": 3
+   }
+  },
+  {
+   "name": "decLevel(5,0,4)",
+   "op": "arith.decLevel",
+   "input": {
+    "level": 5,
+    "n": 4,
+    "view": "0"
+   },
+   "expect": {
+    "level": 4
+   }
+  },
+  {
+   "name": "decLevel(9,0,4)",
+   "op": "arith.decLevel",
+   "input": {
+    "level": 9,
+    "n": 4,
+    "view": "0"
+   },
+   "expect": {
+    "level": 8
+   }
+  },
+  {
+   "name": "decLevel(9,18446744073709551615,1)",
+   "op": "arith.decLevel",
+   "input": {
+    "level": 9,
+    "n": 1,
+    "view": "18446744073709551615"
+   },
+   "expect": {
+    "level": 8
+   }
+  },
+  {
+   "name": "incLevel(0,0,4)",
+   "op": "arith.incLevel",
+   "input": {
+    "level": 0,
+    "n": 4,
+    "views": "0"
+   },
+   "expect": {
+    "level": 1
+   }
+  },
+  {
+   "name": "incLevel(0,31,4)",
+   "op": "arith.incLevel",
+   "input": {
+    "level": 0,
+    "n": 4,
+    "views": "31"
+   },
+   "expect": {
+    "level": 8
+   }
+  },
+  {
+   "name": "incLevel(0,35,4)",
+   "op": "arith.incLevel",
+   "input": {
+    "level": 0,
+    "n": 4,
+    "views": "35"
+   },
+   "expect": {
+    "level": 9
+   }
+  },
+  {
+   "name": "incLevel(1,18446744073709551615,1)",
+   "op": "arith.incLevel",
+   "input": {
+    "level": 1,
+    "n": 1,
+    "views": "18446744073709551615"
+   },
+   "expect": {
+    "level": 9
+   }
+  },
+  {
+   "name": "incLevel(2,5,4)",
+   "op": "arith.incLevel",
+   "input": {
+    "level": 2,
+    "n": 4,
+    "views": "5"
+   },
+   "expect": {
+    "level": 4
+   }
+  },
+  {
+   "name": "incLevel(3,15,16)",
+   "op": "arith.incLevel",
+   "input": {
+    "level": 3,
+    "n": 16,
+    "views": "15"
+   },
+   "expect": {
+    "level": 4
+   }
+  },
+  {
+   "name": "incLevel(4,0,4)",
+   "op": "arith.incLevel",
+   "input": {
+    "level": 4,
+    "n": 4,
+    "views": "0"
+   },
+   "expect": {
+    "level": 5
+   }
+  },
+  {
+   "name": "incLevel(8,0,1)",
+   "op": "arith.incLevel",
+   "input": {
+    "level": 8,
+    "n": 1,
+    "views": "0"
+   },
+   "expect": {
+    "level": 9
+   }
+  },
+  {
+   "name": "incLevel(9,0,1)",
+   "op": "arith.incLevel",
+   "input": {
+    "level": 9,
+    "n": 1,
+    "views": "0"
+   },
+   "expect": {
+    "level": 9
+   }
+  },
+  {
+   "name": "LeaderLag(16)",
+   "op": "arith.leaderLag",
+   "input": {
+    "n": 16
+   },
+   "expect": {
+    "gapCovers": true,
+    "minEpochGap": 100,
+    "rounds": 68
+   }
+  },
+  {
+   "name": "quorum n=16",
+   "op": "arith.quorum",
+   "input": {
+    "n": 16
+   },
+   "expect": {
+    "quorum": 11
+   }
+  },
+  {
+   "name": "quorum n=4",
+   "op": "arith.quorum",
+   "input": {
+    "n": 4
+   },
+   "expect": {
+    "quorum": 3
+   }
+  },
+  {
+   "name": "quorum n=5",
+   "op": "arith.quorum",
+   "input": {
+    "n": 5
+   },
+   "expect": {
+    "quorum": 4
+   }
+  },
+  {
+   "name": "quorum n=7",
+   "op": "arith.quorum",
+   "input": {
+    "n": 7
+   },
+   "expect": {
+    "quorum": 5
+   }
+  },
+  {
+   "name": "F_r(b=0)",
+   "op": "arith.recoveryAllowance",
+   "input": {
+    "b": 0
+   },
+   "expect": {
+    "rounds": 260
+   }
+  },
+  {
+   "name": "F_r(b=1)",
+   "op": "arith.recoveryAllowance",
+   "input": {
+    "b": 1
+   },
+   "expect": {
+    "rounds": 516
+   }
+  },
+  {
+   "name": "F_r(b=2)",
+   "op": "arith.recoveryAllowance",
+   "input": {
+    "b": 2
+   },
+   "expect": {
+    "rounds": 772
+   }
+  },
+  {
+   "name": "F_r(b=3)",
+   "op": "arith.recoveryAllowance",
+   "input": {
+    "b": 3
+   },
+   "expect": {
+    "rounds": 1028
+   }
+  },
+  {
+   "name": "F_r(b=4)",
+   "op": "arith.recoveryAllowance",
+   "input": {
+    "b": 4
+   },
+   "expect": {
+    "rounds": 1284
+   }
+  },
+  {
+   "name": "F_r(b=5)",
+   "op": "arith.recoveryAllowance",
+   "input": {
+    "b": 5
+   },
+   "expect": {
+    "rounds": 1540
+   }
+  },
+  {
+   "name": "residence wait T=20",
+   "op": "arith.residence",
+   "input": {
+    "tSeconds": 20
+   },
+   "expect": {
+    "waitMillis": 20002
+   }
+  },
+  {
+   "name": "residence wait T=5120",
+   "op": "arith.residence",
+   "input": {
+    "tSeconds": 5120
+   },
+   "expect": {
+    "waitMillis": 5120512
+   }
+  },
+  {
+   "name": "residence wait T=80",
+   "op": "arith.residence",
+   "input": {
+    "tSeconds": 80
+   },
+   "expect": {
+    "waitMillis": 80008
+   }
+  },
+  {
+   "name": "T_req(D=0 ms)",
+   "op": "arith.tReq",
+   "input": {
+    "dMillis": 0
+   },
+   "expect": {
+    "seconds": 1
+   }
+  },
+  {
+   "name": "T_req(D=10 ms)",
+   "op": "arith.tReq",
+   "input": {
+    "dMillis": 10
+   },
+   "expect": {
+    "seconds": 2
+   }
+  },
+  {
+   "name": "T_req(D=100000 ms)",
+   "op": "arith.tReq",
+   "input": {
+    "dMillis": 100000
+   },
+   "expect": {
+    "seconds": 102
+   }
+  },
+  {
+   "name": "T_req(D=20000 ms)",
+   "op": "arith.tReq",
+   "input": {
+    "dMillis": 20000
+   },
+   "expect": {
+    "seconds": 22
+   }
+  },
+  {
+   "name": "T_req(D=80000 ms)",
+   "op": "arith.tReq",
+   "input": {
+    "dMillis": 80000
+   },
+   "expect": {
+    "seconds": 82
+   }
+  },
+  {
+   "name": "T(0,0,4)",
+   "op": "arith.viewTimeout",
+   "input": {
+    "level": 0,
+    "n": 4,
+    "view": "0"
+   },
+   "expect": {
+    "never": false,
+    "seconds": "10"
+   }
+  },
+  {
+   "name": "T(0,36,1)",
+   "op": "arith.viewTimeout",
+   "input": {
+    "level": 0,
+    "n": 1,
+    "view": "36"
+   },
+   "expect": {
+    "never": false,
+    "seconds": "687194767360"
+   }
+  },
+  {
+   "name": "T(0,37,1)",
+   "op": "arith.viewTimeout",
+   "input": {
+    "level": 0,
+    "n": 1,
+    "view": "37"
+   },
+   "expect": {
+    "never": true,
+    "seconds": "0"
+   }
+  },
+  {
+   "name": "T(1,0,4)",
+   "op": "arith.viewTimeout",
+   "input": {
+    "level": 1,
+    "n": 4,
+    "view": "0"
+   },
+   "expect": {
+    "never": false,
+    "seconds": "20"
+   }
+  },
+  {
+   "name": "T(1,18446744073709551615,1)",
+   "op": "arith.viewTimeout",
+   "input": {
+    "level": 1,
+    "n": 1,
+    "view": "18446744073709551615"
+   },
+   "expect": {
+    "never": true,
+    "seconds": "0"
+   }
+  },
+  {
+   "name": "T(2,32,16)",
+   "op": "arith.viewTimeout",
+   "input": {
+    "level": 2,
+    "n": 16,
+    "view": "32"
+   },
+   "expect": {
+    "never": false,
+    "seconds": "160"
+   }
+  },
+  {
+   "name": "T(36,9223372036854775808,1)",
+   "op": "arith.viewTimeout",
+   "input": {
+    "level": 36,
+    "n": 1,
+    "view": "9223372036854775808"
+   },
+   "expect": {
+    "never": true,
+    "seconds": "0"
+   }
+  },
+  {
+   "name": "T(5,31,1)",
+   "op": "arith.viewTimeout",
+   "input": {
+    "level": 5,
+    "n": 1,
+    "view": "31"
+   },
+   "expect": {
+    "never": false,
+    "seconds": "687194767360"
+   }
+  },
+  {
+   "name": "T(6,31,1)",
+   "op": "arith.viewTimeout",
+   "input": {
+    "level": 6,
+    "n": 1,
+    "view": "31"
+   },
+   "expect": {
+    "never": true,
+    "seconds": "0"
+   }
+  },
+  {
+   "name": "T(9,0,4)",
+   "op": "arith.viewTimeout",
+   "input": {
+    "level": 9,
+    "n": 4,
+    "view": "0"
+   },
+   "expect": {
+    "never": false,
+    "seconds": "5120"
+   }
+  },
+  {
+   "name": "T(9,3,4)",
+   "op": "arith.viewTimeout",
+   "input": {
+    "level": 9,
+    "n": 4,
+    "view": "3"
+   },
+   "expect": {
+    "never": false,
+    "seconds": "5120"
+   }
+  },
+  {
+   "name": "at target",
+   "op": "fee.nextBaseFee",
+   "input": {
+    "baseFeeFloor": "1000000",
+    "changeDenominator": 8,
+    "ordinaryCapacity": 28000000,
+    "ordinaryUsed": 14000000,
+    "parentBaseFee": "10000000"
+   },
+   "expect": {
+    "error": "",
+    "nextBaseFee": "10000000"
+   }
+  },
+  {
+   "name": "clamped at MAX_BASE_FEE",
+   "op": "fee.nextBaseFee",
+   "input": {
+    "baseFeeFloor": "1",
+    "changeDenominator": 8,
+    "ordinaryCapacity": 28000000,
+    "ordinaryUsed": 28000000,
+    "parentBaseFee": "4611686018427387904"
+   },
+   "expect": {
+    "error": "",
+    "nextBaseFee": "4611686018427387904"
+   }
+  },
+  {
+   "name": "denominator 1",
+   "op": "fee.nextBaseFee",
+   "input": {
+    "baseFeeFloor": "1",
+    "changeDenominator": 1,
+    "ordinaryCapacity": 28000000,
+    "ordinaryUsed": 28000000,
+    "parentBaseFee": "1000000"
+   },
+   "expect": {
+    "error": "",
+    "nextBaseFee": "2000000"
+   }
+  },
+  {
+   "name": "full",
+   "op": "fee.nextBaseFee",
+   "input": {
+    "baseFeeFloor": "1000000",
+    "changeDenominator": 8,
+    "ordinaryCapacity": 28000000,
+    "ordinaryUsed": 28000000,
+    "parentBaseFee": "10000000"
+   },
+   "expect": {
+    "error": "",
+    "nextBaseFee": "11250000"
+   }
+  },
+  {
+   "name": "idle stops at the floor",
+   "op": "fee.nextBaseFee",
+   "input": {
+    "baseFeeFloor": "1000000",
+    "changeDenominator": 8,
+    "ordinaryCapacity": 28000000,
+    "ordinaryUsed": 0,
+    "parentBaseFee": "1000001"
+   },
+   "expect": {
+    "error": "",
+    "nextBaseFee": "1000000"
+   }
+  },
+  {
+   "name": "minimum increase 1",
+   "op": "fee.nextBaseFee",
+   "input": {
+    "baseFeeFloor": "1",
+    "changeDenominator": 8,
+    "ordinaryCapacity": 28000000,
+    "ordinaryUsed": 14000001,
+    "parentBaseFee": "7"
+   },
+   "expect": {
+    "error": "",
+    "nextBaseFee": "8"
+   }
+  },
+  {
+   "name": "upward floor jump",
+   "op": "fee.nextBaseFee",
+   "input": {
+    "baseFeeFloor": "5000000",
+    "changeDenominator": 8,
+    "ordinaryCapacity": 28000000,
+    "ordinaryUsed": 14000000,
+    "parentBaseFee": "1000000"
+   },
+   "expect": {
+    "error": "",
+    "nextBaseFee": "5000000"
+   }
+  },
+  {
+   "name": "wide product",
+   "op": "fee.nextBaseFee",
+   "input": {
+    "baseFeeFloor": "1",
+    "changeDenominator": 8,
+    "ordinaryCapacity": 28000000,
+    "ordinaryUsed": 28000000,
+    "parentBaseFee": "10000000000000"
+   },
+   "expect": {
+    "error": "",
+    "nextBaseFee": "11250000000000"
+   }
+  },
+  {
+   "name": "FeeParams boundary in B_ack = 100",
+   "op": "fee.transition",
+   "input": {
+    "bAck": 100,
+    "new": {
+     "baseFeeFloor": "5000000",
+     "changeDenominator": 4,
+     "feeCollector": "0xc000000000000000000000000000000000000003"
+    },
+    "ordinaryCapacity": 28000000,
+    "ordinaryUsed": 14000000,
+    "previous": {
+     "baseFeeFloor": "1000000",
+     "changeDenominator": 8,
+     "feeCollector": "0xb000000000000000000000000000000000000002"
+    }
+   },
+   "expect": {
+    "blocks": [
+     {
+      "beneficiary": "0xb000000000000000000000000000000000000002",
+      "block": 99,
+      "childBaseFee": "1200000",
+      "error": "",
+      "fN": {
+       "baseFeeFloor": "1000000",
+       "changeDenominator": 8,
+       "feeCollector": "0xb000000000000000000000000000000000000002"
+      },
+      "fNminus1": {
+       "baseFeeFloor": "1000000",
+       "changeDenominator": 8,
+       "feeCollector": "0xb000000000000000000000000000000000000002"
+      },
+      "parentBaseFee": "1200000",
+      "parentReconciles": true
+     },
+     {
+      "beneficiary": "0xb000000000000000000000000000000000000002",
+      "block": 100,
+      "childBaseFee": "1200000",
+      "error": "",
+      "fN": {
+       "baseFeeFloor": "1000000",
+       "changeDenominator": 8,
+       "feeCollector": "0xb000000000000000000000000000000000000002"
+      },
+      "fNminus1": {
+       "baseFeeFloor": "1000000",
+       "changeDenominator": 8,
+       "feeCollector": "0xb000000000000000000000000000000000000002"
+      },
+      "parentBaseFee": "1200000",
+      "parentReconciles": true
+     },
+     {
+      "beneficiary": "0xc000000000000000000000000000000000000003",
+      "block": 101,
+      "childBaseFee": "5000000",
+      "error": "",
+      "fN": {
+       "baseFeeFloor": "5000000",
+       "changeDenominator": 4,
+       "feeCollector": "0xc000000000000000000000000000000000000003"
+      },
+      "fNminus1": {
+       "baseFeeFloor": "1000000",
+       "changeDenominator": 8,
+       "feeCollector": "0xb000000000000000000000000000000000000002"
+      },
+      "parentBaseFee": "1200000",
+      "parentReconciles": true
+     },
+     {
+      "beneficiary": "0xc000000000000000000000000000000000000003",
+      "block": 102,
+      "childBaseFee": "5000000",
+      "error": "",
+      "fN": {
+       "baseFeeFloor": "5000000",
+       "changeDenominator": 4,
+       "feeCollector": "0xc000000000000000000000000000000000000003"
+      },
+      "fNminus1": {
+       "baseFeeFloor": "5000000",
+       "changeDenominator": 4,
+       "feeCollector": "0xc000000000000000000000000000000000000003"
+      },
+      "parentBaseFee": "5000000",
+      "parentReconciles": true
+     },
+     {
+      "beneficiary": "0xc000000000000000000000000000000000000003",
+      "block": 103,
+      "childBaseFee": "5000000",
+      "error": "",
+      "fN": {
+       "baseFeeFloor": "5000000",
+       "changeDenominator": 4,
+       "feeCollector": "0xc000000000000000000000000000000000000003"
+      },
+      "fNminus1": {
+       "baseFeeFloor": "5000000",
+       "changeDenominator": 4,
+       "feeCollector": "0xc000000000000000000000000000000000000003"
+      },
+      "parentBaseFee": "5000000",
+      "parentReconciles": true
+     }
+    ],
+    "effectiveBlock": 101
+   }
+  },
+  {
+   "name": "denominator 0",
+   "op": "fee.validate",
+   "input": {
+    "baseFeeFloor": "1",
+    "changeDenominator": 0,
+    "feeCollector": "0xb000000000000000000000000000000000000002",
+    "maxGas": 30000000,
+    "systemGas": 2000000
+   },
+   "expect": {
+    "error": "ZeroParameter",
+    "ok": false
+   }
+  },
+  {
+   "name": "floor 0",
+   "op": "fee.validate",
+   "input": {
+    "baseFeeFloor": "0",
+    "changeDenominator": 8,
+    "feeCollector": "0xb000000000000000000000000000000000000002",
+    "maxGas": 30000000,
+    "systemGas": 2000000
+   },
+   "expect": {
+    "error": "ZeroParameter",
+    "ok": false
+   }
+  },
+  {
+   "name": "floor 1",
+   "op": "fee.validate",
+   "input": {
+    "baseFeeFloor": "1",
+    "changeDenominator": 1,
+    "feeCollector": "0xb000000000000000000000000000000000000002",
+    "maxGas": 30000000,
+    "systemGas": 2000000
+   },
+   "expect": {
+    "error": "",
+    "ok": true
+   }
+  },
+  {
+   "name": "floor 1<<62",
+   "op": "fee.validate",
+   "input": {
+    "baseFeeFloor": "4611686018427387904",
+    "changeDenominator": 8,
+    "feeCollector": "0xb000000000000000000000000000000000000002",
+    "maxGas": 30000000,
+    "systemGas": 2000000
+   },
+   "expect": {
+    "error": "",
+    "ok": true
+   }
+  },
+  {
+   "name": "floor 1<<62 + 1",
+   "op": "fee.validate",
+   "input": {
+    "baseFeeFloor": "4611686018427387905",
+    "changeDenominator": 8,
+    "feeCollector": "0xb000000000000000000000000000000000000002",
+    "maxGas": 30000000,
+    "systemGas": 2000000
+   },
+   "expect": {
+    "error": "InvalidParentBaseFee",
+    "ok": false
+   }
+  },
+  {
+   "name": "odd ordinary capacity",
+   "op": "fee.validate",
+   "input": {
+    "baseFeeFloor": "1",
+    "changeDenominator": 8,
+    "feeCollector": "0xb000000000000000000000000000000000000002",
+    "maxGas": 30000001,
+    "systemGas": 2000000
+   },
+   "expect": {
+    "error": "UnsupportedProfile",
+    "ok": false
+   }
+  },
+  {
+   "name": "system gas = max gas",
+   "op": "fee.validate",
+   "input": {
+    "baseFeeFloor": "1",
+    "changeDenominator": 8,
+    "feeCollector": "0xb000000000000000000000000000000000000002",
+    "maxGas": 30000000,
+    "systemGas": 30000000
+   },
+   "expect": {
+    "error": "NoOrdinaryCapacity",
+    "ok": false
+   }
+  },
+  {
+   "name": "zero collector",
+   "op": "fee.validate",
+   "input": {
+    "baseFeeFloor": "1",
+    "changeDenominator": 8,
+    "feeCollector": "0x0000000000000000000000000000000000000000",
+    "maxGas": 30000000,
+    "systemGas": 2000000
+   },
+   "expect": {
+    "error": "ZeroFeeCollector",
+    "ok": false
+   }
+  }
+ ]
+}

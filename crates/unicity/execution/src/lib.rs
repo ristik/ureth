@@ -37,6 +37,8 @@ pub mod records;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 pub mod update;
+#[cfg(test)]
+mod vr_schema_tests;
 pub mod wire;
 
 use records::{admit_import, ImportError};
