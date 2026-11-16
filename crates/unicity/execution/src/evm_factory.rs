@@ -5,11 +5,11 @@
 //! [`EvmFactory`]. Giving that factory the B1 precompiles is therefore what makes every route see
 //! the same native certificate and membership kernels, with the same journal-aware registry reads:
 //! there is no second construction path to forget. The stateless B2 relation is installed the same
-//! way at `0x0104`, and the composed bridge relation (`BRIDGE_COMPOSE_V2`, protocol 6: lineage
-//! through repeated splits) at `0x0105`. `0x0103` (S1) stays unregistered until its authority
-//! source is accepted.
+//! way at `0x0104`. `0x0103` (S1) stays unregistered until its authority source is accepted, and
+//! `0x0105` is unregistered: the composed bridge relation (`BRIDGE_COMPOSE_V2`, protocol 6/7) was
+//! removed with that bridge (bft-core#1106); native bridge v2 is Solidity only.
 //!
-//! The UC, shared-seal and composition providers are stateful (their verdict depends on the
+//! The UC and shared-seal providers are stateful (their verdict depends on the
 //! registry words in the selected block's journal), so they are never result-cached; only the
 //! stateless RSMT membership check and the stateless B2 relation may be.
 
@@ -27,7 +27,6 @@ use reth_unicity_b1::{
     Operation, Pins,
 };
 use reth_unicity_b2::provider::B2Precompile;
-use reth_unicity_bridge::provider::ComposePrecompile;
 use revm::{inspector::NoOpInspector, Inspector};
 use std::sync::Arc;
 
@@ -46,15 +45,7 @@ pub fn b2_precompile() -> (Address, DynPrecompile) {
     (reth_unicity_b2::ADDRESS, B2Precompile::default().into_dyn())
 }
 
-/// The composed bridge relation (`BRIDGE_COMPOSE_V2`, protocol 6), keyed by its reserved address;
-/// its batch evaluation compares the registry with the deployment `pins`, as `CERT_BATCH_V2` does.
-/// A protocol 5 deployment is replaced, not upgraded, so the V1 provider
-/// ([`ComposePrecompile::new`]) is not registered here.
-pub fn bridge_precompile(pins: Pins) -> (Address, DynPrecompile) {
-    (reth_unicity_bridge::ADDRESS, ComposePrecompile::new_v2(pins).into_dyn())
-}
-
-/// [`EthEvmFactory`] with the B1, B2 and bridge precompiles installed in every EVM it creates.
+/// [`EthEvmFactory`] with the B1 and B2 precompiles installed in every EVM it creates.
 #[derive(Clone, Copy, Debug)]
 pub struct UnicityEvmFactory {
     inner: EthEvmFactory,
@@ -87,7 +78,7 @@ impl EvmFactory for UnicityEvmFactory {
     ) -> Self::Evm<DB, NoOpInspector> {
         let mut evm = self.inner.create_evm(db, input);
         evm.precompiles_mut().extend_precompiles(b1_precompiles(self.pins));
-        evm.precompiles_mut().extend_precompiles([b2_precompile(), bridge_precompile(self.pins)]);
+        evm.precompiles_mut().extend_precompiles([b2_precompile()]);
         evm
     }
 
@@ -99,7 +90,7 @@ impl EvmFactory for UnicityEvmFactory {
     ) -> Self::Evm<DB, I> {
         let mut evm = self.inner.create_evm_with_inspector(db, input, inspector);
         evm.precompiles_mut().extend_precompiles(b1_precompiles(self.pins));
-        evm.precompiles_mut().extend_precompiles([b2_precompile(), bridge_precompile(self.pins)]);
+        evm.precompiles_mut().extend_precompiles([b2_precompile()]);
         evm
     }
 }

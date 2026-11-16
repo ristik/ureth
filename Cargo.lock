@@ -10796,20 +10796,6 @@ dependencies = [
  "alloy-evm",
  "alloy-primitives",
  "k256",
- "reth-unicity-b1",
- "revm",
- "serde_json",
- "sha2 0.10.9",
-]
-
-[[package]]
-name = "reth-unicity-bridge"
-version = "2.5.0"
-dependencies = [
- "alloy-evm",
- "alloy-primitives",
- "reth-unicity-b1",
- "reth-unicity-b2",
  "revm",
  "serde_json",
  "sha2 0.10.9",
@@ -10840,7 +10826,6 @@ dependencies = [
  "reth-trie-common",
  "reth-unicity-b1",
  "reth-unicity-b2",
- "reth-unicity-bridge",
  "revm",
  "secp256k1 0.30.0",
  "serde",
