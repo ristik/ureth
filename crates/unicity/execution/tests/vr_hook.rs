@@ -16,6 +16,11 @@
 //! - containment holds at the hook: a module that reverts, runs out of gas, returns malformed or
 //!   oversized data, re-enters VR or serves an invalid output never invalidates the block; VR
 //!   absorbs it as a fault (`elect` outcome 3) and the cursor still advances by exactly the batch;
+//! - the maximum compound paths at VR's maximum accepted caps: a full H = 32 batch (healthy and
+//!   exhausted), the 16-member election with the largest legal payloads, and the 16-member
+//!   pointer-switch Boundary delivered a block after its Ack;
+//! - fault attribution through public transactions after the hooks: 100 early publishes, a short
+//!   publish, and a short then funded publish in one transaction leave VR Healthy;
 //! - gas: every scenario runs within the provisional profile pins (`ElectGas`, `HookRecordGas`)
 //!   with the system budget at exactly the hook envelope, and the measured costs and thresholds are
 //!   reported against them (`cargo test --test vr_hook -- --nocapture`);
@@ -27,12 +32,14 @@
 
 mod support;
 
+use alloy_consensus::{transaction::Recovered, SignableTransaction, TxLegacy};
 use alloy_genesis::Genesis;
-use alloy_primitives::{address, keccak256, Address, Bytes, B256, U256};
+use alloy_primitives::{address, keccak256, Address, Bytes, TxKind, B256, U256};
 use alloy_sol_types::{sol, SolCall};
 use reth_chainspec::ChainSpec;
+use reth_ethereum_primitives::{Transaction, TransactionSigned};
 use reth_evm::NextBlockEnvAttributes;
-use reth_primitives_traits::SealedHeader;
+use reth_primitives_traits::{crypto::secp256k1::sign_message, SealedHeader, SignedTransaction};
 use reth_unicity_execution::{
     block::BlockProfile,
     block_executor::{
@@ -68,16 +75,19 @@ const FIXTURE: &str = include_str!("../testdata/vr-hook.json");
 /// `test/vr/fixtures/vr-hook.json` at `FIXTURE_SOURCE`, whose CI regenerates that file and compares
 /// it byte for byte. A changed copy here, or a regenerated file there, shows as a mismatch.
 const FIXTURE_SHA256: B256 =
-    alloy_primitives::b256!("f9fc4c9be54a87a9062a647d44ef1d539696b028e15ebc2fae2dd8dc5c23f1d0");
+    alloy_primitives::b256!("c4339847f59a918e9ba7b25ed2c50154aa2759bda9fb66a11d5ec8452396a385");
 /// The unicity-pos-contracts commit the fixture was copied from.
-const FIXTURE_SOURCE: &str = "f4397fc (ristik/unicity-pos-contracts#89)";
+const FIXTURE_SOURCE: &str = "8118a17 (ristik/unicity-pos-contracts#89)";
 /// Every scenario the generator (`test/vr/VRHookState.t.sol`) dumps, exactly.
-const SCENARIOS: [&str; 27] = [
+const SCENARIOS: [&str; 33] = [
     "attach-revert",
+    "batch32-exhausted",
+    "batch32-max",
     "boundary-worst",
     "elect-grief",
     "elect-huge",
     "elect-malformed",
+    "elect-max",
     "elect-oog",
     "elect-reenter",
     "elect-reenter-bubble",
@@ -88,11 +98,13 @@ const SCENARIOS: [&str; 27] = [
     "output-huge",
     "output-invalid",
     "output-malformed",
+    "output-oversize",
     "poa-elect",
     "poa-elect-16",
     "poa-elect-search",
     "poa-rejected",
     "poa-switch",
+    "publish-trace",
     "records-huge",
     "records-oog",
     "records-reenter",
@@ -100,6 +112,7 @@ const SCENARIOS: [&str; 27] = [
     "records-word",
     "resolved-oog",
     "resolved-revert",
+    "switch-max",
 ];
 const VR: Address = address!("ff00000000000000000000000000000000000003");
 const FEE_COLLECTOR: Address = Address::new([0x77; 20]);
@@ -135,6 +148,12 @@ const fn need(budget: u64) -> u64 {
     budget + budget / 63 + OUTER_RESERVE
 }
 
+/// The pin of a measured or derived requirement: `ceil(m * 5 / 4)`, the rule of bft-core
+/// `b1state.PinElectGas`.
+const fn pin(m: u64) -> u64 {
+    (m * 5).div_ceil(4)
+}
+
 /// A contained void step at `cap`.
 const fn void_need(cap: u64) -> u64 {
     need(inner(cap) + VOID_VR_GAS)
@@ -145,21 +164,49 @@ const fn elect_need(cap_elect: u64, cap_output: u64) -> u64 {
     need(inner(cap_elect) + inner(cap_output) + ELECT_VR_GAS)
 }
 
-/// Provisional `ElectGas`: the contained elect step at VR's caps, with the 5/4 margin (which also
-/// covers VR's gate, the watchdogs and the context before the step).
-const ELECT_GAS: u64 = elect_need(CAP_ELECT, CAP_OUTPUT) * 5 / 4;
+const fn max(a: u64, b: u64) -> u64 {
+    if a > b {
+        a
+    } else {
+        b
+    }
+}
 
-/// Provisional `HookRecordGas`: the worst record, a Boundary that installs 16 members, activates
-/// the bound changes and switches the pointer (onResolved, adoption, the old module's onRecords
-/// share, detach and attach, each contained at VR's caps), with the 5/4 margin.
-const HOOK_RECORD_GAS: u64 = (G_BOUNDARY_VR +
+/// The analytical elect requirement: the contained elect step at VR's caps (without VR's gate,
+/// watchdogs and context before the step).
+const ELECT_ANALYTICAL: u64 = elect_need(CAP_ELECT, CAP_OUTPUT);
+/// The complete elect requirement measured at VR's maximum accepted caps: the smallest `ElectGas`
+/// at which the `elect-max` scenario (16 members, 16 bound changes, 64 KiB of payloads, the module
+/// burning both caps) still reserves, pre-step work and outer completion included. The gas tests
+/// fail if a scenario needs more.
+const ELECT_REQUIREMENT: u64 = 7_981_443;
+/// Provisional `ElectGas`: the larger requirement, with the rounded-up 5/4 margin.
+const ELECT_GAS: u64 = pin(max(ELECT_ANALYTICAL, ELECT_REQUIREMENT));
+
+/// The analytical record requirement of design 3.3.4: the worst record, a Boundary that installs
+/// 16 members, activates the bound changes and switches the pointer (onResolved, adoption, the old
+/// module's onRecords share, detach and attach, each contained at VR's caps), plus VR's own work
+/// as forge measured it with small payloads. It underestimates VR's own work with the largest
+/// legal payloads (see `RECORD_REQUIREMENT`).
+const RECORD_ANALYTICAL: u64 = G_BOUNDARY_VR +
     void_need(CAP_RESOLVED) +
     void_need(CAP_ADOPT) +
     void_need(CAP_RECORD) +
     void_need(CAP_DETACH) +
-    void_need(CAP_ATTACH)) *
-    5 /
-    4;
+    void_need(CAP_ATTACH);
+/// The complete per-record requirement measured at VR's maximum accepted caps: the smallest
+/// records budget at which the `switch-max` Boundary, delivered alone, still applies as forge
+/// computed (16 installed, 15 changes activated with 64 KiB of payloads, every callback burning its
+/// maximum cap, the 16,256-byte initData in the attach context). The gas tests fail if a scenario
+/// needs more per record.
+const RECORD_REQUIREMENT: u64 = 17_977_590;
+/// Provisional `HookRecordGas`: the larger requirement, with the rounded-up 5/4 margin.
+const HOOK_RECORD_GAS: u64 = pin(max(RECORD_ANALYTICAL, RECORD_REQUIREMENT));
+/// Ordinary capacity added to the block, so the public transactions of a scenario fit (a funded
+/// `publish` needs about 3.7 M of `gasleft()` for its contained step, whatever it spends).
+const ORDINARY_EXTRA: u64 = 40_000_000;
+/// The funded account of the signed genesis (private key 1).
+const SENDER_KEY: B256 = B256::with_last_byte(1);
 
 // ---- the fixture ------------------------------------------------------------------------------
 
@@ -182,13 +229,25 @@ struct Expect {
     active_module: Address,
 }
 
+struct PublicTx {
+    to: Address,
+    data: Bytes,
+    gas_limit: u64,
+    success: bool,
+}
+
 struct Scenario {
     name: String,
+    /// The `H_records` the profile pins (32 throughout).
+    h: u32,
     progress: u64,
     uc_time: u64,
     records: Vec<RecordEntry>,
     pre: BTreeMap<Address, Slots>,
     post: BTreeMap<Address, Slots>,
+    /// The state after the hooks alone (before the public transactions); `post` without any.
+    after_hooks: BTreeMap<Address, Slots>,
+    txs: Vec<PublicTx>,
     expect: Expect,
 }
 
@@ -269,26 +328,52 @@ fn fixture() -> &'static Fixture {
                     records.push(entry);
                 }
                 let pre = slots(&s["pre"]);
-                let mut post = pre.clone();
-                for (address, changed) in slots(&s["changed"]) {
-                    let account = post.entry(address).or_default();
-                    for (k, v) in changed {
-                        if v.is_zero() {
-                            account.remove(&k);
-                        } else {
-                            account.insert(k, v);
+                let apply = |changes: &serde_json::Value| {
+                    let mut out = pre.clone();
+                    for (address, changed) in slots(changes) {
+                        let account = out.entry(address).or_default();
+                        for (k, v) in changed {
+                            if v.is_zero() {
+                                account.remove(&k);
+                            } else {
+                                account.insert(k, v);
+                            }
                         }
                     }
-                }
-                post.retain(|_, s| !s.is_empty());
+                    out.retain(|_, s| !s.is_empty());
+                    out
+                };
+                let post = apply(&s["changed"]);
+                let after_hooks = if s.get("changedByHooks").is_some() {
+                    apply(&s["changedByHooks"])
+                } else {
+                    post.clone()
+                };
+                let txs = s
+                    .get("txs")
+                    .and_then(|t| t.as_array())
+                    .map(|t| {
+                        t.iter()
+                            .map(|t| PublicTx {
+                                to: t["to"].as_str().unwrap().parse().unwrap(),
+                                data: t["data"].as_str().unwrap().parse().unwrap(),
+                                gas_limit: t["gasLimit"].as_u64().unwrap(),
+                                success: t["success"].as_bool().unwrap(),
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
                 let e = &s["expect"];
                 Scenario {
                     name: name.clone(),
+                    h: s["h"].as_u64().unwrap() as u32,
                     progress: s["progress"].as_u64().unwrap(),
                     uc_time: s["ucTime"].as_u64().unwrap(),
                     records,
                     pre,
                     post,
+                    after_hooks,
+                    txs,
                     expect: Expect {
                         applied: e["applied"].as_u64().unwrap(),
                         outcome: e["outcome"].as_u64().unwrap() as u8,
@@ -318,6 +403,7 @@ fn account(role: &str) -> Address {
 /// Block 1 over the signed genesis with the scenario's accounts allocated, importing the
 /// scenario's records at its progress and UC time.
 struct World {
+    txs: Vec<Recovered<TransactionSigned>>,
     provider: FixtureProvider,
     parent: SealedHeader<alloy_consensus::Header>,
     root: RootInputV2,
@@ -355,7 +441,25 @@ impl World {
             fixture().origin,
             "forge elected under the origin identity this block carries"
         );
-        Self { provider, parent, root, chain_spec, import, update }
+        let txs = s
+            .txs
+            .iter()
+            .enumerate()
+            .map(|(nonce, t)| {
+                let tx = Transaction::Legacy(TxLegacy {
+                    chain_id: Some(1337),
+                    nonce: nonce as u64,
+                    gas_price: 10_000_000_000,
+                    gas_limit: t.gas_limit,
+                    to: TxKind::Call(t.to),
+                    value: U256::ZERO,
+                    input: t.data.clone(),
+                });
+                let signature = sign_message(SENDER_KEY, tx.signature_hash()).unwrap();
+                TransactionSigned::new_unhashed(tx, signature).try_into_recovered().unwrap()
+            })
+            .collect();
+        Self { txs, provider, parent, root, chain_spec, import, update }
     }
 
     /// The block profile whose system reservation is the base one plus exactly the hook envelope.
@@ -364,7 +468,7 @@ impl World {
         let envelope = hook.envelope_gas().unwrap();
         BlockProfile {
             system_gas: base.system_gas + envelope,
-            max_gas: base.max_gas + envelope,
+            max_gas: base.max_gas + envelope + ORDINARY_EXTRA,
             ..base
         }
     }
@@ -410,8 +514,17 @@ impl World {
         )
     }
 
-    /// Builds block 1 through the real block path and returns it with the state after it.
+    /// Builds block 1 through the real block path, with the scenario's public transactions after
+    /// the hooks, and returns it with the state after it.
     fn build(&self, hook: RecordsHook) -> Result<(CompletedBuild, FixtureProvider), String> {
+        self.build_with(hook, self.txs.clone())
+    }
+
+    fn build_with(
+        &self,
+        hook: RecordsHook,
+        txs: Vec<Recovered<TransactionSigned>>,
+    ) -> Result<(CompletedBuild, FixtureProvider), String> {
         let config = self.config(hook);
         let mut state =
             State::builder().with_database(self.provider.clone()).with_bundle_update().build();
@@ -421,7 +534,7 @@ impl World {
             self.attributes(&hook),
             &mut state,
             self.provider.clone(),
-            vec![],
+            txs,
         )
         .map_err(|e| e.to_string())?;
         let mut after = self.provider.clone();
@@ -432,7 +545,7 @@ impl World {
     /// The state the hooks start from: the block built without them (the records imported, finalize
     /// and EIP-4788 done). The registry's words do not depend on the hook (`block_adapter.rs`).
     fn before_hooks(&self) -> (FixtureProvider, HookEnv) {
-        let (built, before) = self.build(RecordsHook::default()).unwrap();
+        let (built, before) = self.build_with(RecordsHook::default(), vec![]).unwrap();
         let header = built.outcome.block.header();
         (before, HookEnv::at(1337, header.number, header.timestamp))
     }
@@ -455,25 +568,35 @@ fn hooks_on(
     Ok((outcome, after))
 }
 
-/// The pinned hook of a scenario: VR as the custody and the election, H = the batch (at least
-/// one), at the provisional pins.
-fn pinned(s: &Scenario) -> RecordsHook {
+/// The pinned hook of a scenario: VR as the custody and the election, the fixture's H, at the
+/// provisional pins.
+const fn pinned(s: &Scenario) -> RecordsHook {
     RecordsHook {
         custody: VR,
-        h_records: (s.records.len() as u32).max(1),
+        h_records: s.h,
         record_gas: HOOK_RECORD_GAS,
         election: VR,
         elect_gas: ELECT_GAS,
     }
 }
 
-/// The slot-for-slot differences between ureth's state and forge's on every fixture account.
+/// The slot-for-slot differences between ureth's state after the block and forge's.
 fn diff(after: &FixtureProvider, s: &Scenario) -> Vec<String> {
+    diff_from(after, &s.post)
+}
+
+/// The same after the hooks alone (the direct runs, before any public transaction).
+fn diff_hooks(after: &FixtureProvider, s: &Scenario) -> Vec<String> {
+    diff_from(after, &s.after_hooks)
+}
+
+/// The slot-for-slot differences between `after` and `want` on every fixture account.
+fn diff_from(after: &FixtureProvider, want_all: &BTreeMap<Address, Slots>) -> Vec<String> {
     let mut out = Vec::new();
     for a in &fixture().accounts {
         let got = after.storage_of(a.address);
         let empty = Slots::new();
-        let want = s.post.get(&a.address).unwrap_or(&empty);
+        let want = want_all.get(&a.address).unwrap_or(&empty);
         for k in got.keys().chain(want.keys()).collect::<std::collections::BTreeSet<_>>() {
             if got.get(k) != want.get(k) {
                 out.push(format!(
@@ -499,10 +622,38 @@ sol! {
     function holderCount() external view returns (uint8);
     function activeModule() external view returns (address module);
     function output(bytes32 resultId) external view returns (uint8 state);
+    // MockModule (test/vr/VRMocks.sol)
+    function logLength() external view returns (uint256);
+    function log(uint256 i) external view returns (string);
+    function attachMembers() external view returns (uint256);
+    function attachPrevious() external view returns (address);
+    function reentryAttempts() external view returns (uint256);
+    function reentryRefusals() external view returns (uint256);
+    function reentryErrors(uint256 k) external view returns (bytes4);
+    // PublishDriver (test/vr/VRHookState.t.sol)
+    function pendingSeen() external view returns (uint256);
+    function shortRefused() external view returns (bool);
+    function published() external view returns (bool);
 }
 
-/// One read-only call against `state`, from the system caller, discarded.
+/// One read-only call of VR against `state`, from the system caller, discarded.
 fn view(state: &FixtureProvider, data: Vec<u8>) -> Bytes {
+    view_at(state, VR, data)
+}
+
+/// The decoded answer of a read-only call of `to`.
+fn call<C: SolCall>(state: &FixtureProvider, to: Address, c: C) -> C::Return {
+    C::abi_decode_returns(&view_at(state, to, c.abi_encode())).unwrap()
+}
+
+/// The module's step log, in order.
+fn module_log(state: &FixtureProvider, module: Address) -> Vec<String> {
+    let n = call(state, module, logLengthCall {});
+    (0..n.to::<u64>()).map(|i| call(state, module, logCall { i: U256::from(i) })).collect()
+}
+
+/// One read-only call of `to` against `state`, from the system caller, discarded.
+fn view_at(state: &FixtureProvider, to: Address, data: Vec<u8>) -> Bytes {
     let mut evm = Context::mainnet()
         .modify_cfg_chained(|cfg| {
             cfg.chain_id = 1337;
@@ -510,7 +661,7 @@ fn view(state: &FixtureProvider, data: Vec<u8>) -> Bytes {
         })
         .with_db(state.clone())
         .build_mainnet();
-    let mut tx = TxEnv::new_system_tx_with_caller(SYSTEM_CALLER, VR, data.into());
+    let mut tx = TxEnv::new_system_tx_with_caller(SYSTEM_CALLER, to, data.into());
     tx.gas_limit = 30_000_000;
     evm.ctx_mut().set_tx(tx);
     let result = MainnetHandler::<_, revm::context_interface::result::EVMError<_>, _>::default()
@@ -611,6 +762,10 @@ fn every_scenario_reproduces_forge_through_the_block_path() {
         )
         .unwrap_or_else(|e| panic!("{}: replay: {e}", s.name));
         assert_eq!(replay.output.result, built.outcome.execution_result, "{}", s.name);
+        let receipts: Vec<bool> =
+            built.outcome.execution_result.receipts.iter().map(|r| r.success).collect();
+        let want: Vec<bool> = s.txs.iter().map(|t| t.success).collect();
+        assert_eq!(receipts, want, "{}: the public transactions' statuses are forge's", s.name);
 
         // the same hook run directly reports forge's outcome and lands on the same state
         let (before, env) = world.before_hooks();
@@ -618,7 +773,7 @@ fn every_scenario_reproduces_forge_through_the_block_path() {
         let (outcome, direct) = hooks_on(&before, &env, &hook, budget).unwrap();
         assert_eq!(outcome.applied, s.expect.applied, "{}: applied", s.name);
         assert_eq!(outcome.elected, Some(s.expect.outcome), "{}: elect outcome", s.name);
-        assert!(diff(&direct, s).is_empty(), "{}: the direct run differs", s.name);
+        assert!(diff_hooks(&direct, s).is_empty(), "{}: the direct run differs", s.name);
         assert!(outcome.gas_spent <= budget);
         // a node that pins no hook computes another state and refuses the block
         if !s.records.is_empty() || s.expect.outcome != 1 {
@@ -646,23 +801,52 @@ fn a_misbehaving_module_never_invalidates_the_block() {
         ("elect-revert", "elect reverts", 3, 1),
         ("elect-oog", "elect burns its whole cap", 3, 1),
         ("elect-malformed", "elect returns 65 malformed bytes", 3, 1),
-        ("elect-huge", "elect returns 1 MiB", 3, 1),
+        ("elect-huge", "elect returns 1 MiB of return data (refused before any copy)", 3, 1),
         ("elect-write-revert", "elect writes, then reverts", 3, 1),
         ("elect-reenter-bubble", "elect re-enters publish and bubbles the revert", 3, 1),
-        ("elect-reenter", "elect re-enters all 12 mutators (each refused), then answers", 2, 0),
+        (
+            "elect-reenter",
+            "elect makes 14 well-formed re-entrant calls (13 refused, the lock-exempt invalidate succeeds), then answers",
+            2,
+            0,
+        ),
         ("elect-grief", "elect burns to 20,000 below its cap, then answers", 2, 0),
         ("output-malformed", "outputOf of a ready reservation is malformed", 3, 1),
-        ("output-huge", "outputOf returns 1 MiB", 3, 1),
+        (
+            "output-huge",
+            "outputOf builds a 1 MiB return and runs out of gas (memory) in its own frame",
+            3,
+            1,
+        ),
+        (
+            "output-oversize",
+            "outputOf answers a 16-member Ready output one byte above the 5,408-byte cap",
+            3,
+            1,
+        ),
         ("output-invalid", "outputOf serves a Ready output VR's validation rejects", 3, 1),
         ("records-revert", "onRecords reverts in the Ack + Boundary batch", 1, 1),
         ("records-oog", "onRecords burns its cap", 1, 1),
-        ("records-huge", "onRecords returns 1 MiB", 1, 1),
+        (
+            "records-huge",
+            "onRecords builds a 1 MiB return and runs out of gas (memory) in its own frame",
+            1,
+            1,
+        ),
         ("records-word", "onRecords (a void step) returns a word", 1, 1),
         ("records-reenter", "onRecords re-enters publish and bubbles", 1, 1),
         ("resolved-revert", "onResolved reverts at the Boundary", 1, 1),
         ("resolved-oog", "onResolved burns its cap", 1, 1),
         ("attach-revert", "the new module's attach reverts at the switch", 1, 1),
+        (
+            "batch32-exhausted",
+            "onRecords of a full H = 32 batch exhausts its 48,000,000 cap",
+            1,
+            1,
+        ),
     ];
+    assert_eq!(cases.iter().filter(|c| c.3 == 1).count(), 19, "19 faults");
+    assert_eq!(cases.iter().filter(|c| c.3 == 0).count(), 2, "2 absorbed, Healthy");
     for (name, what, outcome, health) in cases {
         let s = scenario(name);
         assert_eq!((s.expect.outcome, s.expect.health), (*outcome, *health), "{name}: forge");
@@ -676,7 +860,7 @@ fn a_misbehaving_module_never_invalidates_the_block() {
         let hook = pinned(s);
         let (o, _) = hooks_on(&before, &env, &hook, hook.envelope_gas().unwrap()).unwrap();
         assert_eq!(o.elected, Some(*outcome), "{name}");
-        assert_eq!(o.applied, s.records.len() as u64, "{name}: the cursor moved by the batch");
+        assert_eq!(o.applied, s.expect.applied, "{name}: the cursor moved by the batch");
         println!(
             "vr-hook: containment {name:<22} {what}: block valid, outcome {outcome}, health {health}, header gas {}",
             built.outcome.execution_result.gas_used
@@ -690,8 +874,37 @@ fn a_misbehaving_module_never_invalidates_the_block() {
         s.post.get(&mock).map(|p| p.len()),
         "the module's partial write is not in the post state"
     );
+    // the re-entrant calls: register, proposeBinding and every locked mutator refused with Locked,
+    // the hooks with NotSystemCaller, the steps with NotSelf, the lock-exempt invalidate succeeds
+    let s = scenario("elect-reenter");
+    let (_, after) = World::new(s).build(pinned(s)).unwrap();
+    let mock = account("mock");
+    assert_eq!(call(&after, mock, reentryAttemptsCall {}), U256::from(14));
+    assert_eq!(call(&after, mock, reentryRefusalsCall {}), U256::from(13));
+    let locked = alloy_primitives::FixedBytes(keccak256("Locked()")[..4].try_into().unwrap());
+    let sys = alloy_primitives::FixedBytes(keccak256("NotSystemCaller()")[..4].try_into().unwrap());
+    let self_ = alloy_primitives::FixedBytes(keccak256("NotSelf()")[..4].try_into().unwrap());
+    let want = [
+        locked,
+        sys,
+        sys,
+        locked,
+        locked,
+        locked,
+        locked,
+        self_,
+        self_,
+        self_,
+        self_,
+        locked,
+        locked,
+        alloy_primitives::FixedBytes::ZERO,
+    ];
+    for (k, w) in want.iter().enumerate() {
+        assert_eq!(call(&after, mock, reentryErrorsCall { k: U256::from(k) }), *w, "re-entry {k}");
+    }
     // a fault left no reservation behind
-    for name in ["elect-revert", "output-malformed", "output-invalid"] {
+    for name in ["elect-revert", "output-malformed", "output-invalid", "output-oversize"] {
         let s = scenario(name);
         let (_, after) = World::new(s).build(pinned(s)).unwrap();
         assert_eq!(output_state(&after, keccak256("R")), 0, "{name}: R was never reserved");
@@ -761,10 +974,10 @@ fn the_module_switch_works_through_the_hook() {
     assert_eq!(holderCountCall::abi_decode_returns(&out).unwrap(), 0);
 }
 
-/// The smallest `g` in `[lo, hi]` for which `ok` holds (monotone), to 1,000 gas.
+/// The smallest `g` in `[lo, hi]` for which `ok` holds (monotone), exactly.
 fn threshold(mut lo: u64, mut hi: u64, ok: impl Fn(u64) -> bool) -> u64 {
     assert!(ok(hi), "not even {hi} suffices");
-    while hi - lo > 1_000 {
+    while hi - lo > 1 {
         let mid = lo + (hi - lo) / 2;
         if ok(mid) {
             hi = mid;
@@ -782,8 +995,7 @@ fn threshold(mut lo: u64, mut hi: u64, ok: impl Fn(u64) -> bool) -> u64 {
 #[test]
 fn hook_gas_stays_within_the_provisional_profile_pins() {
     println!(
-        "vr-hook: provisional pins: ElectGas {ELECT_GAS} (elect step at VR caps {} x 5/4), HookRecordGas {HOOK_RECORD_GAS} per record",
-        elect_need(CAP_ELECT, CAP_OUTPUT)
+        "vr-hook: provisional pins: ElectGas {ELECT_GAS} = ceil(5/4 x max(analytical {ELECT_ANALYTICAL}, measured {ELECT_REQUIREMENT})), HookRecordGas {HOOK_RECORD_GAS} = ceil(5/4 x max(analytical {RECORD_ANALYTICAL}, measured {RECORD_REQUIREMENT}))"
     );
     println!(
         "vr-hook: {:<22} {:>3} {:>10} {:>10} {:>11} {:>11}",
@@ -794,7 +1006,7 @@ fn hook_gas_stays_within_the_provisional_profile_pins() {
     for s in &fixture().scenarios {
         let world = World::new(s);
         let (before, env) = world.before_hooks();
-        let n = s.records.len() as u64;
+        let n = s.expect.applied;
         let hook = pinned(s);
         // the records step alone, then both steps: the election's cost is the difference
         let records_only = RecordsHook { election: Address::ZERO, elect_gas: 0, ..hook };
@@ -804,6 +1016,7 @@ fn hook_gas_stays_within_the_provisional_profile_pins() {
         let records_gas = r.gas_spent;
         let elect_gas = both.gas_spent - r.gas_spent;
         assert!(records_gas <= HOOK_READS_GAS + n.max(1) * HOOK_RECORD_GAS, "{}", s.name);
+        assert!(records_gas <= HOOK_READS_GAS + u64::from(s.h) * HOOK_RECORD_GAS, "{}", s.name);
         assert!(elect_gas <= ELECT_GAS, "{}: elect {elect_gas}", s.name);
 
         // the smallest budget for the records step that still lands on the reference state
@@ -825,10 +1038,16 @@ fn hook_gas_stays_within_the_provisional_profile_pins() {
         let min_elect = threshold(1, ELECT_GAS, |g| {
             let h = RecordsHook { elect_gas: g, ..hook };
             hooks_on(&before, &env, &h, h.envelope_gas().unwrap())
-                .map(|(o, st)| o.elected == Some(s.expect.outcome) && diff(&st, s).is_empty())
+                .map(|(o, st)| o.elected == Some(s.expect.outcome) && diff_hooks(&st, s).is_empty())
                 .unwrap_or(false)
         });
         assert!(min_records <= HOOK_READS_GAS + n * HOOK_RECORD_GAS, "{}", s.name);
+        assert!(
+            n == 0 || min_records.div_ceil(n) <= RECORD_REQUIREMENT,
+            "{}: {min_records}",
+            s.name
+        );
+        assert!(min_elect <= ELECT_REQUIREMENT, "{}: {min_elect}", s.name);
         assert!(min_elect <= ELECT_GAS, "{}", s.name);
         if n > 0 && min_records / n > worst_record.0 {
             worst_record = (min_records / n, &s.name);
@@ -847,9 +1066,11 @@ fn hook_gas_stays_within_the_provisional_profile_pins() {
     );
 }
 
-/// An under-priced election is contained too: below the contained step's requirement VR reports
-/// `BudgetShort` and answers Disabled (no reservation, no fault), and the block stays valid. That
-/// is a pin set too low (an acceptance failure for the pin), never a chain halt.
+/// An election priced below the contained step's requirement but above VR's own pre-step work: VR
+/// reports `BudgetShort` and answers Disabled (no reservation, no fault), and the block stays
+/// valid. A due election is then skipped, so such a pin is an acceptance failure. Below VR's own
+/// pre-step work (here 1 gas) the hook runs out of gas and the block is invalid: the pin must cover
+/// the whole cap-based requirement, never only the measured spend.
 #[test]
 fn an_election_priced_below_the_step_budget_is_disabled_not_invalid() {
     let s = scenario("poa-elect");
@@ -863,4 +1084,146 @@ fn an_election_priced_below_the_step_budget_is_disabled_not_invalid() {
         openOutputCall::abi_decode_returns(&view(&after, openOutputCall {}.abi_encode())).unwrap();
     assert_eq!(open, B256::ZERO);
     assert!(world.build(hook).is_ok(), "the block stays valid");
+    let starved = RecordsHook { elect_gas: 1, ..pinned(s) };
+    assert!(world.build(starved).is_err(), "an ElectGas below VR's own work invalidates the block");
+}
+
+/// The maximum compound paths at VR's maximum accepted caps (design 3.3.4), each through the real
+/// block path: callbacks ran with the right content and the module stayed Healthy where they
+/// answered; the cursor moved by exactly the batch, the failing frame rolled back and the module
+/// was Faulted where one exhausted its cap. Prints the measurements against the pins.
+#[test]
+fn the_maximum_compound_paths_run_within_the_pins() {
+    let mock = account("mock");
+    let next = account("mockNext");
+    let r = keccak256("R");
+    let measure = |s: &Scenario| {
+        let world = World::new(s);
+        let (before, env) = world.before_hooks();
+        let hook = pinned(s);
+        let records_only = RecordsHook { election: Address::ZERO, elect_gas: 0, ..hook };
+        let (rec, reference) =
+            hooks_on(&before, &env, &records_only, records_only.envelope_gas().unwrap()).unwrap();
+        let (both, _) = hooks_on(&before, &env, &hook, hook.envelope_gas().unwrap()).unwrap();
+        let min_records = if s.expect.applied == 0 {
+            0
+        } else {
+            threshold(0, records_only.envelope_gas().unwrap(), |budget| {
+                hooks_on(&before, &env, &records_only, budget)
+                    .map(|(o, st)| {
+                        o.applied == s.expect.applied &&
+                            fixture().accounts.iter().all(|a| {
+                                st.storage_of(a.address) == reference.storage_of(a.address)
+                            })
+                    })
+                    .unwrap_or(false)
+            })
+        };
+        let min_elect = threshold(1, ELECT_GAS, |g| {
+            let h = RecordsHook { elect_gas: g, ..hook };
+            hooks_on(&before, &env, &h, h.envelope_gas().unwrap())
+                .map(|(o, st)| o.elected == Some(s.expect.outcome) && diff_hooks(&st, s).is_empty())
+                .unwrap_or(false)
+        });
+        (rec.gas_spent, both.gas_spent - rec.gas_spent, min_records, min_elect)
+    };
+
+    // H = 32 at the maximum record cap, a healthy delivery burning its 48 M cap
+    let s = scenario("batch32-max");
+    assert_eq!((s.h, s.records.len(), s.expect.applied), (32, 32, 32));
+    let (_, after) = World::new(s).build(pinned(s)).unwrap();
+    assert_eq!(health_of(&after), 0);
+    assert_eq!(module_log(&after, mock), ["onResolved:1", "onRecords:0:32", "elect"]);
+    assert_eq!(output_state(&after, r), 5, "R Acknowledged");
+    let (g, _, min, _) = measure(s);
+    println!(
+        "vr-hook: max H=32 batch, onRecords at 32 x 1,500,000: records gas {g}, min budget {min} ({} per record) against H x HookRecordGas {}",
+        min / 32,
+        32 * HOOK_RECORD_GAS
+    );
+    assert!(min <= HOOK_READS_GAS + 32 * HOOK_RECORD_GAS);
+
+    // the same batch with onRecords exhausting its cap: applied, rolled back, Faulted
+    let s = scenario("batch32-exhausted");
+    let (_, after) = World::new(s).build(pinned(s)).unwrap();
+    assert_eq!(health_of(&after), 1);
+    assert_eq!(module_log(&after, mock), ["onResolved:1"], "the onRecords frame rolled back");
+    assert_eq!(output_state(&after, r), 5, "the records applied regardless");
+    let cursor = call(&after, VR, recordCursorCall {});
+    assert_eq!(cursor, 32);
+    let (g, _, min, _) = measure(s);
+    println!(
+        "vr-hook: max H=32 batch, onRecords exhausting its cap: records gas {g}, min budget {min}"
+    );
+
+    // the compound election at the maximum caps: 16 members, 16 bound changes (64 KiB of payloads)
+    let s = scenario("elect-max");
+    let (_, after) = World::new(s).build(pinned(s)).unwrap();
+    assert_eq!(health_of(&after), 0);
+    assert_eq!(output_state(&after, r), 2, "R Published");
+    assert_eq!(module_log(&after, mock).last().map(String::as_str), Some("elect"));
+    let (_, g, _, min) = measure(s);
+    println!(
+        "vr-hook: max compound election (caps 4,000,000 + 1,000,000, 16 members, 16 changes, 64 KiB): elect gas {g}, min ElectGas {min} against ElectGas {ELECT_GAS} (cap-based requirement {})",
+        elect_need(CAP_ELECT, CAP_OUTPUT)
+    );
+    assert!(min <= ELECT_REQUIREMENT, "the recorded requirement covers the election");
+    assert!(min > ELECT_ANALYTICAL, "the step alone is not the whole requirement");
+
+    // the 16-member switching Boundary at the maximum caps, delivered a block after its Ack
+    let s = scenario("switch-max");
+    assert_eq!(s.records.iter().map(|r| r.kind).collect::<Vec<_>>(), [2, 6]);
+    assert_eq!((s.expect.applied, s.expect.cursor), (1, 2), "the Boundary alone in this block");
+    let (before, _) = World::new(s).before_hooks();
+    assert_eq!(call(&before, VR, recordCursorCall {}), 1, "the Ack was applied a block earlier");
+    let (_, after) = World::new(s).build(pinned(s)).unwrap();
+    assert_eq!(health_of(&after), 0);
+    assert_eq!(Address::from_slice(&view(&after, activeModuleCall {}.abi_encode())[12..32]), next);
+    assert_eq!(module_log(&after, mock), ["onResolved:1", "onRecords:1:1", "detach"]);
+    assert_eq!(module_log(&after, next).first().map(String::as_str), Some("attach"));
+    assert_eq!(call(&after, next, attachMembersCall {}), U256::from(16));
+    assert_eq!(call(&after, next, attachPreviousCall {}), mock);
+    assert_eq!(call(&after, VR, holderCountCall {}), 1);
+    let (g, _, min, _) = measure(s);
+    println!(
+        "vr-hook: max switching Boundary alone (16 installed, 15 activated, 64 KiB, callbacks at 500,000 / 1,000,000 / 1,500,000 / 500,000 / 3,000,000): records gas {g}, min budget {min} against HookRecordGas {HOOK_RECORD_GAS} (analytical {RECORD_ANALYTICAL})"
+    );
+    assert!(min <= RECORD_REQUIREMENT, "the recorded requirement covers the Boundary");
+    assert!(min > RECORD_ANALYTICAL, "the small-payload analytical figure is too low");
+    assert!(
+        min <= HOOK_READS_GAS + HOOK_RECORD_GAS,
+        "one record's reservation covers the Boundary"
+    );
+}
+
+/// Fault attribution through public transactions after the hooks (design 11, VT-02): the hook
+/// reserves an asynchronous output; then 100 early publishes in one transaction (each Pending, the
+/// lock taken and cleared each time), a publish with too little gas (`BudgetShort`, reverted), the
+/// module turning Ready, and one transaction with a short publish refused inside it followed by a
+/// funded one that publishes. VR stays Healthy throughout.
+#[test]
+fn early_short_and_reused_publishes_are_not_faults() {
+    let s = scenario("publish-trace");
+    assert_eq!(s.txs.len(), 4);
+    let world = World::new(s);
+    let (built, after) = world.build(pinned(s)).unwrap();
+    let receipts: Vec<bool> =
+        built.outcome.execution_result.receipts.iter().map(|r| r.success).collect();
+    assert_eq!(receipts, [true, false, true, true]);
+    let driver = account("publishDriver");
+    assert_eq!(call(&after, driver, pendingSeenCall {}), U256::from(100));
+    assert!(call(&after, driver, shortRefusedCall {}));
+    assert!(call(&after, driver, publishedCall {}));
+    assert_eq!(output_state(&after, keccak256("R")), 2, "R Published");
+    assert_eq!(health_of(&after), 0, "no early, short or refused publish is a fault");
+    // after the hooks alone, R is Reserved and unpublished
+    let (_, hooks_only) = world.build_with(pinned(s), vec![]).unwrap();
+    assert!(diff_hooks(&hooks_only, s).is_empty());
+    assert_eq!(output_state(&hooks_only, keccak256("R")), 1, "R Reserved");
+    for (i, r) in built.outcome.execution_result.receipts.iter().enumerate() {
+        println!(
+            "vr-hook: publish trace tx {i}: success {} cumulative gas {}",
+            r.success, r.cumulative_gas_used
+        );
+    }
 }
