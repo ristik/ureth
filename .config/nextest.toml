@@ -24,3 +24,9 @@ slow-timeout = { period = "2m", terminate-after = 10 }
 [[profile.default.overrides]]
 filter = "package(reth-node-ethereum) and binary(e2e)"
 slow-timeout = { period = "1m", terminate-after = 5 }
+
+# The VT-02 VR hook gas tests bisect exact gas thresholds over full H = 32 batches that burn 48M
+# gas each in the debug interpreter (about 30 s on the dev server). Headroom over the default.
+[[profile.default.overrides]]
+filter = "package(reth-unicity-execution) and binary(vr_hook)"
+slow-timeout = { period = "1m", terminate-after = 3 }
