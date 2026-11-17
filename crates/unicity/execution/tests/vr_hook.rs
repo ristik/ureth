@@ -75,11 +75,11 @@ const FIXTURE: &str = include_str!("../testdata/vr-hook.json");
 /// `test/vr/fixtures/vr-hook.json` at `FIXTURE_SOURCE`, whose CI regenerates that file and compares
 /// it byte for byte. A changed copy here, or a regenerated file there, shows as a mismatch.
 const FIXTURE_SHA256: B256 =
-    alloy_primitives::b256!("c4339847f59a918e9ba7b25ed2c50154aa2759bda9fb66a11d5ec8452396a385");
+    alloy_primitives::b256!("54d69d3f95c67b4af77e59a8a64c3804b81848b6c9b40a3074ee679db00fa2ce");
 /// The unicity-pos-contracts commit the fixture was copied from.
-const FIXTURE_SOURCE: &str = "8118a17 (ristik/unicity-pos-contracts#89)";
+const FIXTURE_SOURCE: &str = "vt14/genesis (ristik/unicity-pos-contracts, VT-14 combined fixtures)";
 /// Every scenario the generator (`test/vr/VRHookState.t.sol`) dumps, exactly.
-const SCENARIOS: [&str; 33] = [
+const SCENARIOS: [&str; 36] = [
     "attach-revert",
     "batch32-exhausted",
     "batch32-max",
@@ -94,6 +94,9 @@ const SCENARIOS: [&str; 33] = [
     "elect-revert",
     "elect-write-revert",
     "holder-batch",
+    "mixed-first",
+    "mixed-last",
+    "mixed-middle",
     "native-worst",
     "output-huge",
     "output-invalid",
@@ -202,6 +205,37 @@ const RECORD_ANALYTICAL: u64 = G_BOUNDARY_VR +
 const RECORD_REQUIREMENT: u64 = 17_977_590;
 /// Provisional `HookRecordGas`: the larger requirement, with the rounded-up 5/4 margin.
 const HOOK_RECORD_GAS: u64 = pin(max(RECORD_ANALYTICAL, RECORD_REQUIREMENT));
+// ---- the VR batch pins (VT-14; astra urethhook r2; bft-core b1state CheckVRHookGas) -----------
+//
+// A VR profile does not price records one by one. Its `HookRecordGas` is the amortized encoding of
+// a FIXED allowance for one H-record records call: ceil(5/4 x M_H) with M_H = R_H + B (raised by
+// any combined fixture that needs more). It rests on VR's single-live-output invariant: one records
+// call finalizes at most one nonterminal output and switches the pointer at most once, and the two
+// onRecords segments of a switch carry at most H records together. ureth's hook already hands
+// `applyRootRecords` the whole remaining envelope (H x HookRecordGas), whatever the call applies.
+
+/// `R_32`: the smallest records reservation of the full H = 32 delivery at the maximum record cap
+/// (`batch32-max`).
+const BATCH_REQUIREMENT: u64 = 52_262_738;
+/// `M_32 = R_32 + B`, B the complete switching Boundary delivered alone (`RECORD_REQUIREMENT`).
+const BATCH_ALLOWANCE_REQUIREMENT: u64 = BATCH_REQUIREMENT + RECORD_REQUIREMENT;
+/// The VR profile's `HookRecordGas`: ceil(ceil(5/4 x M_32) / 32).
+const VR_HOOK_RECORD_GAS: u64 = pin(BATCH_ALLOWANCE_REQUIREMENT).div_ceil(32);
+/// The combined fixtures: the switching output's Ack, 30 ordinary records and its Boundary in one
+/// H = 32 call, the switch at the start, middle or end (permanent acceptance cases).
+const COMBINED: [&str; 3] = ["mixed-first", "mixed-middle", "mixed-last"];
+/// The legal bounds the worst cases are built at (schema v1; `VRHookState.t.sol`): 16 members, 16
+/// bound changes with 64 KiB of payloads, one change up to 16 KiB, 32 pending changes, 64
+/// activations. bft-core `b1state.VRLimits` refuses a measurement at other ceilings.
+const CEILINGS: [(&str, u64); 6] = [
+    ("committee", 16),
+    ("boundChanges", 16),
+    ("boundPayload", 64 * 1024),
+    ("changePayload", 16 * 1024),
+    ("pendingChanges", 32),
+    ("activations", 64),
+];
+
 /// Ordinary capacity added to the block, so the public transactions of a scenario fit (a funded
 /// `publish` needs about 3.7 M of `gasleft()` for its contained step, whatever it spends).
 const ORDINARY_EXTRA: u64 = 40_000_000;
@@ -1064,6 +1098,7 @@ fn gas_group(s: &Scenario) -> &'static str {
         "batch32-exhausted" => "h32-exhausted",
         "elect-max" => "max-election",
         "switch-max" => "max-switch",
+        name if COMBINED.contains(&name) => "combined",
         _ if s.expect.applied == 0 => "elections",
         _ => "record-batches",
     }
@@ -1099,13 +1134,14 @@ fn hook_gas_groups_cover_every_scenario() {
         "h32-exhausted",
         "max-election",
         "max-switch",
+        "combined",
     ];
     for s in &fixture().scenarios {
         assert!(groups.contains(&gas_group(s)), "{}", s.name);
     }
     let elections = fixture().scenarios.iter().filter(|s| gas_group(s) == "elections").count();
     let batches = fixture().scenarios.iter().filter(|s| gas_group(s) == "record-batches").count();
-    assert_eq!(elections + batches + 4, SCENARIOS.len());
+    assert_eq!(elections + batches + 4 + COMBINED.len(), SCENARIOS.len());
 }
 
 #[test]
@@ -1143,6 +1179,7 @@ fn hook_gas_full_h32_batch_at_the_maximum_record_cap() {
         32 * HOOK_RECORD_GAS
     );
     assert!(g.min_records <= HOOK_READS_GAS + 32 * HOOK_RECORD_GAS);
+    assert_eq!(g.min_records, BATCH_REQUIREMENT, "the recorded R_32 is this measurement");
 }
 
 /// The same batch with onRecords exhausting its cap.
@@ -1283,5 +1320,160 @@ fn early_short_and_reused_publishes_are_not_faults() {
             "vr-hook: publish trace tx {i}: success {} cumulative gas {}",
             r.success, r.cumulative_gas_used
         );
+    }
+}
+
+/// The combined fixtures at the VR batch rule (VT-14 acceptance; astra urethhook r2): one H = 32
+/// records call with a 16-member, 64 KiB switching output's Ack, 30 ordinary records and its
+/// Boundary, both modules' record callbacks and every switch callback at their maximum caps. The
+/// old module's segment runs through the Boundary, the new one gets the rest, VR stays Healthy, and
+/// each needs no more than `M_32 = R_32 + B` of reservation.
+#[test]
+fn hook_gas_combined_switch_and_ordinary_records_fit_the_batch_allowance() {
+    let all = measure_group("combined");
+    assert_eq!(all.len(), COMBINED.len());
+    for (s, g) in &all {
+        assert_eq!((s.h, s.expect.applied), (32, 32), "{}", s.name);
+        println!(
+            "vr-hook: combined {:<13} records gas {:>10}, min budget {:>10} against M_32 {BATCH_ALLOWANCE_REQUIREMENT} and the allowance {}",
+            s.name,
+            g.records_gas,
+            g.min_records,
+            32 * VR_HOOK_RECORD_GAS
+        );
+        assert!(g.min_records <= BATCH_ALLOWANCE_REQUIREMENT, "{}: M_32 must cover it", s.name);
+    }
+}
+
+/// Every scenario under the VR profile's batch pins (`HookRecordGas` = 2,743,763 at H = 32, the
+/// amortized 87,800,416 allowance): the block builds with the system budget at exactly the hook
+/// envelope (97,927,220), replays to itself and reaches forge's state, the combined fixtures
+/// included; and each combined fixture lands on its reference state with a records-only
+/// reservation of exactly `M_32`.
+#[test]
+fn every_scenario_runs_with_the_vr_batch_pins() {
+    assert_eq!(VR_HOOK_RECORD_GAS, 2_743_763);
+    assert_eq!(32 * VR_HOOK_RECORD_GAS, 87_800_416);
+    assert_eq!(pin(BATCH_ALLOWANCE_REQUIREMENT), 87_800_410);
+    assert_eq!(ELECT_GAS, 9_976_804);
+    let mock = account("mock");
+    let next = account("mockNext");
+    for s in &fixture().scenarios {
+        assert_eq!(s.h, 32);
+        let world = World::new(s);
+        let hook = RecordsHook { record_gas: VR_HOOK_RECORD_GAS, ..pinned(s) };
+        assert_eq!(hook.envelope_gas().unwrap(), 97_927_220);
+        let (built, after) = world.build(hook).unwrap_or_else(|e| {
+            panic!("{}: the block must stay valid at the VR pins: {e}", s.name)
+        });
+        let d = diff(&after, s);
+        assert!(d.is_empty(), "{}: state differs from forge:\n{}", s.name, d.join("\n"));
+        check_views(&after, s);
+        let replay = replay_complete(
+            &world.config(hook),
+            world.provider.clone(),
+            &world.provider,
+            &built.outcome.block,
+        )
+        .unwrap();
+        assert_eq!(replay.output.result, built.outcome.execution_result, "{}", s.name);
+        if let Some(at) = COMBINED.iter().position(|c| *c == s.name) {
+            let before_boundary = [0u64, 15, 30][at];
+            assert_eq!(health_of(&after), 0, "{}", s.name);
+            assert_eq!(
+                Address::from_slice(&view(&after, activeModuleCall {}.abi_encode())[12..32]),
+                next
+            );
+            let old = module_log(&after, mock);
+            assert_eq!(
+                old[..2],
+                ["onResolved:1".to_string(), format!("onRecords:0:{}", before_boundary + 2)]
+            );
+            assert_eq!(old[2], "detach");
+            let new = module_log(&after, next);
+            assert_eq!(new[0], "attach");
+            if before_boundary < 30 {
+                assert_eq!(
+                    new[1],
+                    format!("onRecords:{}:{}", before_boundary + 2, 30 - before_boundary)
+                );
+            }
+            let (before, env) = world.before_hooks();
+            let records = RecordsHook { election: Address::ZERO, elect_gas: 0, ..hook };
+            let (_, reference) =
+                hooks_on(&before, &env, &records, records.envelope_gas().unwrap()).unwrap();
+            let (out, st) = hooks_on(&before, &env, &records, BATCH_ALLOWANCE_REQUIREMENT).unwrap();
+            assert_eq!(out.applied, 32, "{}", s.name);
+            assert_eq!(health_of(&st), 0, "{}", s.name);
+            for a in &fixture().accounts {
+                assert_eq!(
+                    st.storage_of(a.address),
+                    reference.storage_of(a.address),
+                    "{}: {} at a reservation of M_32",
+                    s.name,
+                    a.role
+                );
+            }
+        }
+    }
+}
+
+/// The fresh complete-path measurement VT-14's genesis plan records (bft-core b1state
+/// `VRHookMeasurement`, checked by `CheckVRHookGas`): R_32, B, the three combined fixtures and the
+/// largest election requirement, with the code they were taken over and the caps and ceilings they
+/// were taken at. Not part of the default run (it repeats the gas groups' searches); the genesis
+/// plan runs it explicitly:
+///
+///     VR_HOOK_MEASUREMENT=/path/vr-hook-measurement.json \
+///       cargo test -p reth-unicity-execution --test vr_hook -- --ignored --exact
+/// vr_hook_measurement
+#[test]
+#[ignore = "the genesis plan's fresh measurement; run explicitly"]
+fn vr_hook_measurement() {
+    use sha2::{Digest, Sha256};
+    let min_records = |name: &str| measure(scenario(name)).min_records;
+    let records = min_records("batch32-max");
+    let boundary = min_records("switch-max");
+    let combined: Vec<_> = COMBINED
+        .iter()
+        .map(|c| serde_json::json!({"name": c, "records": 32, "reservation": min_records(c)}))
+        .collect();
+    let elect = ["elect-max", "native-worst", "poa-elect-16", "poa-elect-search"]
+        .iter()
+        .map(|n| measure(scenario(n)).min_elect)
+        .max()
+        .unwrap();
+    let code = |role: &str| {
+        let a = fixture().accounts.iter().find(|a| a.role == role).unwrap();
+        format!("{}", keccak256(&a.code))
+    };
+    let caps = serde_json::json!({
+        "elect": CAP_ELECT, "output": CAP_OUTPUT, "record": CAP_RECORD, "resolved": CAP_RESOLVED,
+        "attach": CAP_ATTACH, "detach": CAP_DETACH, "gov": 1_000_000u64, "adopt": CAP_ADOPT,
+    });
+    let ceilings: serde_json::Map<String, serde_json::Value> =
+        CEILINGS.iter().map(|(k, v)| (k.to_string(), (*v).into())).collect();
+    let doc = serde_json::json!({
+        "invariant": "vr-v1-single-live-output",
+        "h": 32,
+        "registry": format!("{VR}").to_lowercase(),
+        "registryCodeHash": code("vr"),
+        "moduleCodeHash": code("poa"),
+        "caps": caps,
+        "ceilings": ceilings,
+        "records": records,
+        "boundary": boundary,
+        "combined": combined,
+        "elect": elect,
+        "source": format!(
+            "ureth tests/vr_hook.rs over testdata/vr-hook.json sha256 {} ({FIXTURE_SOURCE})",
+            B256::from_slice(&Sha256::digest(FIXTURE.as_bytes()))
+        ),
+    });
+    let text = serde_json::to_string_pretty(&doc).unwrap() + "\n";
+    println!("{text}");
+    if let Ok(path) = std::env::var("VR_HOOK_MEASUREMENT") {
+        std::fs::write(&path, &text).unwrap();
+        println!("vr-hook: wrote the measurement to {path}");
     }
 }
