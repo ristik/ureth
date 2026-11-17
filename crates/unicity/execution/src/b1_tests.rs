@@ -9,7 +9,7 @@ use crate::{
     update::{admit, B1Context, Entry, Update, UpdateBinding, UpdateError},
     ExecutionConfig, ExecutionError, ExecutionResult, RootInputV2, UpdateInput, SEAL_REGISTRY,
 };
-use alloy_primitives::{keccak256, B256, U256};
+use alloy_primitives::{b256, keccak256, B256, U256};
 use revm::{
     database::{CacheDB, EmptyDB},
     DatabaseRef,
@@ -1094,6 +1094,104 @@ mod import {
         assert_eq!(slot_value(&db, closure_key(4, h_record, 100)), B256::ZERO, "another epoch");
         assert_eq!(slot_value(&db, retirement_key(7, 1)), u(4));
         assert_eq!(slot_value(&db, retirement_key(7, 2)), B256::ZERO, "another generation");
+    }
+
+    /// `keccak256(abi.encode(F("records.retirement.v2"), uint256(holder), uint64(id),
+    /// uint64(generation)))`, the `SealRegistry`'s dedup key of record kind 8 (schema v1
+    /// `RECORDS_RETIREMENT_V2`).
+    fn retirement_v2_key(holder: u64, id: u64, generation: u64) -> B256 {
+        keccak256(
+            (f("records.retirement.v2"), U256::from(holder), id, generation).abi_encode_params(),
+        )
+    }
+
+    /// The validator-registry kinds 6 to 8 between P85 kinds: `Boundary`, `OutputRejected` and its
+    /// `SessionClosed`, `HolderRetirement`.
+    fn registry_kinds() -> Vec<RecordEntry> {
+        let rid = B256::repeat_byte(0x81);
+        let rejected = B256::repeat_byte(0x82);
+        let mut out: Vec<RecordEntry> = Vec::new();
+        let mut push = |kind: u8, data: Vec<u8>| {
+            let pred = out.last().map_or(B256::ZERO, |e| e.record_id);
+            let i = out.len() as u64;
+            out.push(make(i, pred, kind, 10 + i, 1_000 + i, data, 0));
+        };
+        push(2, words(&[rid, u(100), u(100), u(101)]));
+        push(6, words(&[rid, u(5), u(6), u(8), u(1_300), u(1), u(0xffff)]));
+        push(7, words(&[rejected, u(1), u(0), u(0b101)]));
+        push(1, words(&[rejected]));
+        push(8, words(&[u(7), u(u64::MAX), u(1), B256::repeat_byte(0x83)]));
+        out
+    }
+
+    #[test]
+    fn the_registry_kinds_land_in_the_documented_registry_words() {
+        // the schema v1 vector "retirement v2 dedup key" (holder 0, id 7, generation 1)
+        assert_eq!(
+            retirement_v2_key(0, 7, 1),
+            b256!("ac23f3e3ea63434732ba84a3e1a54563d2effcc245ef48fdbdcd922eb29feb76")
+        );
+        let log = registry_kinds();
+        let imp = import_of(&log, 5, 20, 1_100);
+        let (_, db) = run_imports(&[imp], world().system_gas).unwrap();
+        assert_eq!(slot_value(&db, f("records.count")), u(5));
+        for e in &log {
+            let i = e.index;
+            assert_eq!(slot_value(&db, entry_slot(i, 2)), u(u64::from(e.kind)));
+            assert_eq!(slot_value(&db, entry_slot(i, 5)), u(e.data.len() as u64));
+            for j in 0..9u64 {
+                let want = e.data.chunks(32).nth(j as usize).map_or(B256::ZERO, B256::from_slice);
+                assert_eq!(slot_value(&db, entry_slot(i, 6 + j)), want, "record {i} word {j}");
+            }
+        }
+        assert_eq!(slot_value(&db, retirement_v2_key(7, u64::MAX, 1)), u(5), "first index + 1");
+        assert_eq!(
+            slot_value(&db, retirement_v2_key(6, u64::MAX, 1)),
+            B256::ZERO,
+            "another holder"
+        );
+        assert_eq!(slot_value(&db, retirement_key(u64::MAX, 1)), B256::ZERO, "not the pre-VR key");
+    }
+
+    #[test]
+    fn a_second_holder_retirement_of_one_key_reverts_the_import() {
+        let mut log = registry_kinds();
+        let pred = log.last().unwrap().record_id;
+        let again = log[4].data.clone();
+        log.push(make(5, pred, 8, 20, 1_020, again, 0));
+        let imp = import_of(&log, 6, 30, 1_100);
+        assert!(run_imports(&[imp], world().system_gas).is_err());
+    }
+
+    /// 32 records of one kind, every payload word distinct and nonzero where the kind allows it.
+    fn thirty_two(kind: u8) -> RecordImport {
+        let mut log: Vec<RecordEntry> = Vec::new();
+        for i in 0..32u64 {
+            let pred = log.last().map_or(B256::ZERO, |e| e.record_id);
+            let rid = B256::repeat_byte(i as u8 + 1);
+            let data = match kind {
+                6 => words(&[rid, u(i + 100), u(i + 101), u(i + 200), u(i + 300), u(1), u(0xffff)]),
+                _ => words(&[u(i % 8), u(i + 1), u(i + 1_000), rid]),
+            };
+            log.push(make(i, pred, kind, 10 + i, 1_000 + i, data, 0));
+        }
+        import_of(&log, 32, 100, 2_000)
+    }
+
+    #[test]
+    fn maximal_imports_of_the_registry_kinds_stay_below_the_recovery_ack() {
+        let (recovery, _) = run_imports(&[maximal()], world().system_gas).unwrap();
+        for kind in [6u8, 8] {
+            let (result, db) = run_imports(&[thirty_two(kind)], world().system_gas).unwrap();
+            assert_eq!(slot_value(&db, f("records.count")), u(32));
+            assert!(
+                result.import_gas_spent < recovery.import_gas_spent,
+                "kind {kind}: {} against the nine-word measurement {}",
+                result.import_gas_spent,
+                recovery.import_gas_spent
+            );
+            println!("p85-import: 32 kind {kind} records gross {}", result.import_gas_spent);
+        }
     }
 
     #[test]

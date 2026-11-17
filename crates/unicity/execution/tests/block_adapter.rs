@@ -1208,10 +1208,11 @@ fn the_real_custody_applies_real_records_to_exactly_the_state_forge_computed() {
 
 #[test]
 fn a_record_the_real_custody_cannot_apply_invalidates_the_block() {
-    // an Ack of a session that was never reserved: the registry imports it (it checks the log, not
-    // custody), custody reverts
+    // an Ack of the reserved session whose replaced H round precedes the incumbent's first round:
+    // the registry imports it (it checks the log, not custody), custody reverts. (An Ack of a
+    // session custody never reserved is a foreign no-op since VT-15, see the test below.)
     let r = real("ack", |records, _| {
-        records[0].data[0] ^= 1;
+        records[0].data[32..64].fill(0);
         let e = &records[0];
         records[0] = testing::record_entry(
             e.index,
@@ -1267,6 +1268,26 @@ fn h_above_the_deployed_custodys_max_batch_invalidates_the_block() {
     assert!(err.to_string().contains("HExceedsMaxBatch"), "{err}");
     // within the limit the same state applies
     assert!(!r.world.build(pinned(r.custody, 1)).1.storage_of(r.custody).is_empty());
+}
+
+#[test]
+fn a_record_of_a_result_the_real_custody_never_had_is_consumed() {
+    // validator-registry design section 4.2: an Ack of a result with no custody session is a
+    // foreign no-op that advances custody's cursor; the block is valid
+    let r = real("ack", |records, _| {
+        records[0].data[0] ^= 1;
+        let e = &records[0];
+        records[0] = testing::record_entry(
+            e.index,
+            e.predecessor,
+            e.kind,
+            e.progress,
+            e.uc_time,
+            e.data.clone(),
+        );
+    });
+    let (_, after) = r.world.build(pinned(r.custody, 1));
+    assert!(!after.storage_of(r.custody).is_empty(), "custody consumed the record");
 }
 
 // ---- the real ElectionPolicy in the hook
