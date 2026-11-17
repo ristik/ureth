@@ -64,6 +64,43 @@ use support::{
 };
 
 const FIXTURE: &str = include_str!("../testdata/vr-hook.json");
+/// SHA-256 of `testdata/vr-hook.json`: a verbatim copy of unicity-pos-contracts
+/// `test/vr/fixtures/vr-hook.json` at `FIXTURE_SOURCE`, whose CI regenerates that file and compares
+/// it byte for byte. A changed copy here, or a regenerated file there, shows as a mismatch.
+const FIXTURE_SHA256: B256 =
+    alloy_primitives::b256!("f9fc4c9be54a87a9062a647d44ef1d539696b028e15ebc2fae2dd8dc5c23f1d0");
+/// The unicity-pos-contracts commit the fixture was copied from.
+const FIXTURE_SOURCE: &str = "f4397fc (ristik/unicity-pos-contracts#89)";
+/// Every scenario the generator (`test/vr/VRHookState.t.sol`) dumps, exactly.
+const SCENARIOS: [&str; 27] = [
+    "attach-revert",
+    "boundary-worst",
+    "elect-grief",
+    "elect-huge",
+    "elect-malformed",
+    "elect-oog",
+    "elect-reenter",
+    "elect-reenter-bubble",
+    "elect-revert",
+    "elect-write-revert",
+    "holder-batch",
+    "native-worst",
+    "output-huge",
+    "output-invalid",
+    "output-malformed",
+    "poa-elect",
+    "poa-elect-16",
+    "poa-elect-search",
+    "poa-rejected",
+    "poa-switch",
+    "records-huge",
+    "records-oog",
+    "records-reenter",
+    "records-revert",
+    "records-word",
+    "resolved-oog",
+    "resolved-revert",
+];
 const VR: Address = address!("ff00000000000000000000000000000000000003");
 const FEE_COLLECTOR: Address = Address::new([0x77; 20]);
 
@@ -517,6 +554,12 @@ fn check_views(after: &FixtureProvider, s: &Scenario) {
 /// pins, and the VR hashes the fixture carries are reported (VT-14 pins them).
 #[test]
 fn the_fixture_runs_contracts_main_bytecode() {
+    use sha2::{Digest, Sha256};
+    assert_eq!(
+        B256::from_slice(&Sha256::digest(FIXTURE.as_bytes())),
+        FIXTURE_SHA256,
+        "testdata/vr-hook.json is not the copy of unicity-pos-contracts {FIXTURE_SOURCE}"
+    );
     let genesis: serde_json::Value =
         serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
     let code: Bytes = genesis["alloc"]["0xff00000000000000000000000000000000000002"]["code"]
@@ -549,7 +592,8 @@ fn the_fixture_runs_contracts_main_bytecode() {
 /// the modules in exactly the state forge computed; the hook reports forge's outcome.
 #[test]
 fn every_scenario_reproduces_forge_through_the_block_path() {
-    assert!(fixture().scenarios.len() >= 27);
+    let names: Vec<&str> = fixture().scenarios.iter().map(|s| s.name.as_str()).collect();
+    assert_eq!(names, SCENARIOS, "exactly the generator's scenarios");
     for s in &fixture().scenarios {
         let world = World::new(s);
         let hook = pinned(s);
@@ -805,7 +849,7 @@ fn hook_gas_stays_within_the_provisional_profile_pins() {
 
 /// An under-priced election is contained too: below the contained step's requirement VR reports
 /// `BudgetShort` and answers Disabled (no reservation, no fault), and the block stays valid. That
-/// is a mis-pinned profile (an acceptance failure for the pin), never a chain halt.
+/// is a pin set too low (an acceptance failure for the pin), never a chain halt.
 #[test]
 fn an_election_priced_below_the_step_budget_is_disabled_not_invalid() {
     let s = scenario("poa-elect");
