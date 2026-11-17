@@ -974,9 +974,10 @@ fn the_module_switch_works_through_the_hook() {
     assert_eq!(holderCountCall::abi_decode_returns(&out).unwrap(), 0);
 }
 
-/// The smallest `g` in `[lo, hi]` for which `ok` holds (monotone), exactly.
+/// The smallest `g` in `(lo, hi]` for which `ok` holds (monotone), exactly.
 fn threshold(mut lo: u64, mut hi: u64, ok: impl Fn(u64) -> bool) -> u64 {
     assert!(ok(hi), "not even {hi} suffices");
+    assert!(!ok(lo), "{lo} already suffices");
     while hi - lo > 1 {
         let mid = lo + (hi - lo) / 2;
         if ok(mid) {
@@ -988,12 +989,87 @@ fn threshold(mut lo: u64, mut hi: u64, ok: impl Fn(u64) -> bool) -> u64 {
     hi
 }
 
-/// Gas against the provisional pins: each scenario's records and election cost, measured on the
-/// hook's own meter, and the smallest reservation at which the hook still reproduces forge (below
-/// it a contained step is `BudgetShort` or VR runs out of gas), all within `HookRecordGas` per
-/// record and `ElectGas`.
-#[test]
-fn hook_gas_stays_within_the_provisional_profile_pins() {
+/// One scenario's hook gas: what the records step and the election spend at the pins, and the
+/// smallest reservation of each at which the hook still reproduces forge (below it a contained
+/// step is `BudgetShort` or VR runs out of gas).
+struct HookGas {
+    records_gas: u64,
+    elect_gas: u64,
+    min_records: u64,
+    min_elect: u64,
+}
+
+/// Measures a scenario and checks it against the pins. The records threshold is searched with the
+/// election off, from the state before the hooks; the election threshold from the state after the
+/// records step (the hook then only reads the caught-up cursor before electing), so a search never
+/// repeats the other step's work. Neither search can succeed below the gas the step spends at the
+/// pins, which bounds it from below.
+fn measure(s: &Scenario) -> HookGas {
+    let world = World::new(s);
+    let (before, env) = world.before_hooks();
+    let n = s.expect.applied;
+    let hook = pinned(s);
+    let records_only = RecordsHook { election: Address::ZERO, elect_gas: 0, ..hook };
+    let (r, after_records) =
+        hooks_on(&before, &env, &records_only, records_only.envelope_gas().unwrap()).unwrap();
+    let (both, _) = hooks_on(&before, &env, &hook, hook.envelope_gas().unwrap()).unwrap();
+    let records_gas = r.gas_spent;
+    let elect_gas = both.gas_spent - r.gas_spent;
+    assert!(records_gas <= HOOK_READS_GAS + n.max(1) * HOOK_RECORD_GAS, "{}", s.name);
+    assert!(records_gas <= HOOK_READS_GAS + u64::from(s.h) * HOOK_RECORD_GAS, "{}", s.name);
+    assert!(elect_gas <= ELECT_GAS, "{}: elect {elect_gas}", s.name);
+
+    let min_records = if n == 0 {
+        0
+    } else {
+        let lands = |budget: u64| {
+            hooks_on(&before, &env, &records_only, budget)
+                .map(|(o, st)| {
+                    o.applied == n &&
+                        fixture().accounts.iter().all(|a| {
+                            st.storage_of(a.address) == after_records.storage_of(a.address)
+                        })
+                })
+                .unwrap_or(false)
+        };
+        // the requirement sits a few million above the spend (the contained steps' reserves); the
+        // envelope bounds it in any case
+        let envelope = records_only.envelope_gas().unwrap();
+        let near = (records_gas + 4_000_000).min(envelope);
+        threshold(records_gas - 1, if lands(near) { near } else { envelope }, lands)
+    };
+    let (reads, _) = hooks_on(&after_records, &env, &records_only, HOOK_READS_GAS).unwrap();
+    let min_elect = threshold(elect_gas.saturating_sub(1), ELECT_GAS, |g| {
+        let h = RecordsHook { elect_gas: g, ..hook };
+        hooks_on(&after_records, &env, &h, reads.gas_spent + g)
+            .map(|(o, st)| o.elected == Some(s.expect.outcome) && diff_hooks(&st, s).is_empty())
+            .unwrap_or(false)
+    });
+    assert!(min_records <= HOOK_READS_GAS + n * HOOK_RECORD_GAS, "{}", s.name);
+    assert!(n == 0 || min_records.div_ceil(n) <= RECORD_REQUIREMENT, "{}: {min_records}", s.name);
+    assert!(min_elect <= ELECT_REQUIREMENT, "{}: {min_elect}", s.name);
+    assert!(min_elect <= ELECT_GAS, "{}", s.name);
+    println!(
+        "vr-hook: {:<22} {:>3} {:>10} {:>10} {:>11} {:>11}",
+        s.name, n, records_gas, elect_gas, min_records, min_elect
+    );
+    HookGas { records_gas, elect_gas, min_records, min_elect }
+}
+
+/// Which gas test measures a scenario. The groups split the measurement so each test fits CI's
+/// per-test limit; together they cover every scenario exactly once.
+fn gas_group(s: &Scenario) -> &'static str {
+    match s.name.as_str() {
+        "batch32-max" => "h32-healthy",
+        "batch32-exhausted" => "h32-exhausted",
+        "elect-max" => "max-election",
+        "switch-max" => "max-switch",
+        _ if s.expect.applied == 0 => "elections",
+        _ => "record-batches",
+    }
+}
+
+fn measure_group(group: &str) -> Vec<(&'static Scenario, HookGas)> {
     println!(
         "vr-hook: provisional pins: ElectGas {ELECT_GAS} = ceil(5/4 x max(analytical {ELECT_ANALYTICAL}, measured {ELECT_REQUIREMENT})), HookRecordGas {HOOK_RECORD_GAS} = ceil(5/4 x max(analytical {RECORD_ANALYTICAL}, measured {RECORD_REQUIREMENT}))"
     );
@@ -1001,69 +1077,110 @@ fn hook_gas_stays_within_the_provisional_profile_pins() {
         "vr-hook: {:<22} {:>3} {:>10} {:>10} {:>11} {:>11}",
         "scenario", "n", "records", "elect", "min records", "min elect"
     );
-    let mut worst_elect = (0u64, "");
-    let mut worst_record = (0u64, "");
-    for s in &fixture().scenarios {
-        let world = World::new(s);
-        let (before, env) = world.before_hooks();
-        let n = s.expect.applied;
-        let hook = pinned(s);
-        // the records step alone, then both steps: the election's cost is the difference
-        let records_only = RecordsHook { election: Address::ZERO, elect_gas: 0, ..hook };
-        let (r, reference) =
-            hooks_on(&before, &env, &records_only, records_only.envelope_gas().unwrap()).unwrap();
-        let (both, _) = hooks_on(&before, &env, &hook, hook.envelope_gas().unwrap()).unwrap();
-        let records_gas = r.gas_spent;
-        let elect_gas = both.gas_spent - r.gas_spent;
-        assert!(records_gas <= HOOK_READS_GAS + n.max(1) * HOOK_RECORD_GAS, "{}", s.name);
-        assert!(records_gas <= HOOK_READS_GAS + u64::from(s.h) * HOOK_RECORD_GAS, "{}", s.name);
-        assert!(elect_gas <= ELECT_GAS, "{}: elect {elect_gas}", s.name);
+    let all: Vec<_> = fixture()
+        .scenarios
+        .iter()
+        .filter(|s| gas_group(s) == group)
+        .map(|s| (s, measure(s)))
+        .collect();
+    assert!(!all.is_empty(), "{group}");
+    all
+}
 
-        // the smallest budget for the records step that still lands on the reference state
-        let min_records = if n == 0 {
-            0
-        } else {
-            threshold(0, records_only.envelope_gas().unwrap(), |budget| {
-                hooks_on(&before, &env, &records_only, budget)
-                    .map(|(o, st)| {
-                        o.applied == n &&
-                            fixture().accounts.iter().all(|a| {
-                                st.storage_of(a.address) == reference.storage_of(a.address)
-                            })
-                    })
-                    .unwrap_or(false)
-            })
-        };
-        // the smallest elect reservation that still reproduces forge's outcome and state
-        let min_elect = threshold(1, ELECT_GAS, |g| {
-            let h = RecordsHook { elect_gas: g, ..hook };
-            hooks_on(&before, &env, &h, h.envelope_gas().unwrap())
-                .map(|(o, st)| o.elected == Some(s.expect.outcome) && diff_hooks(&st, s).is_empty())
-                .unwrap_or(false)
-        });
-        assert!(min_records <= HOOK_READS_GAS + n * HOOK_RECORD_GAS, "{}", s.name);
-        assert!(
-            n == 0 || min_records.div_ceil(n) <= RECORD_REQUIREMENT,
-            "{}: {min_records}",
-            s.name
-        );
-        assert!(min_elect <= ELECT_REQUIREMENT, "{}: {min_elect}", s.name);
-        assert!(min_elect <= ELECT_GAS, "{}", s.name);
-        if n > 0 && min_records / n > worst_record.0 {
-            worst_record = (min_records / n, &s.name);
-        }
-        if min_elect > worst_elect.0 {
-            worst_elect = (min_elect, &s.name);
-        }
-        println!(
-            "vr-hook: {:<22} {:>3} {:>10} {:>10} {:>11} {:>11}",
-            s.name, n, records_gas, elect_gas, min_records, min_elect
-        );
+/// Gas against the provisional pins for every scenario, in six groups: each scenario's records
+/// and election cost on the hook's own meter, and the smallest reservations that still reproduce
+/// forge, all within `HookRecordGas` per record and `ElectGas`.
+#[test]
+fn hook_gas_groups_cover_every_scenario() {
+    let groups = [
+        "elections",
+        "record-batches",
+        "h32-healthy",
+        "h32-exhausted",
+        "max-election",
+        "max-switch",
+    ];
+    for s in &fixture().scenarios {
+        assert!(groups.contains(&gas_group(s)), "{}", s.name);
     }
+    let elections = fixture().scenarios.iter().filter(|s| gas_group(s) == "elections").count();
+    let batches = fixture().scenarios.iter().filter(|s| gas_group(s) == "record-batches").count();
+    assert_eq!(elections + batches + 4, SCENARIOS.len());
+}
+
+#[test]
+fn hook_gas_elections_within_the_pins() {
+    let all = measure_group("elections");
+    let (s, worst) = all.iter().max_by_key(|(_, g)| g.min_elect).unwrap();
     println!(
-        "vr-hook: worst min elect {} ({}) against ElectGas {ELECT_GAS}; worst min records per record {} ({}) against HookRecordGas {HOOK_RECORD_GAS}",
-        worst_elect.0, worst_elect.1, worst_record.0, worst_record.1
+        "vr-hook: worst min elect {} ({}) against ElectGas {ELECT_GAS}",
+        worst.min_elect, s.name
     );
+}
+
+#[test]
+fn hook_gas_record_batches_within_the_pins() {
+    let all = measure_group("record-batches");
+    let (s, worst) =
+        all.iter().max_by_key(|(s, g)| g.min_records.div_ceil(s.expect.applied)).unwrap();
+    println!(
+        "vr-hook: worst min records per record {} ({}) against HookRecordGas {HOOK_RECORD_GAS}",
+        worst.min_records.div_ceil(s.expect.applied),
+        s.name
+    );
+}
+
+/// H = 32 at the maximum record cap, a healthy delivery burning its 48 M cap.
+#[test]
+fn hook_gas_full_h32_batch_at_the_maximum_record_cap() {
+    let [(s, g)] = measure_group("h32-healthy").try_into().ok().unwrap();
+    assert_eq!((s.h, s.expect.applied), (32, 32));
+    println!(
+        "vr-hook: max H=32 batch, onRecords at 32 x 1,500,000: records gas {}, min budget {} ({} per record) against H x HookRecordGas {}",
+        g.records_gas,
+        g.min_records,
+        g.min_records / 32,
+        32 * HOOK_RECORD_GAS
+    );
+    assert!(g.min_records <= HOOK_READS_GAS + 32 * HOOK_RECORD_GAS);
+}
+
+/// The same batch with onRecords exhausting its cap.
+#[test]
+fn hook_gas_full_h32_batch_with_an_exhausted_callback() {
+    let [(_, g)] = measure_group("h32-exhausted").try_into().ok().unwrap();
+    println!(
+        "vr-hook: max H=32 batch, onRecords exhausting its cap: records gas {}, min budget {}",
+        g.records_gas, g.min_records
+    );
+    assert!(g.min_records <= HOOK_READS_GAS + 32 * HOOK_RECORD_GAS);
+}
+
+/// The compound election at the maximum caps: its complete requirement exceeds the contained step
+/// alone and is the recorded one.
+#[test]
+fn hook_gas_compound_election_at_the_maximum_caps() {
+    let [(_, g)] = measure_group("max-election").try_into().ok().unwrap();
+    println!(
+        "vr-hook: max compound election (caps 4,000,000 + 1,000,000, 16 members, 16 changes, 64 KiB): elect gas {}, min ElectGas {} against ElectGas {ELECT_GAS} (cap-based step {ELECT_ANALYTICAL})",
+        g.elect_gas, g.min_elect
+    );
+    assert_eq!(g.min_elect, ELECT_REQUIREMENT, "the recorded requirement is this measurement");
+    assert!(g.min_elect > ELECT_ANALYTICAL, "the step alone is not the whole requirement");
+}
+
+/// The 16-member switching Boundary at the maximum caps, delivered alone: its requirement is the
+/// recorded per-record one, above the small-payload analytical figure.
+#[test]
+fn hook_gas_switching_boundary_alone_at_the_maximum_caps() {
+    let [(_, g)] = measure_group("max-switch").try_into().ok().unwrap();
+    println!(
+        "vr-hook: max switching Boundary alone (16 installed, 15 activated, 64 KiB, callbacks at 500,000 / 1,000,000 / 1,500,000 / 500,000 / 3,000,000): records gas {}, min budget {} against HookRecordGas {HOOK_RECORD_GAS} (analytical {RECORD_ANALYTICAL})",
+        g.records_gas, g.min_records
+    );
+    assert_eq!(g.min_records, RECORD_REQUIREMENT, "the recorded requirement is this measurement");
+    assert!(g.min_records > RECORD_ANALYTICAL, "the small-payload analytical figure is too low");
+    assert!(g.min_records <= HOOK_READS_GAS + HOOK_RECORD_GAS);
 }
 
 /// An election priced below the contained step's requirement but above VR's own pre-step work: VR
@@ -1091,43 +1208,12 @@ fn an_election_priced_below_the_step_budget_is_disabled_not_invalid() {
 /// The maximum compound paths at VR's maximum accepted caps (design 3.3.4), each through the real
 /// block path: callbacks ran with the right content and the module stayed Healthy where they
 /// answered; the cursor moved by exactly the batch, the failing frame rolled back and the module
-/// was Faulted where one exhausted its cap. Prints the measurements against the pins.
+/// was Faulted where one exhausted its cap. Their gas is measured by the `hook_gas_*` tests.
 #[test]
-fn the_maximum_compound_paths_run_within_the_pins() {
+fn the_maximum_compound_paths_run_as_forge_computed() {
     let mock = account("mock");
     let next = account("mockNext");
     let r = keccak256("R");
-    let measure = |s: &Scenario| {
-        let world = World::new(s);
-        let (before, env) = world.before_hooks();
-        let hook = pinned(s);
-        let records_only = RecordsHook { election: Address::ZERO, elect_gas: 0, ..hook };
-        let (rec, reference) =
-            hooks_on(&before, &env, &records_only, records_only.envelope_gas().unwrap()).unwrap();
-        let (both, _) = hooks_on(&before, &env, &hook, hook.envelope_gas().unwrap()).unwrap();
-        let min_records = if s.expect.applied == 0 {
-            0
-        } else {
-            threshold(0, records_only.envelope_gas().unwrap(), |budget| {
-                hooks_on(&before, &env, &records_only, budget)
-                    .map(|(o, st)| {
-                        o.applied == s.expect.applied &&
-                            fixture().accounts.iter().all(|a| {
-                                st.storage_of(a.address) == reference.storage_of(a.address)
-                            })
-                    })
-                    .unwrap_or(false)
-            })
-        };
-        let min_elect = threshold(1, ELECT_GAS, |g| {
-            let h = RecordsHook { elect_gas: g, ..hook };
-            hooks_on(&before, &env, &h, h.envelope_gas().unwrap())
-                .map(|(o, st)| o.elected == Some(s.expect.outcome) && diff_hooks(&st, s).is_empty())
-                .unwrap_or(false)
-        });
-        (rec.gas_spent, both.gas_spent - rec.gas_spent, min_records, min_elect)
-    };
-
     // H = 32 at the maximum record cap, a healthy delivery burning its 48 M cap
     let s = scenario("batch32-max");
     assert_eq!((s.h, s.records.len(), s.expect.applied), (32, 32, 32));
@@ -1135,13 +1221,6 @@ fn the_maximum_compound_paths_run_within_the_pins() {
     assert_eq!(health_of(&after), 0);
     assert_eq!(module_log(&after, mock), ["onResolved:1", "onRecords:0:32", "elect"]);
     assert_eq!(output_state(&after, r), 5, "R Acknowledged");
-    let (g, _, min, _) = measure(s);
-    println!(
-        "vr-hook: max H=32 batch, onRecords at 32 x 1,500,000: records gas {g}, min budget {min} ({} per record) against H x HookRecordGas {}",
-        min / 32,
-        32 * HOOK_RECORD_GAS
-    );
-    assert!(min <= HOOK_READS_GAS + 32 * HOOK_RECORD_GAS);
 
     // the same batch with onRecords exhausting its cap: applied, rolled back, Faulted
     let s = scenario("batch32-exhausted");
@@ -1151,10 +1230,6 @@ fn the_maximum_compound_paths_run_within_the_pins() {
     assert_eq!(output_state(&after, r), 5, "the records applied regardless");
     let cursor = call(&after, VR, recordCursorCall {});
     assert_eq!(cursor, 32);
-    let (g, _, min, _) = measure(s);
-    println!(
-        "vr-hook: max H=32 batch, onRecords exhausting its cap: records gas {g}, min budget {min}"
-    );
 
     // the compound election at the maximum caps: 16 members, 16 bound changes (64 KiB of payloads)
     let s = scenario("elect-max");
@@ -1162,13 +1237,6 @@ fn the_maximum_compound_paths_run_within_the_pins() {
     assert_eq!(health_of(&after), 0);
     assert_eq!(output_state(&after, r), 2, "R Published");
     assert_eq!(module_log(&after, mock).last().map(String::as_str), Some("elect"));
-    let (_, g, _, min) = measure(s);
-    println!(
-        "vr-hook: max compound election (caps 4,000,000 + 1,000,000, 16 members, 16 changes, 64 KiB): elect gas {g}, min ElectGas {min} against ElectGas {ELECT_GAS} (cap-based requirement {})",
-        elect_need(CAP_ELECT, CAP_OUTPUT)
-    );
-    assert!(min <= ELECT_REQUIREMENT, "the recorded requirement covers the election");
-    assert!(min > ELECT_ANALYTICAL, "the step alone is not the whole requirement");
 
     // the 16-member switching Boundary at the maximum caps, delivered a block after its Ack
     let s = scenario("switch-max");
@@ -1184,16 +1252,6 @@ fn the_maximum_compound_paths_run_within_the_pins() {
     assert_eq!(call(&after, next, attachMembersCall {}), U256::from(16));
     assert_eq!(call(&after, next, attachPreviousCall {}), mock);
     assert_eq!(call(&after, VR, holderCountCall {}), 1);
-    let (g, _, min, _) = measure(s);
-    println!(
-        "vr-hook: max switching Boundary alone (16 installed, 15 activated, 64 KiB, callbacks at 500,000 / 1,000,000 / 1,500,000 / 500,000 / 3,000,000): records gas {g}, min budget {min} against HookRecordGas {HOOK_RECORD_GAS} (analytical {RECORD_ANALYTICAL})"
-    );
-    assert!(min <= RECORD_REQUIREMENT, "the recorded requirement covers the Boundary");
-    assert!(min > RECORD_ANALYTICAL, "the small-payload analytical figure is too low");
-    assert!(
-        min <= HOOK_READS_GAS + HOOK_RECORD_GAS,
-        "one record's reservation covers the Boundary"
-    );
 }
 
 /// Fault attribution through public transactions after the hooks (design 11, VT-02): the hook
