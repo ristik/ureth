@@ -219,7 +219,7 @@ const HOOK_RECORD_GAS: u64 = pin(max(RECORD_ANALYTICAL, RECORD_REQUIREMENT));
 const BATCH_REQUIREMENT: u64 = 52_262_738;
 /// `M_32 = R_32 + B`, B the complete switching Boundary delivered alone (`RECORD_REQUIREMENT`).
 const BATCH_ALLOWANCE_REQUIREMENT: u64 = BATCH_REQUIREMENT + RECORD_REQUIREMENT;
-/// The VR profile's `HookRecordGas`: ceil(ceil(5/4 x M_32) / 32).
+/// The VR profile's `HookRecordGas`: `ceil(ceil(5/4 x M_32) / 32)`.
 const VR_HOOK_RECORD_GAS: u64 = pin(BATCH_ALLOWANCE_REQUIREMENT).div_ceil(32);
 /// The combined fixtures: the switching output's Ack, 30 ordinary records and its Boundary in one
 /// H = 32 call, the switch at the start, middle or end (permanent acceptance cases).
@@ -1419,14 +1419,15 @@ fn every_scenario_runs_with_the_vr_batch_pins() {
 }
 
 /// The fresh complete-path measurement VT-14's genesis plan records (bft-core b1state
-/// `VRHookMeasurement`, checked by `CheckVRHookGas`): R_32, B, the three combined fixtures and the
-/// largest election requirement, with the code they were taken over and the caps and ceilings they
-/// were taken at. Not part of the default run (it repeats the gas groups' searches); the genesis
-/// plan runs it explicitly:
+/// `VRHookMeasurement`, checked by `CheckVRHookGas`): `R_32`, B, the three combined fixtures and
+/// the largest election requirement, with the code they were taken over and the caps and ceilings
+/// they were taken at. Not part of the default run (it repeats the gas groups' searches); the
+/// genesis plan runs it explicitly (`VR_HOOK_MEASUREMENT` names the output file):
 ///
-///     VR_HOOK_MEASUREMENT=/path/vr-hook-measurement.json \
-///       cargo test -p reth-unicity-execution --test vr_hook -- --ignored --exact
-/// vr_hook_measurement
+/// ```text
+/// cargo test -p reth-unicity-execution --features test-utils --test vr_hook -- \
+///     --ignored --exact vr_hook_measurement
+/// ```
 #[test]
 #[ignore = "the genesis plan's fresh measurement; run explicitly"]
 fn vr_hook_measurement() {
