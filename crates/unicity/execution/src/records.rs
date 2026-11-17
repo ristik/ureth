@@ -15,8 +15,9 @@
 //! 1. the byte cap (`16384`) is checked before anything is read;
 //! 2. `G_R_scan = 2000 + 16*C_R` is reserved from the system budget before the structural scan;
 //! 3. the allocation-free scan enforces the six-field envelope, eight-field entries, `N <= 32`,
-//!    exact scalar and payload widths, definite shortest encodings, depth and token bounds, with no
-//!    tags, maps, nulls or trailing bytes, and reports `N`;
+//!    exact scalar and payload widths, canonical payload words and the cross-field rules of kinds 6
+//!    to 8 ([`check_payload`]), definite shortest encodings, depth and token bounds, with no tags,
+//!    maps, nulls or trailing bytes, and reports `N`;
 //! 4. `G_R_entries = 1000*N` is reserved before any entry is allocated or decoded;
 //! 5. the bytes must hash to the committed value.
 //!
@@ -50,12 +51,38 @@ pub const ENTRY_GAS: u64 = 1_000;
 pub const MAX_ADMISSION_GAS: u64 =
     SCAN_BASE_GAS + SCAN_BYTE_GAS * MAX_IMPORT_BYTES as u64 + ENTRY_GAS * MAX_IMPORT_ENTRIES as u64;
 
+/// Record kinds (bft-core `rootrecords`; kinds 6 to 8 are validator-registry schema v1 section 7).
+pub mod kind {
+    /// The closing of an election result.
+    pub const SESSION_CLOSED: u8 = 1;
+    /// The acknowledgement of one handoff.
+    pub const ACK: u8 = 2;
+    /// The acknowledgement of a primary and its recovery.
+    pub const RECOVERY_ACK: u8 = 3;
+    /// A liability closure.
+    pub const CLOSURE: u8 = 4;
+    /// A retirement (pre-VR generations).
+    pub const RETIREMENT: u8 = 5;
+    /// The EVM transition of an acknowledged result.
+    pub const BOUNDARY: u8 = 6;
+    /// Why a result was rejected; precedes its `SessionClosed`.
+    pub const OUTPUT_REJECTED: u8 = 7;
+    /// A holder-scoped retirement authorization.
+    pub const HOLDER_RETIREMENT: u8 = 8;
+}
+
+/// `MAX_HOLDERS`: a `HolderRetirement` names a holder below it.
+pub const MAX_HOLDERS: u64 = 8;
+
 /// A bound on the gross gas of the privileged `importRootRecords` call for 32 maximal entries.
 /// `b1_tests::import::the_maximal_import_stays_inside_the_envelope_bound` executes the most
 /// expensive legal import (32 nine-word records, every word fresh and nonzero) on the pinned
 /// runtime (11,169,634 gross) and requires it to stay within two thirds of this figure, the 3/2
 /// safety factor the registry's own `G_rest` uses. It is a price, not a proof; bft-core's
-/// `b1state.ImportExecutionGas` is the same figure.
+/// `b1state.ImportExecutionGas` is the same figure. Kinds 6 to 8 are at most seven words (a
+/// `HolderRetirement` writes four words and its dedup key), so they stay inside the nine-word
+/// measurement:
+/// `b1_tests::import::maximal_imports_of_the_registry_kinds_stay_below_the_recovery_ack`.
 pub const IMPORT_EXECUTION_GAS: u64 = 18_000_000;
 /// The import's share of the system envelope: the largest admission charge plus the execution
 /// bound.
@@ -103,7 +130,7 @@ pub struct RecordEntry {
     pub record_id: B256,
     /// Previous record identifier.
     pub predecessor: B256,
-    /// Record kind, 1 to 5.
+    /// Record kind, 1 to 8.
     pub kind: u8,
     /// Canonical progress anchor.
     pub progress: u64,
@@ -157,8 +184,15 @@ pub enum ImportError {
     Domain,
     /// More than 32 entries.
     TooManyEntries(usize),
-    /// A kind outside 1 to 5.
+    /// A kind outside 1 to 8.
     UnknownKind(u64),
+    /// A payload of the exact width whose words are not the kind's canonical words.
+    Payload {
+        /// Record kind.
+        kind: u8,
+        /// The refused rule.
+        error: PayloadError,
+    },
     /// A payload whose width is not the kind's exact width.
     PayloadWidth {
         /// Record kind.
@@ -192,16 +226,247 @@ impl std::fmt::Display for ImportError {
 
 impl std::error::Error for ImportError {}
 
-/// The exact payload width of a record kind, or `None` for a kind outside 1 to 5.
+/// The exact payload width of a record kind, or `None` for a kind outside 1 to 8.
 pub const fn payload_width(kind: u64) -> Option<usize> {
     match kind {
         1 => Some(32),
-        2 => Some(128),
+        2 | 7 | 8 => Some(128),
         3 => Some(288),
         4 => Some(192),
         5 => Some(96),
+        6 => Some(224),
         _ => None,
     }
+}
+
+/// The type of one payload word (bft-core `vrschema.RecordWordTypes`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WordType {
+    /// Any 32 bytes.
+    Bytes32,
+    /// A `uint64` in the low eight bytes.
+    Uint64,
+    /// A `uint8`.
+    Uint8,
+    /// A `uint16` (a bitmap of at most 16 bits).
+    Uint16,
+    /// A canonical bool, 0 or 1.
+    Bool,
+}
+
+/// The frozen word types of a record kind, or `None` for a kind outside 1 to 8.
+pub const fn word_types(kind: u64) -> Option<&'static [WordType]> {
+    use WordType::{Bool, Bytes32 as B, Uint16, Uint64 as U, Uint8};
+    match kind {
+        1 => Some(&[B]),
+        2 => Some(&[B, U, U, U]),
+        3 => Some(&[B, B, U, U, U, U, U, U, U]),
+        4 => Some(&[B, U, B, B, B, B]),
+        5 => Some(&[U, U, B]),
+        6 => Some(&[B, U, U, U, U, Bool, Uint16]),
+        7 => Some(&[B, Uint8, U, Uint16]),
+        8 => Some(&[Uint8, U, U, B]),
+        _ => None,
+    }
+}
+
+/// A payload rule [`check_payload`] refuses.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PayloadError {
+    /// Word `word` of a narrow type has nonzero high bytes.
+    NonCanonicalWord {
+        /// Word index.
+        word: usize,
+    },
+    /// Word `word` of type bool is neither 0 nor 1.
+    NonCanonicalBool {
+        /// Word index.
+        word: usize,
+    },
+    /// A zero result id (kinds 6 and 7).
+    ZeroResult,
+    /// A `Boundary` whose installed root epoch is not the changes epoch (plus one on recovery).
+    InstalledEpoch,
+    /// An `OutputRejected` reason outside 1 (Expired) to 3 (Invalid).
+    Reason,
+    /// An `OutputRejected` member id outside Invalid.
+    MemberOutsideInvalid,
+    /// An `OutputRejected` ready bitmap outside Expired.
+    BitmapOutsideExpired,
+    /// A `HolderRetirement` holder at or above [`MAX_HOLDERS`].
+    Holder,
+}
+
+/// The value of a narrow word, or `None` when one of its high 24 bytes is nonzero.
+fn narrow(word: &[u8]) -> Option<u64> {
+    if word[..24].iter().any(|b| *b != 0) {
+        return None;
+    }
+    Some(u64::from_be_bytes(word[24..].try_into().ok()?))
+}
+
+/// Checks a payload of exactly the kind's width: every narrow word canonical (zero high bytes,
+/// within its type's bits; a bool 0 or 1), and the cross-field rules of kinds 6 to 8 (schema v1
+/// section 7, `vrschema.Decode*`). Allocation-free. The width itself is the caller's check.
+pub fn check_payload(kind: u8, data: &[u8]) -> Result<(), PayloadError> {
+    let Some(types) = word_types(u64::from(kind)) else { return Ok(()) };
+    debug_assert_eq!(data.len(), 32 * types.len());
+    let word = |i: usize| &data[32 * i..32 * (i + 1)];
+    let value = |i: usize| narrow(word(i)).unwrap_or(0);
+    for (i, t) in types.iter().enumerate() {
+        let bits = match t {
+            WordType::Bytes32 => continue,
+            WordType::Uint64 => 64,
+            WordType::Uint16 => 16,
+            WordType::Uint8 => 8,
+            WordType::Bool => {
+                if !matches!(narrow(word(i)), Some(0 | 1)) {
+                    return Err(PayloadError::NonCanonicalBool { word: i });
+                }
+                continue;
+            }
+        };
+        match narrow(word(i)) {
+            Some(v) if bits == 64 || v >> bits == 0 => {}
+            _ => return Err(PayloadError::NonCanonicalWord { word: i }),
+        }
+    }
+    let zero = |i: usize| word(i).iter().all(|b| *b == 0);
+    match kind {
+        kind::BOUNDARY => {
+            if zero(0) {
+                return Err(PayloadError::ZeroResult);
+            }
+            if value(1).checked_add(value(5)) != Some(value(2)) {
+                return Err(PayloadError::InstalledEpoch);
+            }
+        }
+        kind::OUTPUT_REJECTED => {
+            let reason = value(1);
+            if zero(0) {
+                return Err(PayloadError::ZeroResult);
+            }
+            if !(1..=3).contains(&reason) {
+                return Err(PayloadError::Reason);
+            }
+            if value(2) != 0 && reason != 3 {
+                return Err(PayloadError::MemberOutsideInvalid);
+            }
+            if value(3) != 0 && reason != 1 {
+                return Err(PayloadError::BitmapOutsideExpired);
+            }
+        }
+        kind::HOLDER_RETIREMENT if value(0) >= MAX_HOLDERS => return Err(PayloadError::Holder),
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Record kind 6, decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Boundary {
+    /// The acknowledged result.
+    pub result_id: B256,
+    /// J's root epoch.
+    pub changes_epoch: u64,
+    /// The installed root epoch: J's, or K's (J's plus one) on recovery.
+    pub installed_root_epoch: u64,
+    /// The installed shard epoch: K's on recovery, else J's.
+    pub installed_shard_epoch: u64,
+    /// The installed step's activation round.
+    pub activation_round: u64,
+    /// Whether a recovery was installed.
+    pub recovered: bool,
+    /// Bit i: the i-th `RegistryChanges` entry was rejected EVM-side.
+    pub rejected_bitmap: u16,
+}
+
+/// Record kind 7, decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OutputRejected {
+    /// The rejected result.
+    pub result_id: B256,
+    /// 1 Expired, 2 Invalidated, 3 Invalid.
+    pub reason: u8,
+    /// The member an Invalid rejection names, else zero.
+    pub member_id: u64,
+    /// For Expired, bit i: the i-th successor by ascending id was ready; else zero.
+    pub ready_bitmap: u16,
+}
+
+/// Record kind 8, decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct HolderRetirement {
+    /// The liability holder index, below [`MAX_HOLDERS`].
+    pub holder: u8,
+    /// The identity.
+    pub id: u64,
+    /// Its generation.
+    pub generation: u64,
+    /// The reference digest the holder retires with.
+    pub ref_digest: B256,
+}
+
+/// A decoded payload of one of the registry kinds.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RegistryRecord {
+    /// Kind 6.
+    Boundary(Boundary),
+    /// Kind 7.
+    OutputRejected(OutputRejected),
+    /// Kind 8.
+    HolderRetirement(HolderRetirement),
+}
+
+impl RecordEntry {
+    /// The strict decoding of a kind 6 to 8 payload; `None` for kinds 1 to 5. An admitted entry
+    /// always decodes: the scan ran the same [`check_payload`].
+    pub fn registry_record(&self) -> Option<Result<RegistryRecord, ImportError>> {
+        decode_registry_record(self.kind, &self.data)
+    }
+}
+
+/// The strict decoding of a kind 6 to 8 payload (width and [`check_payload`]); `None` for any
+/// other kind.
+pub fn decode_registry_record(
+    kind: u8,
+    data: &[u8],
+) -> Option<Result<RegistryRecord, ImportError>> {
+    if !(kind::BOUNDARY..=kind::HOLDER_RETIREMENT).contains(&kind) {
+        return None;
+    }
+    let width = payload_width(u64::from(kind)).unwrap_or(0);
+    if data.len() != width {
+        return Some(Err(ImportError::PayloadWidth { kind, len: data.len() }));
+    }
+    if let Err(error) = check_payload(kind, data) {
+        return Some(Err(ImportError::Payload { kind, error }));
+    }
+    let b = |i: usize| B256::from_slice(&data[32 * i..32 * (i + 1)]);
+    let v = |i: usize| narrow(&data[32 * i..32 * (i + 1)]).unwrap_or(0);
+    Some(Ok(match kind {
+        kind::BOUNDARY => RegistryRecord::Boundary(Boundary {
+            result_id: b(0),
+            changes_epoch: v(1),
+            installed_root_epoch: v(2),
+            installed_shard_epoch: v(3),
+            activation_round: v(4),
+            recovered: v(5) == 1,
+            rejected_bitmap: v(6) as u16,
+        }),
+        kind::OUTPUT_REJECTED => RegistryRecord::OutputRejected(OutputRejected {
+            result_id: b(0),
+            reason: v(1) as u8,
+            member_id: v(2),
+            ready_bitmap: v(3) as u16,
+        }),
+        _ => RegistryRecord::HolderRetirement(HolderRetirement {
+            holder: v(0) as u8,
+            id: v(1),
+            generation: v(2),
+            ref_digest: b(3),
+        }),
+    }))
 }
 
 /// The scan price `G_R_scan` for a companion of `len` bytes.
@@ -272,6 +537,8 @@ fn walk(raw: &[u8], mut collect: Option<&mut Vec<RecordEntry>>) -> Result<Header
         if data.len() != width {
             return Err(ImportError::PayloadWidth { kind: kind as u8, len: data.len() });
         }
+        check_payload(kind as u8, data)
+            .map_err(|error| ImportError::Payload { kind: kind as u8, error })?;
         let closed_epoch = decoder.read_uint()?;
         if kind != 4 && closed_epoch != 0 {
             return Err(ImportError::ClosedEpochOnNonClosure);
@@ -453,8 +720,26 @@ mod tests {
         arity: u64,
     }
 
+    /// A canonical payload of the kind: nonzero byte words, narrow words `i` (a uint8 1, a bitmap
+    /// and a bool 0, an `OutputRejected` member 0), so every kind's cross-field rules hold.
+    fn payload(i: u64, kind: u64) -> Vec<u8> {
+        let Some(types) = word_types(kind) else { return vec![i as u8; 32] };
+        let mut out = Vec::new();
+        for (j, t) in types.iter().enumerate() {
+            let mut w = [0u8; 32];
+            match t {
+                WordType::Bytes32 => w = [i as u8 + 0x11; 32],
+                WordType::Uint64 if kind == 7 && j == 2 => {}
+                WordType::Uint64 => w[24..].copy_from_slice(&i.to_be_bytes()),
+                WordType::Uint8 => w[31] = 1,
+                WordType::Uint16 | WordType::Bool => {}
+            }
+            out.extend(w);
+        }
+        out
+    }
+
     fn entry(i: u64, kind: u64) -> EntrySpec {
-        let width = payload_width(kind).unwrap_or(32);
         EntrySpec {
             index: i,
             id: [i as u8 + 1; 32],
@@ -462,7 +747,7 @@ mod tests {
             kind,
             progress: 10 + i,
             time: 1_000 + i,
-            data: vec![i as u8; width],
+            data: payload(i, kind),
             closed: if kind == 4 { 1 } else { 0 },
             arity: 8,
         }
@@ -603,10 +888,10 @@ mod tests {
 
     #[test]
     fn every_kind_is_admitted_at_its_exact_width_and_builds_the_privileged_call() {
-        let entries: Vec<_> = (1..=5).map(|k| entry(k - 1, k)).collect();
+        let entries: Vec<_> = (1..=8).map(|k| entry(k - 1, k)).collect();
         let raw = encode(&spec(entries));
         let admitted = admit(&raw).unwrap();
-        assert_eq!(admitted.import.entries.len(), 5);
+        assert_eq!(admitted.import.entries.len(), 8);
         assert_eq!(admitted.import.entries[3].closed_epoch, 1);
         let call = admitted.import.call_data(9);
         assert_eq!(
@@ -615,9 +900,9 @@ mod tests {
             "the registry's importRootRecords selector"
         );
         let decoded = importRootRecordsCall::abi_decode(&call).unwrap();
-        assert_eq!((decoded.n, decoded.p, decoded.t, decoded.targetCount), (9, 50, 2_000, 5));
+        assert_eq!((decoded.n, decoded.p, decoded.t, decoded.targetCount), (9, 50, 2_000, 8));
         assert_eq!(decoded.targetTip, B256::from([7; 32]));
-        assert_eq!(decoded.entries.len(), 5);
+        assert_eq!(decoded.entries.len(), 8);
         for (abi, got) in decoded.entries.iter().zip(&admitted.import.entries) {
             assert_eq!(abi.record.index, got.index);
             assert_eq!(abi.record.recordID, got.record_id);
@@ -742,13 +1027,24 @@ mod tests {
                 ImportError::UnknownKind(0),
             ),
             (
-                "kind six",
+                "kind nine",
                 {
                     let mut s = base.clone();
-                    s.entries[1].kind = 6;
+                    s.entries[1].kind = 9;
                     s
                 },
-                ImportError::UnknownKind(6),
+                ImportError::UnknownKind(9),
+            ),
+            (
+                "an ack word with a high byte",
+                {
+                    let mut s = base.clone();
+                    s.entries[0].kind = 2;
+                    s.entries[0].data = payload(0, 2);
+                    s.entries[0].data[32] = 1;
+                    s
+                },
+                ImportError::Payload { kind: 2, error: PayloadError::NonCanonicalWord { word: 1 } },
             ),
             (
                 "a kind above a byte",
@@ -901,5 +1197,92 @@ mod tests {
                 );
             }
         }
+    }
+
+    // ---- the registry kinds 6 to 8 ----
+
+    fn word(v: u64) -> [u8; 32] {
+        let mut w = [0u8; 32];
+        w[24..].copy_from_slice(&v.to_be_bytes());
+        w
+    }
+
+    fn with_payload(kind: u64, words: &[[u8; 32]]) -> Result<AdmittedImport, ImportError> {
+        let mut s = spec(vec![entry(0, kind)]);
+        s.entries[0].data = words.concat();
+        admit(&encode(&s))
+    }
+
+    #[test]
+    fn registry_kinds_decode_strictly() {
+        let rid = [0xab; 32];
+        let ok =
+            with_payload(6, &[rid, word(5), word(6), word(8), word(1300), word(1), word(0xffff)])
+                .unwrap();
+        assert_eq!(
+            ok.import.entries[0].registry_record(),
+            Some(Ok(RegistryRecord::Boundary(Boundary {
+                result_id: B256::from(rid),
+                changes_epoch: 5,
+                installed_root_epoch: 6,
+                installed_shard_epoch: 8,
+                activation_round: 1300,
+                recovered: true,
+                rejected_bitmap: 0xffff,
+            })))
+        );
+        let refuse = |kind: u8, words: &[[u8; 32]], error: PayloadError| {
+            assert_eq!(
+                with_payload(u64::from(kind), words),
+                Err(ImportError::Payload { kind, error }),
+                "{kind}: {error:?}"
+            );
+        };
+        let b = |c: u64, i: u64, r: u64, bm: u64| {
+            [rid, word(c), word(i), word(9), word(1), word(r), word(bm)]
+        };
+        refuse(6, &b(5, 6, 0, 0), PayloadError::InstalledEpoch);
+        refuse(6, &b(5, 5, 1, 0), PayloadError::InstalledEpoch);
+        refuse(6, &b(5, 5, 2, 0), PayloadError::NonCanonicalBool { word: 5 });
+        refuse(6, &b(5, 5, 0, 0x1_0000), PayloadError::NonCanonicalWord { word: 6 });
+        refuse(6, &b(u64::MAX, 0, 1, 0), PayloadError::InstalledEpoch);
+        let mut zero = b(5, 5, 0, 0);
+        zero[0] = [0; 32];
+        refuse(6, &zero, PayloadError::ZeroResult);
+
+        let o =
+            |reason: u64, member: u64, ready: u64| [rid, word(reason), word(member), word(ready)];
+        for good in [o(1, 0, 7), o(2, 0, 0), o(3, 4, 0)] {
+            assert!(with_payload(7, &good).is_ok());
+        }
+        refuse(7, &o(0, 0, 0), PayloadError::Reason);
+        refuse(7, &o(4, 0, 0), PayloadError::Reason);
+        refuse(7, &o(1, 3, 0), PayloadError::MemberOutsideInvalid);
+        refuse(7, &o(3, 0, 1), PayloadError::BitmapOutsideExpired);
+        refuse(7, &o(0x101, 0, 0), PayloadError::NonCanonicalWord { word: 1 });
+        refuse(7, &[[0; 32], word(2), word(0), word(0)], PayloadError::ZeroResult);
+
+        let h = |holder: u64| [word(holder), word(u64::MAX), word(u64::MAX), [0xcd; 32]];
+        let ok = with_payload(8, &h(7)).unwrap();
+        assert_eq!(
+            ok.import.entries[0].registry_record(),
+            Some(Ok(RegistryRecord::HolderRetirement(HolderRetirement {
+                holder: 7,
+                id: u64::MAX,
+                generation: u64::MAX,
+                ref_digest: B256::from([0xcd; 32]),
+            })))
+        );
+        refuse(8, &h(8), PayloadError::Holder);
+        // kinds 1 to 5 have no registry decoding
+        assert_eq!(decode_registry_record(2, &payload(0, 2)), None);
+    }
+
+    #[test]
+    fn the_widest_registry_kind_is_narrower_than_the_measured_record() {
+        // IMPORT_EXECUTION_GAS was measured on nine-word records; kinds 6 to 8 are at most seven
+        let widest = (6..=8).map(|k| payload_width(k).unwrap()).max().unwrap();
+        assert_eq!(widest, 7 * 32);
+        assert!(widest < payload_width(3).unwrap());
     }
 }

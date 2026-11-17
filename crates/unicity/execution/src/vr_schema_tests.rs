@@ -4,10 +4,10 @@
 //! `testdata/vr-schema-v1/` with their `MANIFEST.sha256`. Every vector is
 //! `{name, op, input, expect}`; this module consumes the record and fee ops that ureth owns:
 //!
-//! - `record.width`: kinds 1 to 5 against [`payload_width`]; kinds 6 to 8 are the VT-15 target and
-//!   `payload_width` still refuses them;
-//! - `record.decode`: payload length plus the canonical word rules and the per-kind range rules of
-//!   kinds 6 to 8, in a local checker (the production decoder of kinds 6 to 8 is VT-15);
+//! - `record.width`: kinds 1 to 8 against [`payload_width`] and [`word_types`];
+//! - `record.decode`: the production payload check of the import scan ([`payload_width`] and
+//!   [`check_payload`]), and for kinds 6 to 8 the strict decoder ([`decode_registry_record`]);
+//! - `record.gas`: the import's pricing constants;
 //! - `fee.validate`: [`BlockProfile::validate`];
 //! - `fee.nextBaseFee`: [`ParentExecutionOutcome::reconcile`] and [`next_base_fee`];
 //! - `fee.transition`: the parent reconciles under F(N-1) and the child base fee under F(N). The
@@ -17,7 +17,10 @@
 
 use crate::{
     block::{next_base_fee, BlockAccountingError, BlockProfile, ParentExecutionOutcome},
-    records::payload_width,
+    records::{
+        check_payload, decode_registry_record, payload_width, word_types, PayloadError, WordType,
+        ENTRY_GAS, MAX_IMPORT_BYTES, MAX_IMPORT_ENTRIES, SCAN_BASE_GAS, SCAN_BYTE_GAS,
+    },
     sha256,
 };
 use alloy_primitives::{hex, B256};
@@ -29,9 +32,6 @@ const MANIFEST: &str = include_str!("../testdata/vr-schema-v1/MANIFEST.sha256");
 const ENCODING: &[u8] = include_bytes!("../testdata/vr-schema-v1/encoding.json");
 const ARITHMETIC: &[u8] = include_bytes!("../testdata/vr-schema-v1/arithmetic.json");
 const FILES: [(&str, &[u8]); 2] = [("encoding.json", ENCODING), ("arithmetic.json", ARITHMETIC)];
-
-/// Record kinds 6 to 8 and the widths VT-15 must give them in [`payload_width`].
-const VT15_TARGET_WIDTHS: [(u64, usize); 3] = [(6, 224), (7, 128), (8, 128)];
 
 /// Elasticity is fixed at 2 for every generation.
 const ELASTICITY: u64 = 2;
@@ -109,119 +109,90 @@ fn vr_schema_files_match_manifest() {
 
 // ---- records ----
 
-/// Word types per kind, as frozen by the `record.width` vectors.
-fn word_types() -> BTreeMap<u64, Vec<String>> {
-    by_op("record.width")
-        .into_iter()
-        .map(|v| {
-            let types = v.input["types"].as_array().unwrap().iter().map(|t| text(t).to_owned());
-            (int(&v.input["kind"]), types.collect())
-        })
-        .collect()
+fn word_type_name(t: WordType) -> &'static str {
+    match t {
+        WordType::Bytes32 => "bytes32",
+        WordType::Uint64 => "uint64",
+        WordType::Uint8 => "uint8",
+        WordType::Uint16 => "uint16",
+        WordType::Bool => "bool",
+    }
 }
 
 #[test]
 fn vr_schema_record_widths() {
+    let mut kinds = 0u32;
     for v in by_op("record.width") {
         let kind = int(&v.input["kind"]);
         let width = int(&v.expect["width"]) as usize;
-        assert_eq!(width, 32 * v.input["types"].as_array().unwrap().len(), "{}", v.name);
-        if let Some((_, target)) = VT15_TARGET_WIDTHS.iter().find(|(k, _)| *k == kind) {
-            assert_eq!(width, *target, "{}: VT-15 target width", v.name);
-            // VT-15 adds kinds 6 to 8; it flips this to `Some(width)`.
-            assert_eq!(payload_width(kind), None, "{}: kind {kind} is VT-15's", v.name);
-        } else {
-            assert!((1..=5).contains(&kind), "{}: unexpected kind {kind}", v.name);
-            assert_eq!(payload_width(kind), Some(width), "{}", v.name);
-        }
+        let types: Vec<&str> = v.input["types"].as_array().unwrap().iter().map(text).collect();
+        assert_eq!(width, 32 * types.len(), "{}", v.name);
+        assert_eq!(payload_width(kind), Some(width), "{}", v.name);
+        let ours: Vec<&str> =
+            word_types(kind).unwrap().iter().map(|t| word_type_name(*t)).collect();
+        assert_eq!(ours, types, "{}", v.name);
+        kinds |= 1 << kind;
     }
+    assert_eq!(kinds, 0b1_1111_1110, "kinds 1 to 8");
+    assert_eq!(payload_width(9), None);
 }
 
-/// The 64-bit value of a narrow word, or `None` when a high byte is nonzero.
-fn word_u64(word: &[u8]) -> Option<u64> {
-    if word[..24].iter().any(|b| *b != 0) {
-        return None;
+/// The error category of a production refusal, in the reference's words.
+fn category(error: PayloadError) -> &'static str {
+    match error {
+        PayloadError::NonCanonicalWord { .. } => "non-canonical narrow field",
+        PayloadError::NonCanonicalBool { .. } => "non-canonical bool",
+        _ => "value out of range",
     }
-    Some(u64::from_be_bytes(word[24..].try_into().unwrap()))
-}
-
-/// The local checker of a root-record payload. The error is the reference's error category.
-fn check_record(
-    types: &BTreeMap<u64, Vec<String>>,
-    kind: u64,
-    data: &[u8],
-) -> Result<(), &'static str> {
-    let Some(ts) = types.get(&kind) else { return Err("unknown kind") };
-    let width = payload_width(kind).unwrap_or(32 * ts.len());
-    assert_eq!(width, 32 * ts.len(), "kind {kind}: payload_width disagrees with the word types");
-    if data.len() != width {
-        return Err("wrong length");
-    }
-    let mut values = Vec::with_capacity(ts.len());
-    for (word, t) in data.as_chunks::<32>().0.iter().zip(ts) {
-        let bits = match t.as_str() {
-            "bytes32" => {
-                values.push(None);
-                continue;
-            }
-            "uint64" => 64,
-            "uint16" => 16,
-            "uint8" => 8,
-            "bool" => {
-                match word_u64(word) {
-                    Some(v @ (0 | 1)) => values.push(Some(v)),
-                    _ => return Err("non-canonical bool"),
-                }
-                continue;
-            }
-            other => panic!("kind {kind}: unknown word type {other}"),
-        };
-        match word_u64(word) {
-            Some(v) if bits == 64 || v >> bits == 0 => values.push(Some(v)),
-            _ => return Err("non-canonical narrow field"),
-        }
-    }
-    let zero_word = |i: usize| data[32 * i..32 * (i + 1)].iter().all(|b| *b == 0);
-    let value = |i: usize| values[i].unwrap();
-    let in_range = match kind {
-        // Boundary: nonzero result id; a primary installs J, a recovery J + 1.
-        6 => !zero_word(0) && value(1).checked_add(value(5)) == Some(value(2)),
-        // OutputRejected: nonzero result id; reason 1 (Expired) to 3 (Invalid); memberId only for
-        // Invalid; readyBitmap only for Expired.
-        7 => {
-            let reason = value(1);
-            !zero_word(0) &&
-                (1..=3).contains(&reason) &&
-                (value(2) == 0 || reason == 3) &&
-                (value(3) == 0 || reason == 1)
-        }
-        // HolderRetirement: holder < MAX_HOLDERS (8).
-        8 => value(0) < 8,
-        _ => true,
-    };
-    if !in_range {
-        return Err("value out of range");
-    }
-    Ok(())
 }
 
 #[test]
 fn vr_schema_record_decode() {
-    let types = word_types();
+    let (mut accepted, mut refused) = (0, 0);
     for v in by_op("record.decode") {
         let kind = int(&v.input["kind"]);
         let data = hex::decode(text(&v.input["data"])).unwrap();
-        let got = check_record(&types, kind, &data);
+        let got = match payload_width(kind) {
+            None => Err("unknown kind"),
+            Some(width) if width != data.len() => Err("wrong length"),
+            Some(_) => check_payload(kind as u8, &data).map_err(category),
+        };
+        if (6..=8).contains(&kind) {
+            let strict = decode_registry_record(kind as u8, &data).unwrap();
+            assert_eq!(strict.is_ok(), got.is_ok(), "{}: the strict decoder agrees", v.name);
+        }
         let ok = v.expect["ok"].as_bool().unwrap();
         assert_eq!(got.is_ok(), ok, "{}: {got:?} vs {}", v.name, v.expect);
         match got {
-            Ok(()) => assert_eq!(int(&v.expect["width"]) as usize, data.len(), "{}", v.name),
+            Ok(()) => {
+                assert_eq!(int(&v.expect["width"]) as usize, data.len(), "{}", v.name);
+                accepted += 1;
+            }
             Err(category) => {
                 let want = expect_error(&v.expect);
                 assert!(want.contains(category), "{}: {category} vs {want}", v.name);
+                refused += 1;
             }
         }
     }
+    assert_eq!((accepted, refused), (8, 17));
+}
+
+#[test]
+fn vr_schema_record_gas() {
+    let v = by_op("record.gas");
+    assert_eq!(v.len(), 1);
+    let (input, expect) = (&v[0].input, &v[0].expect);
+    assert_eq!(int(&input["scanBase"]), SCAN_BASE_GAS);
+    assert_eq!(int(&input["scanByte"]), SCAN_BYTE_GAS);
+    assert_eq!(int(&input["entry"]), ENTRY_GAS);
+    assert_eq!(int(&input["maxBytes"]) as usize, MAX_IMPORT_BYTES);
+    assert_eq!(int(&input["maxEntries"]) as usize, MAX_IMPORT_ENTRIES);
+    assert_eq!(int(&expect["maxAdmission"]), crate::records::MAX_ADMISSION_GAS);
+    let widest = (6..=8).map(|k| word_types(k).unwrap().len()).max().unwrap();
+    assert_eq!(widest as u64, int(&expect["widestNewKindWords"]));
+    let measured = word_types(3).unwrap().len();
+    assert_eq!(measured as u64, int(&expect["executionBoundWords"]));
 }
 
 // ---- fees ----
