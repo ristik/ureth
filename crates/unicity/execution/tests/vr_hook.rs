@@ -1594,6 +1594,14 @@ fn every_scenario_runs_with_the_vr_batch_pins() {
 #[ignore = "the genesis plan's fresh measurement; run explicitly"]
 fn vr_hook_measurement() {
     use sha2::{Digest, Sha256};
+    // VR_HOOK_MODULE_CODE_HASH is parsed as a 32-byte hex value before any measurement runs: a blank or malformed value fails here instead
+    // of being copied into the measurement file.
+    let module_override = std::env::var("VR_HOOK_MODULE_CODE_HASH").ok().map(|v| {
+        let h: B256 = v.trim().parse().unwrap_or_else(|e| {
+            panic!("VR_HOOK_MODULE_CODE_HASH {v:?} is not a 32-byte hex value: {e}")
+        });
+        format!("{h}")
+    });
     let min_records = |name: &str| measure(scenario(name)).min_records;
     let records = if b().name == "pos" {
         min_records("batch32-max").max(min_records("batch32-retire"))
@@ -1618,7 +1626,6 @@ fn vr_hook_measurement() {
     // path of the measurement runs the cap-bounded test module (`elect-max`, `batch32-max`, `switch-max`), which is the most VR accepts
     // from any module whose declared gas bounds are within VR's caps; the PoA election scenarios stay in the maximum as extra cases. The
     // source line records the override so a reader of the file sees which module the hash names.
-    let module_override = std::env::var("VR_HOOK_MODULE_CODE_HASH").ok();
     let module_hash = module_override.clone().unwrap_or_else(|| code("poa"));
     let caps = serde_json::json!({
         "elect": b().cap_elect, "output": b().cap_output, "record": b().cap_record, "resolved": CAP_RESOLVED,
