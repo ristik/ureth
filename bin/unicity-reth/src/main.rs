@@ -88,6 +88,12 @@ struct UnicityArgs {
     #[arg(long = "unicity.election", value_name = "ADDRESS")]
     election: Option<Address>,
 
+    /// The validator registry whose activation schedule the node resolves rules from; the node
+    /// refuses a block at or past an effective rule it does not know. Absent: an empty schedule.
+    /// Needs the records hook (on a registry generation it is the custody and election contract).
+    #[arg(long = "unicity.registry", value_name = "ADDRESS")]
+    registry: Option<Address>,
+
     /// Gross gas the profile reserves for one `elect` call (the genesis-measured worst case with
     /// its margin; `ubft engine-api check-elect-gas` prints it).
     #[arg(long = "unicity.elect-gas", default_value_t = 0, value_name = "GAS")]
@@ -162,6 +168,7 @@ impl UnicityArgs {
                 record_gas: self.hook_record_gas,
                 election: self.election.unwrap_or(Address::ZERO),
                 elect_gas: self.elect_gas,
+                vr: self.registry.unwrap_or(Address::ZERO),
             },
         };
         context.hook.validate().map_err(|err| eyre::eyre!("invalid records hook: {err:?}"))?;
@@ -346,6 +353,7 @@ mod tests {
             h_records: 0,
             hook_record_gas: 0,
             election: None,
+            registry: None,
             elect_gas: 0,
             max_gas: 50_000_000,
             system_gas: 43_000_000,
@@ -374,6 +382,7 @@ mod tests {
             h_records: 0,
             hook_record_gas: 0,
             election: None,
+            registry: None,
             elect_gas: 0,
             max_gas: 50_000_000,
             system_gas: 43_000_000,

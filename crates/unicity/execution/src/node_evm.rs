@@ -40,7 +40,7 @@ use reth_evm::{
 };
 use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
-use revm::{primitives::hardfork::SpecId, Inspector};
+use revm::Inspector;
 
 use crate::{
     block_executor::{BoundExecutionInput, UnicityBlockExecutor, UnicityEvmConfig},
@@ -369,9 +369,12 @@ impl ConfigureEvm for UnicityNodeEvmConfig {
 
     fn evm_env(&self, header: &Header) -> Result<EvmEnv, Self::Error> {
         let env = self.inner.evm_env(header).map_err(|never: Infallible| match never {})?;
-        if env.cfg_env.spec != SpecId::CANCUN {
-            return Err(UnicityNodeEvmError::UnsupportedSpec);
-        }
+        // The header carries no root epoch, so the spec half of the resolver applies here; the
+        // epoch-dependent refusal runs in the executor, where the bound input and the parent
+        // state are.
+        crate::rules::UnicityRules::global()
+            .check_stateless(env.cfg_env.spec, 0)
+            .map_err(|_| UnicityNodeEvmError::UnsupportedSpec)?;
         Ok(env)
     }
 

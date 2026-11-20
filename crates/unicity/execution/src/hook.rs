@@ -17,7 +17,6 @@ use revm::{
     context::{BlockEnv, TxEnv},
     context_interface::{Block, ContextSetters, ContextTr, JournalTr},
     handler::{EvmTr, Handler, MainnetHandler, SystemCallTx},
-    primitives::hardfork::SpecId,
     Context, Database, DatabaseCommit, MainBuilder, MainContext,
 };
 
@@ -49,6 +48,9 @@ pub struct HookEnv {
     pub chain_id: u64,
     /// The block environment of the executing block.
     pub block: BlockEnv,
+    /// The root epoch of the block's authenticated origin, which the activation schedule is
+    /// resolved at.
+    pub root_epoch: u64,
 }
 
 impl HookEnv {
@@ -66,7 +68,7 @@ impl HookEnv {
             blob_excess_gas_and_price: b.blob_excess_gas_and_price(),
             ..Default::default()
         };
-        Self { chain_id: evm.chain_id(), block }
+        Self { chain_id: evm.chain_id(), block, root_epoch: 0 }
     }
 
     /// A block environment of the given chain, number and timestamp, for tests.
@@ -78,7 +80,14 @@ impl HookEnv {
                 timestamp: U256::from(timestamp),
                 ..Default::default()
             },
+            root_epoch: 0,
         }
+    }
+
+    /// The same environment for a block of root epoch `root_epoch`.
+    pub fn with_root_epoch(mut self, root_epoch: u64) -> Self {
+        self.root_epoch = root_epoch;
+        self
     }
 }
 
@@ -100,6 +109,10 @@ pub struct RecordsHook {
     /// Gross gas reserved for the `elect` call, sized for the profile's worst case on a threshold
     /// block.
     pub elect_gas: u64,
+    /// The validator registry whose activation schedule the rule resolver reads (zero: the
+    /// profile has no registry, an empty schedule). It is the custody and election contract on a
+    /// registry generation.
+    pub vr: Address,
 }
 
 /// Why the hook invalidated the block.
@@ -183,6 +196,9 @@ impl RecordsHook {
     /// Checks the combination: all three zero, or a custody with `1 <= H <= 32` and a price; the
     /// election hook, when pinned, needs the records hook and a price.
     pub fn validate(&self) -> Result<(), HookError> {
+        if self.vr != Address::ZERO && !self.enabled() {
+            return Err(HookError::Profile("a registry without the records hook"));
+        }
         if !self.election_enabled() && self.elect_gas != 0 {
             return Err(HookError::Profile("the elect gas without an election contract"));
         }
@@ -245,11 +261,15 @@ where
     if !hook.enabled() {
         return Ok(HookOutcome::default());
     }
+    // The schedule is read before the hook changes anything: the parent state's schedule rules.
+    let (spec, _) = crate::rules::UnicityRules::global()
+        .resolve(db, hook.vr, env.root_epoch)
+        .map_err(ExecutionError::Rules)?;
     let mut evm = Context::mainnet()
         .with_block(env.block.clone())
         .modify_cfg_chained(|cfg| {
             cfg.chain_id = env.chain_id;
-            cfg.set_spec_and_mainnet_gas_params(SpecId::CANCUN)
+            cfg.set_spec_and_mainnet_gas_params(spec)
         })
         .with_db(db)
         .build_mainnet();
@@ -393,6 +413,31 @@ mod tests {
 
     fn hook(h: u32) -> RecordsHook {
         RecordsHook { custody: CUSTODY, h_records: h, record_gas: 1_000_000, ..Default::default() }
+    }
+
+    #[test]
+    fn the_hook_vm_refuses_an_unknown_active_rule() {
+        use crate::rules::{rule_id, seed_schedule, EntryState, RuleError, ScheduleEntry};
+        let at = |e| ScheduleEntry {
+            rule_id: rule_id("future-rule"),
+            release_digest: B256::repeat_byte(0xd1),
+            root_epoch: e,
+            not_before_uc_time: 0,
+            state: EntryState::Active,
+            change_id: 1,
+        };
+        let pinned = RecordsHook { vr: CUSTODY, ..hook(1) };
+        let mut ahead = db(ADVANCE, U256::ZERO, 1, 1);
+        seed_schedule(&mut ahead, CUSTODY, &[at(9)]);
+        assert!(run_hooks(&mut ahead, &pinned, &env().with_root_epoch(8), B256::ZERO, 10_000_000)
+            .is_ok());
+        let mut due = db(ADVANCE, U256::ZERO, 1, 1);
+        seed_schedule(&mut due, CUSTODY, &[at(9)]);
+        let err = run_hooks(&mut due, &pinned, &env().with_root_epoch(9), B256::ZERO, 10_000_000)
+            .unwrap_err();
+        assert!(matches!(err, ExecutionError::Rules(RuleError::UpgradeRequired(_))), "{err:?}");
+        // nothing was applied before the refusal
+        assert_eq!(due.storage_ref(CUSTODY, U256::ZERO).unwrap(), U256::ZERO);
     }
 
     fn env() -> HookEnv {

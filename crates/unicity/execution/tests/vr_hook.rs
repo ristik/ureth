@@ -719,6 +719,8 @@ fn pinned(s: &Scenario) -> RecordsHook {
         record_gas: b().hook_record_gas(),
         election: VR,
         elect_gas: b().elect_gas(),
+        // the registry's own schedule is resolved at the same address
+        vr: VR,
     }
 }
 
