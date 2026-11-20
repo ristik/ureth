@@ -85,7 +85,7 @@ impl HookEnv {
     }
 
     /// The same environment for a block of root epoch `root_epoch`.
-    pub fn with_root_epoch(mut self, root_epoch: u64) -> Self {
+    pub const fn with_root_epoch(mut self, root_epoch: u64) -> Self {
         self.root_epoch = root_epoch;
         self
     }
@@ -109,10 +109,6 @@ pub struct RecordsHook {
     /// Gross gas reserved for the `elect` call, sized for the profile's worst case on a threshold
     /// block.
     pub elect_gas: u64,
-    /// The validator registry whose activation schedule the rule resolver reads (zero: the
-    /// profile has no registry, an empty schedule). It is the custody and election contract on a
-    /// registry generation.
-    pub vr: Address,
 }
 
 /// Why the hook invalidated the block.
@@ -196,9 +192,6 @@ impl RecordsHook {
     /// Checks the combination: all three zero, or a custody with `1 <= H <= 32` and a price; the
     /// election hook, when pinned, needs the records hook and a price.
     pub fn validate(&self) -> Result<(), HookError> {
-        if self.vr != Address::ZERO && !self.enabled() {
-            return Err(HookError::Profile("a registry without the records hook"));
-        }
         if !self.election_enabled() && self.elect_gas != 0 {
             return Err(HookError::Profile("the elect gas without an election contract"));
         }
@@ -263,7 +256,7 @@ where
     }
     // The schedule is read before the hook changes anything: the parent state's schedule rules.
     let (spec, _) = crate::rules::UnicityRules::global()
-        .resolve(db, hook.vr, env.root_epoch)
+        .resolve(db, crate::VALIDATOR_REGISTRY, env.root_epoch)
         .map_err(ExecutionError::Rules)?;
     let mut evm = Context::mainnet()
         .with_block(env.block.clone())
@@ -426,13 +419,13 @@ mod tests {
             state: EntryState::Active,
             change_id: 1,
         };
-        let pinned = RecordsHook { vr: CUSTODY, ..hook(1) };
+        let pinned = hook(1);
         let mut ahead = db(ADVANCE, U256::ZERO, 1, 1);
-        seed_schedule(&mut ahead, CUSTODY, &[at(9)]);
+        seed_schedule(&mut ahead, crate::VALIDATOR_REGISTRY, &[at(9)]);
         assert!(run_hooks(&mut ahead, &pinned, &env().with_root_epoch(8), B256::ZERO, 10_000_000)
             .is_ok());
         let mut due = db(ADVANCE, U256::ZERO, 1, 1);
-        seed_schedule(&mut due, CUSTODY, &[at(9)]);
+        seed_schedule(&mut due, crate::VALIDATOR_REGISTRY, &[at(9)]);
         let err = run_hooks(&mut due, &pinned, &env().with_root_epoch(9), B256::ZERO, 10_000_000)
             .unwrap_err();
         assert!(matches!(err, ExecutionError::Rules(RuleError::UpgradeRequired(_))), "{err:?}");

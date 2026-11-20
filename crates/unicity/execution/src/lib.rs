@@ -114,6 +114,11 @@ pub const SYSTEM_CALLER: Address =
 /// Fixed registry destination from the pinned profile.
 pub const SEAL_REGISTRY: Address =
     Address::new([0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+/// The validator registry (VR): a protocol constant and genesis system account, like the
+/// `SealRegistry`. The rule resolver reads the activation schedule from it; no flag or profile
+/// field can name another address, because a node reading a different schedule would split.
+pub const VALIDATOR_REGISTRY: Address =
+    Address::new([0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]);
 /// Keccak-256 of the pinned `SealRegistry` runtime artifact: B1 plus the authenticated root-record
 /// log, permanent layout (contracts `registry/permanent-layout`).
 pub const SEAL_REGISTRY_CODE_HASH: B256 =
@@ -803,7 +808,7 @@ where
     let prepared = prepare_transition(input, &admitted.update, genesis_shard_conf_hash)?;
     // the system calls run under the spec the authenticated schedule resolves for this block
     let (spec, _) = rules::UnicityRules::global()
-        .resolve(db, config.b1.hook.vr, input.origin.root_epoch)
+        .resolve(db, VALIDATOR_REGISTRY, input.origin.root_epoch)
         .map_err(ExecutionError::Rules)?;
     let mut evm = Context::mainnet()
         .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(spec))
@@ -1289,7 +1294,7 @@ mod tests {
     #[test]
     fn unknown_active_rule_is_refused_by_the_registry_transition() {
         use crate::rules::{rule_id, seed_schedule, EntryState, RuleError, ScheduleEntry};
-        let vr = Address::repeat_byte(0xa5);
+        let vr = VALIDATOR_REGISTRY;
         let input = executable_input(1, 1);
         let epoch = input.origin.root_epoch;
         let at = |e: u64| ScheduleEntry {
@@ -1306,8 +1311,7 @@ mod tests {
             let mut input = input.clone();
             let parent_number = input.authorized_round - 1;
             let update = testing::seal(&mut input, parent_number, tail_of(&parent));
-            let mut b1 = testing::b1_context();
-            b1.hook.vr = vr;
+            let b1 = testing::b1_context();
             execute_registry_transition(
                 &input,
                 UpdateInput { bytes: &update, records: &testing::empty_import(), parent_number },

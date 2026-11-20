@@ -1179,7 +1179,6 @@ const fn pinned(custody: Address, h: u32) -> RecordsHook {
         record_gas: 3_000_000,
         election: Address::ZERO,
         elect_gas: 0,
-        vr: Address::ZERO,
     }
 }
 
@@ -1319,7 +1318,6 @@ const fn elected(r: &Real, elect_gas: u64) -> RecordsHook {
         record_gas: 3_000_000,
         election: r.election,
         elect_gas,
-        vr: Address::ZERO,
     }
 }
 
@@ -1405,8 +1403,9 @@ fn an_election_priced_below_its_cost_invalidates_the_block() {
 
 mod rules_sites {
     use super::*;
-    use reth_unicity_execution::rules::{
-        noop_test_rule_id, rule_id, schedule_storage, EntryState, ScheduleEntry,
+    use reth_unicity_execution::{
+        rules::{noop_test_rule_id, rule_id, schedule_storage, EntryState, ScheduleEntry},
+        VALIDATOR_REGISTRY,
     };
 
     const CUSTODY: Address = Address::new([0xc5; 20]);
@@ -1422,28 +1421,27 @@ mod rules_sites {
         }
     }
 
-    /// The hook world whose custody stand-in is also the registry holding `entries`.
+    /// The hook world whose genesis also holds VR (a stand-in account) with `entries`.
     fn world_with_schedule(entries: &[ScheduleEntry]) -> HookWorld {
-        let mut slots = schedule_storage(entries);
-        slots.push((U256::from(1), U256::from(32))); // limits.maxBatch
+        let slots = schedule_storage(entries);
         hook_world_with(&testing::import_of(3), |provider| {
             provider.insert_contract(
                 CUSTODY,
                 testing::custody_code(testing::ADVANCE),
                 U256::ZERO,
+                &[(U256::from(1), U256::from(32))], // limits.maxBatch
+            );
+            provider.insert_contract(
+                VALIDATOR_REGISTRY,
+                Bytes::from_static(testing::NOTHING),
+                U256::ZERO,
                 &slots,
-            )
+            );
         })
     }
 
     fn hook() -> RecordsHook {
-        RecordsHook {
-            custody: CUSTODY,
-            h_records: 2,
-            record_gas: 1_000_000,
-            vr: CUSTODY,
-            ..Default::default()
-        }
+        RecordsHook { custody: CUSTODY, h_records: 2, record_gas: 1_000_000, ..Default::default() }
     }
 
     fn built_error(world: &HookWorld) -> String {

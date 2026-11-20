@@ -710,7 +710,7 @@ where
             .rules
             .resolve(
                 self.inner.evm.db_mut(),
-                bound.b1.context.hook.vr,
+                crate::VALIDATOR_REGISTRY,
                 bound.input.origin.root_epoch,
             )
             .map_err(BlockExecutionError::other)?;
