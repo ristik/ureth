@@ -1448,6 +1448,12 @@ fn vr_hook_measurement() {
         let a = fixture().accounts.iter().find(|a| a.role == role).unwrap();
         format!("{}", keccak256(&a.code))
     };
+    // VT-04: a generation whose module is not PoaElection (the PoS prototype's adapter) names its module's runtime hash. Every module
+    // path of the measurement runs the cap-bounded test module (`elect-max`, `batch32-max`, `switch-max`), which is the most VR accepts
+    // from any module whose declared gas bounds are within VR's caps; the PoA election scenarios stay in the maximum as extra cases. The
+    // source line records the override so a reader of the file sees which module the hash names.
+    let module_override = std::env::var("VR_HOOK_MODULE_CODE_HASH").ok();
+    let module_hash = module_override.clone().unwrap_or_else(|| code("poa"));
     let caps = serde_json::json!({
         "elect": CAP_ELECT, "output": CAP_OUTPUT, "record": CAP_RECORD, "resolved": CAP_RESOLVED,
         "attach": CAP_ATTACH, "detach": CAP_DETACH, "gov": 1_000_000u64, "adopt": CAP_ADOPT,
@@ -1459,7 +1465,7 @@ fn vr_hook_measurement() {
         "h": 32,
         "registry": format!("{VR}").to_lowercase(),
         "registryCodeHash": code("vr"),
-        "moduleCodeHash": code("poa"),
+        "moduleCodeHash": module_hash.clone(),
         "caps": caps,
         "ceilings": ceilings,
         "records": records,
@@ -1467,8 +1473,12 @@ fn vr_hook_measurement() {
         "combined": combined,
         "elect": elect,
         "source": format!(
-            "ureth tests/vr_hook.rs over testdata/vr-hook.json sha256 {} ({FIXTURE_SOURCE})",
-            B256::from_slice(&Sha256::digest(FIXTURE.as_bytes()))
+            "ureth tests/vr_hook.rs over testdata/vr-hook.json sha256 {} ({FIXTURE_SOURCE}){}",
+            B256::from_slice(&Sha256::digest(FIXTURE.as_bytes())),
+            match &module_override {
+                Some(h) => format!("; module code hash {h} supplied by VR_HOOK_MODULE_CODE_HASH (cap-bounded module paths)"),
+                None => String::new(),
+            }
         ),
     });
     let text = serde_json::to_string_pretty(&doc).unwrap() + "\n";
