@@ -59,11 +59,30 @@ where
             let Some(header) = provider.sealed_header_by_hash(hash)? else {
                 continue;
             };
-            let profile = block_profile(provider, &chain, &header, profile)?;
-            tokens.restore_exact(&header, chain.chain().id(), chain.genesis_hash(), profile)?;
+            restore_optional_accounting(provider, tokens, &chain, &header, profile)?;
         }
     }
     Ok(())
+}
+
+// Optional tokens are only a cache. Older states can be pruned independently of the token
+// window, so a token we cannot reconcile is left out without blocking head admission.
+fn restore_optional_accounting(
+    provider: &impl StateProviderFactory,
+    tokens: &UnicityParentAccountings,
+    chain: &ChainSpec,
+    header: &SealedHeader<Header>,
+    profile: BlockProfile,
+) -> eyre::Result<Option<reth_unicity_execution::block_executor::CompletedParent>> {
+    Ok(tokens.restore_with_profile(header, chain.chain().id(), chain.genesis_hash(), || {
+        match block_profile(provider, chain, header, profile) {
+            Ok(profile) => Some(profile),
+            Err(error) => {
+                tracing::debug!(number = header.number, %error, "skipping optional parent accounting without fee state");
+                None
+            }
+        }
+    })?)
 }
 
 /// Typed causes of a refused recovery admission. They travel inside the `eyre::Report` the entry
@@ -241,8 +260,7 @@ where
     for number in head.saturating_sub(ACCOUNTING_WINDOW.saturating_sub(1)).max(1)..head {
         let hash = canonical_hash(provider, number)?;
         let header = canonical_header(provider, hash)?;
-        let profile = block_profile(provider, &chain, &header, seal.profile)?;
-        if tokens.restore_exact(&header, chain.chain().id(), genesis, profile)?.is_some() &&
+        if restore_optional_accounting(provider, tokens, &chain, &header, seal.profile)?.is_some() &&
             check_retained(provider, store, seal, genesis, number).is_ok()
         {
             tokens.admit(&hash);
@@ -280,15 +298,7 @@ where
     let chain = provider.chain_spec();
     let genesis = chain.genesis_hash();
     let target_hash = canonical_hash(provider, target)?;
-    let anchor = select_repair_anchor(
-        provider,
-        tokens,
-        profile,
-        chain.chain().id(),
-        genesis,
-        target,
-        limit,
-    )?;
+    let anchor = select_repair_anchor(provider, tokens, profile, genesis, target, limit)?;
     if anchor >= 1 {
         // A cached anchor is usable for the replay only once its own retained binding checks.
         let held = check_retained(provider, store, seal, genesis, anchor)?;
@@ -349,7 +359,6 @@ fn select_repair_anchor<P>(
     provider: &P,
     tokens: &UnicityParentAccountings,
     profile: BlockProfile,
-    chain_id: u64,
     genesis: B256,
     target: u64,
     limit: u64,
@@ -366,8 +375,7 @@ where
     for number in (earliest.max(1)..=target).rev() {
         let hash = canonical_hash(provider, number)?;
         let header = canonical_header(provider, hash)?;
-        let profile = block_profile(provider, &chain, &header, profile)?;
-        if tokens.restore_exact(&header, chain_id, genesis, profile)?.is_some() {
+        if restore_optional_accounting(provider, tokens, &chain, &header, profile)?.is_some() {
             anchor = Some(number);
             break;
         }
@@ -468,8 +476,7 @@ mod tests {
         tokens.attach_store(store.clone());
         tokens.publish(orphan_hash, 1, 1, genesis, token).unwrap();
 
-        let error =
-            select_repair_anchor(&provider, &tokens, PROFILE, 1, genesis, 2, 1).unwrap_err();
+        let error = select_repair_anchor(&provider, &tokens, PROFILE, genesis, 2, 1).unwrap_err();
         assert!(error.to_string().contains("no verified token"));
         assert!(tokens.get(&canonical_one.hash()).is_none());
 
@@ -480,7 +487,7 @@ mod tests {
         )
         .unwrap();
         tokens.publish(canonical_one.hash(), 1, 1, genesis, canonical_token).unwrap();
-        assert_eq!(select_repair_anchor(&provider, &tokens, PROFILE, 1, genesis, 2, 1).unwrap(), 1);
+        assert_eq!(select_repair_anchor(&provider, &tokens, PROFILE, genesis, 2, 1).unwrap(), 1);
         let missing_companion = repair_accounting(
             &provider,
             &store,
@@ -508,8 +515,7 @@ mod tests {
             missing_companion.downcast_ref::<RecoveryError>(),
             Some(RecoveryError::CompanionMissing(1))
         ));
-        let error =
-            select_repair_anchor(&provider, &tokens, PROFILE, 1, genesis, 3, 1).unwrap_err();
+        let error = select_repair_anchor(&provider, &tokens, PROFILE, genesis, 3, 1).unwrap_err();
         assert!(error.to_string().contains("no verified token within 1 blocks of 3"));
     }
 }

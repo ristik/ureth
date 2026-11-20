@@ -94,11 +94,13 @@ pub(crate) fn validate_genesis(chain: &ChainSpec, seal: UnicitySealConfig) -> ey
                 .0
         });
         let genesis = FeeState::decode(words, seal.profile)?;
+        let profiles_match =
+            [genesis.previous, genesis.current].iter().all(|fees| fees.profile == seal.profile);
+        let collectors_match = [genesis.previous, genesis.current]
+            .iter()
+            .all(|fees| fees.collector == seal.fee_collector);
         eyre::ensure!(
-            genesis.effective_block == 0 &&
-                [genesis.previous, genesis.current].iter().all(|fees| fees.profile ==
-                    seal.profile &&
-                    fees.collector == seal.fee_collector),
+            genesis.effective_block == 0 && profiles_match && collectors_match,
             "configured fee parameters differ from validator registry genesis"
         );
     }
@@ -236,5 +238,68 @@ mod tests {
         invalid = words(&vector["input"]["new"], effective);
         invalid[3][0] = 1;
         assert!(FeeState::decode(invalid, profile).is_err());
+    }
+
+    #[test]
+    fn genesis_checks_profile_and_collector_of_both_fee_sets() {
+        use alloy_genesis::{Genesis, GenesisAccount};
+        use alloy_primitives::{Bytes, U256};
+        use reth_unicity_execution::{pairing::PairPins, update::B1Context};
+
+        let seal = UnicitySealConfig {
+            profile: BlockProfile {
+                max_gas: 30_000_000,
+                system_gas: 2_000_000,
+                base_fee_floor: 1_000_000,
+                change_denominator: 8,
+                elasticity: 2,
+            },
+            fee_collector: Address::repeat_byte(1),
+            pins: PairPins { network_id: 1, root_genesis_id: B256::ZERO },
+            b1: B1Context {
+                network: 1,
+                root_genesis_id: B256::ZERO,
+                execution_chain_id: 1,
+                profile_hash: B256::ZERO,
+                genesis_commitment: B256::ZERO,
+                max_epochs: 2,
+                hook: Default::default(),
+            },
+        };
+        let packed: U256 = U256::from(seal.profile.change_denominator) << 64 |
+            U256::from(seal.profile.base_fee_floor);
+        let collector = B256::left_padding_from(seal.fee_collector.as_slice());
+        let mut genesis = Genesis::default();
+        genesis.alloc.insert(
+            REGISTRY,
+            GenesisAccount {
+                code: Some(Bytes::from_static(&[0])),
+                storage: Some(
+                    [
+                        (fee_slot(0), B256::from(packed.to_be_bytes::<32>())),
+                        (fee_slot(1), collector),
+                        (fee_slot(2), B256::from(packed.to_be_bytes::<32>())),
+                        (fee_slot(3), collector),
+                    ]
+                    .into(),
+                ),
+                ..Default::default()
+            },
+        );
+        validate_genesis(&ChainSpec::from_genesis(genesis.clone()), seal).unwrap();
+        for i in 0..4 {
+            let mut wrong = genesis.clone();
+            let word = wrong
+                .alloc
+                .get_mut(&REGISTRY)
+                .unwrap()
+                .storage
+                .as_mut()
+                .unwrap()
+                .get_mut(&fee_slot(i))
+                .unwrap();
+            word[31] ^= 2;
+            assert!(validate_genesis(&ChainSpec::from_genesis(wrong), seal).is_err());
+        }
     }
 }
