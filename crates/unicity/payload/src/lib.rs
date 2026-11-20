@@ -35,6 +35,7 @@
 
 pub mod consensus;
 pub mod engine;
+mod fees;
 pub mod gossip;
 pub mod node;
 pub mod prune;

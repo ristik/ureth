@@ -455,13 +455,31 @@ impl UnicityParentAccountings {
         genesis_hash: B256,
         profile: reth_unicity_execution::block::BlockProfile,
     ) -> Result<Option<CompletedParent>, reth_unicity_store::StoreError> {
-        if let Some(entry) = self.lock().tokens.iter().find(|entry| entry.hash == header.hash()) {
-            if entry.identity != Some((chain_id, genesis_hash)) ||
-                entry.token.checked_next_base_fee(header, profile).is_err()
+        self.restore_with_profile(header, chain_id, genesis_hash, || Some(profile))
+    }
+
+    /// Loads a profile only when a cache entry or durable record exists for this header.
+    pub(crate) fn restore_with_profile(
+        &self,
+        header: &SealedHeader<Header>,
+        chain_id: u64,
+        genesis_hash: B256,
+        profile: impl FnOnce() -> Option<reth_unicity_execution::block::BlockProfile>,
+    ) -> Result<Option<CompletedParent>, reth_unicity_store::StoreError> {
+        let cached = self
+            .lock()
+            .tokens
+            .iter()
+            .find(|entry| entry.hash == header.hash())
+            .map(|entry| (entry.identity, entry.token));
+        if let Some((identity, token)) = cached {
+            let Some(profile) = profile() else { return Ok(None) };
+            if identity != Some((chain_id, genesis_hash)) ||
+                token.checked_next_base_fee(header, profile).is_err()
             {
                 return Err(reth_unicity_store::StoreError::Corrupt("cached accounting mismatch"));
             }
-            return Ok(Some(entry.token));
+            return Ok(Some(token));
         }
         let Some(store) = self.durable.get() else {
             if self.durability_required {
@@ -478,6 +496,7 @@ impl UnicityParentAccountings {
         {
             return Err(reth_unicity_store::StoreError::Corrupt("accounting chain identity"));
         }
+        let Some(profile) = profile() else { return Ok(None) };
         let token = CompletedParent::from_local_storage(record.accounting, header, profile)
             .map_err(|_| reth_unicity_store::StoreError::Corrupt("accounting/header mismatch"))?;
         token

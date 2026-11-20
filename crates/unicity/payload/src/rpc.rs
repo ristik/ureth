@@ -77,16 +77,14 @@ use reth_unicity_execution::{
         PairContext,
     },
     update::B1Job,
-    wire::{
-        bind_completed_parent, bind_validated_genesis, CanonicalCborError, SealBuildInput,
-        SealCompanion,
-    },
+    wire::{bind_validated_genesis, CanonicalCborError, SealBuildInput, SealCompanion},
     RootInputV2,
 };
 use reth_unicity_store::{open as open_companion_store, CompanionStore, Lookup, StoreError};
 use serde::{Deserialize, Serialize};
 
 use crate::{
+    fees::fee_state,
     gossip::GossipGate,
     node::{
         UnicityEngineValidator, UnicityEngineValidatorBuilder, UnicityNode, UnicityRetentionConfig,
@@ -190,6 +188,14 @@ pub struct SealConfigV1 {
     pub change_denominator: u64,
     /// Configured fee beneficiary.
     pub fee_collector: Address,
+    /// First block at which the current VR fee parameters apply.
+    pub effective_block: u64,
+    /// Genesis fee floor used in the immutable execution identity.
+    pub genesis_base_fee_floor: u64,
+    /// Genesis denominator used in the immutable execution identity.
+    pub genesis_change_denominator: u64,
+    /// Genesis collector used in the immutable execution identity.
+    pub genesis_fee_collector: Address,
     /// Root network identifier the pair is pinned to.
     pub network_id: u64,
     /// Identity of the pinned root genesis. The local Go side compares both pins with its own
@@ -207,6 +213,10 @@ impl From<UnicitySealConfig> for SealConfigV1 {
             elasticity: seal.profile.elasticity,
             change_denominator: seal.profile.change_denominator,
             fee_collector: seal.fee_collector,
+            effective_block: 0,
+            genesis_base_fee_floor: seal.profile.base_fee_floor,
+            genesis_change_denominator: seal.profile.change_denominator,
+            genesis_fee_collector: seal.fee_collector,
             network_id: seal.pins.network_id,
             root_genesis_id: seal.pins.root_genesis_id,
         }
@@ -386,7 +396,10 @@ pub fn prepare_seal_build<P>(
     seal_build_input: &SealBuildInput,
 ) -> Result<UnicityPayloadAttributes, SealBuildError>
 where
-    P: HeaderProvider<Header = Header> + BlockNumReader + ChainSpecProvider<ChainSpec = ChainSpec>,
+    P: HeaderProvider<Header = Header>
+        + BlockNumReader
+        + ChainSpecProvider<ChainSpec = ChainSpec>
+        + StateProviderFactory,
 {
     let attributes = attributes.cloned().ok_or(SealBuildError::AttributesMissing)?;
     // Match the stock `fork_choice_updated_v3` path: reject malformed attributes before any state
@@ -430,28 +443,26 @@ where
         update: seal_build_input.b1_update.clone(),
         records: seal_build_input.records.clone(),
     };
+    let fees = fee_state(provider, &chain_spec, parent.hash(), context.seal)
+        .map_err(|error| SealBuildError::Provider(error.to_string()))?;
+    let parent_profile = fees.for_block(parent.number).profile;
+    let child = fees.for_block(parent.number + 1);
     let bound = if parent.number == 0 && parent.hash() == genesis_hash {
-        bind_validated_genesis(
-            root,
-            b1,
-            context.seal.profile,
-            &parent,
-            genesis_hash,
-            context.seal.fee_collector,
-        )
-        .map_err(SealBuildError::Binding)?
+        bind_validated_genesis(root, b1, child.profile, &parent, genesis_hash, child.collector)
+            .map_err(SealBuildError::Binding)?
     } else {
         let lease = context
             .parent_accounting
-            .resolve(&parent, &chain_spec, context.seal.profile)
+            .resolve(&parent, &chain_spec, parent_profile)
             .map_err(|_| SealBuildError::ParentAccountingUnavailable)?;
-        bind_completed_parent(
-            root,
+        BoundExecutionInput::from_completed_parent_with_fees(
+            Arc::new(root),
             b1,
-            context.seal.profile,
+            parent_profile,
+            child.profile,
             &parent,
             lease.token(),
-            context.seal.fee_collector,
+            child.collector,
         )
         .map_err(SealBuildError::Binding)?
     };
@@ -947,30 +958,28 @@ where
             update: seal_companion.b1_update.clone(),
             records: seal_companion.records.clone(),
         };
+        let fees = fee_state(&self.provider, &chain_spec, parent_hash, self.context.seal)
+            .map_err(|error| SealImportError::Provider(error.to_string()))?;
+        let parent_profile = fees.for_block(parent.number).profile;
+        let child = fees.for_block(block.header().number);
         let (bound, parent_lease) = if parent.number == 0 && parent.hash() == genesis_hash {
-            bind_validated_genesis(
-                root,
-                b1,
-                self.context.seal.profile,
-                &parent,
-                genesis_hash,
-                self.context.seal.fee_collector,
-            )
-            .map(|bound| (bound, None))
-            .map_err(SealImportError::Binding)?
+            bind_validated_genesis(root, b1, child.profile, &parent, genesis_hash, child.collector)
+                .map(|bound| (bound, None))
+                .map_err(SealImportError::Binding)?
         } else {
             let lease = self
                 .context
                 .parent_accounting
-                .resolve(&parent, &chain_spec, self.context.seal.profile)
+                .resolve(&parent, &chain_spec, parent_profile)
                 .map_err(|_| SealImportError::ParentAccountingMissing)?;
-            bind_completed_parent(
-                root,
+            BoundExecutionInput::from_completed_parent_with_fees(
+                Arc::new(root),
                 b1,
-                self.context.seal.profile,
+                parent_profile,
+                child.profile,
                 &parent,
                 lease.token(),
-                self.context.seal.fee_collector,
+                child.collector,
             )
             .map(|bound| (bound, Some(lease)))
             .map_err(SealImportError::Binding)?
@@ -1037,7 +1046,26 @@ where
         + 'static,
 {
     async fn seal_config_v1(&self) -> RpcResult<SealConfigV1> {
-        Ok(self.context.seal.into())
+        let mut config = SealConfigV1::from(self.context.seal);
+        let chain = self.provider.chain_spec();
+        if crate::fees::has_registry(&chain) {
+            let view = || -> eyre::Result<_> {
+                let head = self.provider.best_block_number()?;
+                let hash = self
+                    .provider
+                    .block_hash(head)?
+                    .ok_or_else(|| eyre::eyre!("missing canonical head at {head}"))?;
+                let fees = fee_state(&self.provider, &chain, hash, self.context.seal)?;
+                Ok((fees.for_block(head + 1), fees.effective_block))
+            };
+            let (fees, effective) = view()
+                .map_err(|error| ErrorObjectOwned::owned(-32603, error.to_string(), None::<()>))?;
+            config.base_fee_floor = fees.profile.base_fee_floor;
+            config.change_denominator = fees.profile.change_denominator;
+            config.fee_collector = fees.collector;
+            config.effective_block = effective;
+        }
+        Ok(config)
     }
 
     async fn fork_choice_updated_with_seal_v1(

@@ -9,7 +9,7 @@ use alloy_primitives::B256;
 /// Maximum base fee accepted by the bounded profile.
 pub const MAX_BASE_FEE: u64 = 1 << 62;
 
-/// Fixed gas and fee parameters for one deployment.
+/// The generation’s fixed gas parameters and the fee parameters for one execution block.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct BlockProfile {
     /// Header gas limit (`g_max`), retained as the real EVM block gas limit.
@@ -172,7 +172,19 @@ impl ParentExecutionOutcome {
 
 /// Computes the next base fee from reconciled parent ordinary gas using checked wide arithmetic.
 pub fn next_base_fee(parent: ParentExecutionOutcome) -> Result<u64, BlockAccountingError> {
-    let profile = parent.profile;
+    next_base_fee_for_child(parent, parent.profile)
+}
+
+/// Computes the fee using a child's fee profile and the independently reconciled parent.
+pub fn next_base_fee_for_child(
+    parent: ParentExecutionOutcome,
+    profile: BlockProfile,
+) -> Result<u64, BlockAccountingError> {
+    if (profile.max_gas, profile.system_gas, profile.elasticity) !=
+        (parent.profile.max_gas, parent.profile.system_gas, parent.profile.elasticity)
+    {
+        return Err(BlockAccountingError::UnsupportedProfile);
+    }
     let ordinary_capacity = profile.ordinary_capacity()?;
     let target = ordinary_capacity / profile.elasticity;
     if target == 0 {

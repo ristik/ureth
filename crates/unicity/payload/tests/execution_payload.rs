@@ -35,7 +35,7 @@ use reth_storage_api::{
     BlockSource, HeaderProvider, ReceiptProvider, StateProviderBox, StateProviderFactory,
     TransactionVariant, TransactionsProvider,
 };
-use reth_storage_errors::provider::ProviderResult;
+use reth_storage_errors::provider::{ProviderError, ProviderResult};
 use reth_transaction_pool::{
     blobstore::InMemoryBlobStore, test_utils::OkValidator, CoinbaseTipOrdering,
     EthPooledTransaction, Pool, TransactionOrigin, TransactionPool,
@@ -77,7 +77,7 @@ use std::{
     ops::{RangeBounds, RangeInclusive},
     sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc, OnceLock,
+        Arc, Mutex, OnceLock,
     },
 };
 use support::{b1, provider::FixtureProvider};
@@ -1861,6 +1861,7 @@ struct ReplayProvider {
     client: Client,
     blocks: BTreeMap<B256, Block>,
     states: BTreeMap<B256, FixtureProvider>,
+    state_reads: Mutex<Vec<B256>>,
 }
 
 impl ChainSpecProvider for ReplayProvider {
@@ -2155,7 +2156,9 @@ impl StateProviderFactory for ReplayProvider {
     }
 
     fn state_by_block_hash(&self, hash: B256) -> ProviderResult<StateProviderBox> {
-        Ok(Box::new(self.states.get(&hash).expect("captured parent state").clone()))
+        self.state_reads.lock().unwrap().push(hash);
+        let state = self.states.get(&hash).ok_or(ProviderError::StateForHashNotFound(hash))?;
+        Ok(Box::new(state.clone()))
     }
 
     fn pending(&self) -> ProviderResult<StateProviderBox> {
@@ -2200,6 +2203,7 @@ impl CapturedRouteHistory {
             },
             blocks,
             states,
+            state_reads: Mutex::default(),
         }
     }
 
@@ -4963,4 +4967,82 @@ async fn a_pool_batch_call_that_hits_a_corrupt_epoch_entry_fails_the_whole_build
         assert_eq!(rig.failed_attempt(), (first.clone(), first_reads), "deterministic and bounded");
     }
     assert_eq!(rig.pool.pool_size().total, pooled, "the pool is untouched");
+}
+
+#[tokio::test]
+async fn vr_recovery_admits_retained_head_with_pruned_older_fee_state() {
+    let history = capture_paid_idle_transition_fixture().await;
+    let mut provider = history.recovery_provider(3);
+    let [first, second, head] = &history.blocks[..] else { panic!("expected three blocks") };
+    let first_hash = first.payload.block().hash();
+    let second_hash = second.payload.block().hash();
+    let head_hash = head.payload.block().hash();
+
+    // Keep the existing sealed fixture and give its state provider just the VR snapshot needed
+    // to reconcile the retained head. The older token's parent state has already been pruned.
+    let vr: Address = "0xff00000000000000000000000000000000000003".parse().unwrap();
+    let account = serde_json::json!({
+        "balance": "0x0",
+        "code": "0x00",
+        "storage": {
+            "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f90b": format!(
+                "{:#066x}", U256::from(profile().change_denominator) << 64 | U256::from(profile().base_fee_floor)
+            ),
+            "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f90c": format!(
+                "{:#066x}", U256::from_be_slice(FEE_COLLECTOR.as_slice())
+            ),
+            "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f90d": format!(
+                "{:#066x}", U256::from(profile().change_denominator) << 64 | U256::from(profile().base_fee_floor)
+            ),
+            "0x2015195c564edf8b5942ad7bb1fe48e96d190815eb762db2ddff1d85ce73f90e": format!(
+                "{:#066x}", U256::from_be_slice(FEE_COLLECTOR.as_slice())
+            ),
+        },
+    });
+    let chain = Arc::make_mut(&mut provider.client.chain_spec);
+    chain.genesis.alloc.insert(vr, serde_json::from_value(account.clone()).unwrap());
+    let chain_id = chain.chain().id();
+    let genesis = chain.genesis_hash();
+    provider.states.clear();
+    provider.states.insert(
+        second_hash,
+        FixtureProvider::from_json(
+            &serde_json::json!({"alloc": {(vr.to_string()): account}}).to_string(),
+        ),
+    );
+
+    let (_dir, store) = temp_store();
+    let previous = UnicityParentAccountings::new().require_durability();
+    previous.attach_store(store.clone());
+    previous.publish(first_hash, 1, chain_id, genesis, first.completed).unwrap();
+    previous.publish(head_hash, 3, chain_id, genesis, head.completed).unwrap();
+    store.put(head_hash, 3, &head.companion).unwrap();
+
+    let restored = UnicityParentAccountings::new().require_durability();
+    restored.attach_store(store.clone());
+    reth_unicity_payload::recovery::hydrate_accounting(&provider, &restored, profile()).unwrap();
+    assert!(restored.get(&first_hash).is_none());
+    assert!(restored.get(&head_hash).is_some());
+    assert!(
+        !provider.state_reads.lock().unwrap().contains(&first_hash),
+        "no VR read for B2 without a token"
+    );
+
+    reth_unicity_payload::recovery::admit_recovered_head(
+        &provider,
+        &store,
+        &restored,
+        UnicitySealConfig {
+            profile: profile(),
+            fee_collector: FEE_COLLECTOR,
+            pins: pair_pins(),
+            b1: b1::context(),
+        },
+        &head.import_companion.pair_binding,
+        3,
+    )
+    .unwrap();
+    assert!(restored.is_admitted(&head_hash));
+    assert!(!restored.is_admitted(&first_hash));
+    assert!(!provider.state_reads.lock().unwrap().contains(&first_hash));
 }
