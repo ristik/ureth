@@ -404,11 +404,12 @@ where
         // its reauthenticated parent context for the head (`engine_admitParentV1`), which runs the
         // full recovery admission, replaying any missing head accounting under it. Startup never
         // exposes retained accounting by itself.
-        Ok(Arc::new(UnicityConsensus::new(
-            ctx.chain_spec(),
-            self.seal.profile,
-            self.parent_accounting,
-        )))
+        let chain = ctx.chain_spec();
+        let fees = crate::fees::FeeReader::new(ctx.provider().clone(), &chain, self.seal);
+        crate::fees::validate_genesis(&chain, self.seal)?;
+        Ok(Arc::new(
+            UnicityConsensus::new(chain, self.seal.profile, self.parent_accounting).with_fees(fees),
+        ))
     }
 }
 
