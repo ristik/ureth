@@ -9,21 +9,23 @@
 //!   [`check_payload`]), and for kinds 6 to 8 the strict decoder ([`decode_registry_record`]);
 //! - `record.gas`: the import's pricing constants;
 //! - `fee.validate`: [`BlockProfile::validate`];
-//! - `fee.nextBaseFee`: [`ParentExecutionOutcome::reconcile`] and [`next_base_fee`];
-//! - `fee.transition`: the parent reconciles under F(N-1) and the child base fee under F(N). The
-//!   F(N) selection itself is VT-06c; this test derives it from the vector's boundary.
+//! - `fee.nextBaseFee`: [`ParentExecutionOutcome::reconcile`] and [`next_base_fee_for_child`];
+//! - `fee.transition`: checked parent accounting under F(N-1) and child base fee under F(N).
 //!
 //! The remaining ops (codecs, digests, handoff, arithmetic of the registry) are VR-side.
 
 use crate::{
-    block::{next_base_fee, BlockAccountingError, BlockProfile, ParentExecutionOutcome},
+    block::{next_base_fee_for_child, BlockAccountingError, BlockProfile, ParentExecutionOutcome},
+    block_executor::{CompletedParent, LocalParentAccounting},
     records::{
         check_payload, decode_registry_record, payload_width, word_types, PayloadError, WordType,
         ENTRY_GAS, MAX_IMPORT_BYTES, MAX_IMPORT_ENTRIES, SCAN_BASE_GAS, SCAN_BYTE_GAS,
     },
     sha256,
 };
+use alloy_consensus::Header;
 use alloy_primitives::{hex, B256};
+use reth_primitives_traits::SealedHeader;
 use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -230,15 +232,8 @@ fn vr_schema_fee_validate() {
     }
 }
 
-/// The child base fee of a parent with `ordinary_used` of `ordinary_capacity` under `floor` and
-/// `denominator`, through the reconciled [`next_base_fee`] path.
-///
-/// ureth's single profile reconciles the parent against the same floor the child clamps to, so a
-/// child floor above the parent's base fee (an upward F(N) floor change, VT-06c) is not expressible
-/// directly. The parent is reconciled with the floor lowered to `min(floor, parent_base_fee)` and
-/// the child floor is applied afterwards; since `floor >= min(floor, parent_base_fee)` this is
-/// exactly `clamp(eip1559, floor, MAX_BASE_FEE)`, and it is the plain path whenever the parent
-/// meets the floor.
+/// The arithmetic-only vectors name the child profile. Reconcile the parent under a floor
+/// that admits its base fee; the transition vectors below provide the actual parent profile.
 fn child_base_fee(
     parent_base_fee: u64,
     ordinary_used: u64,
@@ -257,7 +252,7 @@ fn child_base_fee(
         SYSTEM_GAS,
         parent_base_fee,
     )?;
-    Ok(next_base_fee(parent)?.max(floor))
+    next_base_fee_for_child(parent, profile(max_gas, SYSTEM_GAS, floor, denominator))
 }
 
 #[test]
@@ -325,17 +320,37 @@ fn vr_schema_fee_transition() {
             if let Some(previous_child) = chained {
                 assert_eq!(parent_base_fee, previous_child, "{at}: parent is the previous child");
             }
-            let reconciles = ParentExecutionOutcome::reconcile(
-                profile(capacity + SYSTEM_GAS, SYSTEM_GAS, f_parent.floor, f_parent.denominator),
-                B256::ZERO,
-                used + SYSTEM_GAS,
-                SYSTEM_GAS,
-                parent_base_fee,
-            )
-            .is_ok();
-            assert_eq!(reconciles, row["parentReconciles"].as_bool().unwrap(), "{at}");
-
-            let child = child_base_fee(parent_base_fee, used, capacity, f_n.floor, f_n.denominator);
+            let parent_profile =
+                profile(capacity + SYSTEM_GAS, SYSTEM_GAS, f_parent.floor, f_parent.denominator);
+            let child_profile =
+                profile(capacity + SYSTEM_GAS, SYSTEM_GAS, f_n.floor, f_n.denominator);
+            let header = Header {
+                number: n - 1,
+                gas_limit: parent_profile.max_gas,
+                gas_used: used + SYSTEM_GAS,
+                base_fee_per_gas: Some(parent_base_fee),
+                ..Default::default()
+            };
+            let header = SealedHeader::seal_slow(header);
+            let token = CompletedParent::from_local_storage(
+                LocalParentAccounting {
+                    block_hash: header.hash(),
+                    profile: parent_profile,
+                    header_gas: header.gas_used,
+                    system_gas: SYSTEM_GAS,
+                    ordinary_gas: used,
+                    base_fee: parent_base_fee,
+                },
+                &header,
+                parent_profile,
+            );
+            assert_eq!(token.is_ok(), row["parentReconciles"].as_bool().unwrap(), "{at}");
+            let token = token.unwrap();
+            let child =
+                token.checked_next_base_fee_for_child(&header, parent_profile, child_profile);
+            if n == effective {
+                assert!(token.checked_next_base_fee(&header, child_profile).is_err(), "{at}");
+            }
             let want = expect_error(row);
             assert_eq!(error_name(child), want, "{at}: {child:?}");
             if want.is_empty() {

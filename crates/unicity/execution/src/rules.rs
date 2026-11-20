@@ -121,7 +121,7 @@ pub fn builtin_rules() -> Vec<KnownRule> {
 
 /// The rules the binary implements: none, in a `no-test-rule` build.
 #[cfg(feature = "no-test-rule")]
-pub fn builtin_rules() -> Vec<KnownRule> {
+pub const fn builtin_rules() -> Vec<KnownRule> {
     Vec::new()
 }
 

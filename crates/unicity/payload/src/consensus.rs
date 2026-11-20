@@ -15,10 +15,14 @@ use reth_ethereum_consensus::EthBeaconConsensus;
 use reth_ethereum_primitives::{Block, EthPrimitives, Receipt};
 use reth_execution_types::BlockExecutionResult;
 use reth_primitives_traits::{GotExpected, RecoveredBlock, SealedBlock, SealedHeader};
-use reth_unicity_execution::{block::BlockProfile, block_executor::CompletedParent};
+use reth_unicity_execution::{
+    block::{BlockProfile, MAX_BASE_FEE},
+    block_executor::CompletedParent,
+};
 
-use crate::registry::{
-    ParentAccountingResolver, ParentAccountingUnavailable, UnicityParentAccountings,
+use crate::{
+    fees::FeeReader,
+    registry::{ParentAccountingResolver, ParentAccountingUnavailable, UnicityParentAccountings},
 };
 
 /// Ethereum consensus with only the parent base-fee rule replaced by Unicity's ordinary-gas rule.
@@ -28,12 +32,24 @@ pub struct UnicityConsensus<R = UnicityParentAccountings> {
     chain_spec: Arc<ChainSpec>,
     profile: BlockProfile,
     resolver: R,
+    fees: Option<FeeReader>,
 }
 
 impl<R> UnicityConsensus<R> {
     /// Constructs the fee validator over the same chain and accounting source used by seal paths.
     pub fn new(chain_spec: Arc<ChainSpec>, profile: BlockProfile, resolver: R) -> Self {
-        Self { inner: EthBeaconConsensus::new(chain_spec.clone()), chain_spec, profile, resolver }
+        Self {
+            inner: EthBeaconConsensus::new(chain_spec.clone()),
+            chain_spec,
+            profile,
+            resolver,
+            fees: None,
+        }
+    }
+
+    pub(crate) fn with_fees(mut self, fees: Option<FeeReader>) -> Self {
+        self.fees = fees;
+        self
     }
 }
 
@@ -42,7 +58,13 @@ where
     R: ParentAccountingResolver + Clone + Debug,
 {
     fn validate_header(&self, header: &SealedHeader<Header>) -> Result<(), ConsensusError> {
-        self.inner.validate_header(header)
+        self.inner.validate_header(header)?;
+        if header.base_fee_per_gas.is_some_and(|fee| fee > MAX_BASE_FEE) {
+            return Err(ConsensusError::other(std::io::Error::other(
+                "Unicity base fee exceeds its bound",
+            )));
+        }
+        Ok(())
     }
 
     fn validate_header_against_parent(
@@ -54,18 +76,33 @@ where
         validate_against_parent_timestamp(header.header(), parent.header())?;
         validate_against_parent_gas_limit(header, parent, &self.chain_spec)?;
 
+        let unavailable = || ConsensusError::other(ParentAccountingUnavailable(parent.hash()));
+        let (parent_profile, child_profile) = if let Some(reader) = &self.fees {
+            let state = reader.at(parent.hash()).map_err(|_| unavailable())?;
+            let child_fees = state.for_block(header.number);
+            if header.beneficiary != child_fees.collector {
+                return Err(ConsensusError::other(std::io::Error::other(
+                    "invalid VR fee collector",
+                )));
+            }
+            (state.for_block(parent.number).profile, child_fees.profile)
+        } else {
+            (self.profile, self.profile)
+        };
         let expected = if parent.number == 0 && parent.hash() == self.chain_spec.genesis_hash() {
             CompletedParent::genesis_next_base_fee(
                 parent,
                 self.chain_spec.genesis_hash(),
-                self.profile,
+                child_profile,
             )
-            .map_err(|_| ConsensusError::other(ParentAccountingUnavailable(parent.hash())))?
+            .map_err(|_| unavailable())?
         } else {
             self.resolver
-                .resolve(parent, &self.chain_spec, self.profile)
+                .resolve(parent, &self.chain_spec, parent_profile)
                 .map_err(ConsensusError::other)?
-                .next_fee()
+                .token()
+                .checked_next_base_fee_for_child(parent, parent_profile, child_profile)
+                .map_err(|_| unavailable())?
         };
         let got = header.base_fee_per_gas.ok_or(ConsensusError::BaseFeeMissing)?;
         if got != expected {

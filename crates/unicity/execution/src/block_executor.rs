@@ -1,7 +1,10 @@
 //! Shared Ethereum block executor with the bounded Unicity system prefix.
 
 use crate::{
-    block::{next_base_fee, BlockGasAccounting, BlockProfile, ParentExecutionOutcome},
+    block::{
+        next_base_fee, next_base_fee_for_child, BlockGasAccounting, BlockProfile,
+        ParentExecutionOutcome,
+    },
     derive_beacon_root, derive_prev_randao, derive_timestamp,
     evm_factory::{UnicityEvmFactory, UnicityInnerEvmConfig},
     execute_registry_transition_on_db,
@@ -144,15 +147,36 @@ impl BoundExecutionInput {
         completed: CompletedParent,
         fee_collector: Address,
     ) -> Result<Self, crate::block::BlockAccountingError> {
+        Self::from_completed_parent_with_fees(
+            input,
+            b1,
+            profile,
+            profile,
+            parent,
+            completed,
+            fee_collector,
+        )
+    }
+
+    /// Binds a child whose fee parameters may differ from its parent's.
+    pub fn from_completed_parent_with_fees(
+        input: Arc<RootInputV2>,
+        b1: B1Job,
+        parent_profile: BlockProfile,
+        profile: BlockProfile,
+        parent: &SealedHeader<Header>,
+        completed: CompletedParent,
+        fee_collector: Address,
+    ) -> Result<Self, crate::block::BlockAccountingError> {
         if parent.header().hash_slow() != parent.hash() ||
             input.parent_hash != parent.hash() ||
             completed.0.parent_hash() != parent.hash() ||
-            completed.0.profile() != profile
+            completed.0.profile() != parent_profile
         {
             return Err(crate::block::BlockAccountingError::ParentGasMismatch);
         }
         b1.check_bound(&input, &profile)?;
-        completed.checked_next_base_fee(parent, profile)?;
+        completed.checked_next_base_fee_for_child(parent, parent_profile, profile)?;
         Ok(Self {
             input,
             profile,
@@ -248,6 +272,16 @@ impl CompletedParent {
         parent: &SealedHeader<Header>,
         profile: BlockProfile,
     ) -> Result<u64, crate::block::BlockAccountingError> {
+        self.checked_next_base_fee_for_child(parent, profile, profile)
+    }
+
+    /// Reconciles the parent under its own fee rules and calculates the child fee under its rules.
+    pub fn checked_next_base_fee_for_child(
+        self,
+        parent: &SealedHeader<Header>,
+        profile: BlockProfile,
+        child_profile: BlockProfile,
+    ) -> Result<u64, crate::block::BlockAccountingError> {
         use crate::block::BlockAccountingError;
         if parent.header().hash_slow() != parent.hash() ||
             self.0.parent_hash() != parent.hash() ||
@@ -268,7 +302,7 @@ impl CompletedParent {
         if checked.ordinary_gas() != self.0.ordinary_gas() {
             return Err(BlockAccountingError::ParentGasMismatch);
         }
-        next_base_fee(checked)
+        next_base_fee_for_child(checked, child_profile)
     }
 
     /// Applies the configured-genesis zero-system-gas rule for the first child.
@@ -900,8 +934,9 @@ impl ConfigureEvm for UnicityEvmConfig {
         self.bound
             .check_chain_spec(env.cfg_env.spec)
             .map_err(|_| BindingError("only the fixed Cancun profile is supported"))?;
-        env.block_env.basefee = next_base_fee(self.bound.parent_execution)
-            .map_err(|_| BindingError("next base fee derivation failed"))?;
+        env.block_env.basefee =
+            next_base_fee_for_child(self.bound.parent_execution, self.bound.profile)
+                .map_err(|_| BindingError("next base fee derivation failed"))?;
         env.block_env.gas_limit = self.bound.profile.max_gas;
         Ok(env)
     }
@@ -940,7 +975,7 @@ impl ConfigureEvm for UnicityEvmConfig {
                 )) ||
             header.base_fee_per_gas !=
                 Some(
-                    next_base_fee(self.bound.parent_execution)
+                    next_base_fee_for_child(self.bound.parent_execution, self.bound.profile)
                         .map_err(|_| BindingError("next base fee derivation failed"))?,
                 ) ||
             header.gas_limit != self.bound.profile.max_gas ||
