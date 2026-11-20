@@ -356,18 +356,44 @@ pub fn evaluate(entries: &[ScheduleEntry], known: &[KnownRule], block_epoch: u64
     Resolution { spec, active: RuleSet { ids: active }, lacking, refusal }
 }
 
+/// An effective or latched schedule entry as the operator view shows it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScheduledView {
+    /// The rule.
+    pub rule_id: B256,
+    /// Its release digest.
+    pub release_digest: B256,
+    /// The root epoch it takes effect from.
+    pub root_epoch: u64,
+    /// Whether the entry is latched.
+    pub latched: bool,
+    /// Whether this binary knows the rule.
+    pub known: bool,
+}
+
+/// The schedule as the canonical head holds it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HeadView {
+    /// Every effective or latched entry.
+    pub scheduled: Vec<ScheduledView>,
+    /// Those this binary lacks (the warnings).
+    pub lacking: Vec<Lacking>,
+}
+
 #[derive(Debug, Default)]
 struct State {
     /// `(rule, epoch)` labels currently reported on the gauge.
     reported: BTreeSet<(B256, u64)>,
-    /// The latest resolution, for introspection (`unicity_rulesV1`).
-    last: Option<(u64, Resolution)>,
+    /// The canonical head's schedule view (`unicity_rulesV1`); set only by
+    /// [`UnicityRules::observe_head`].
+    head: Option<HeadView>,
 }
 
 #[derive(Debug)]
 struct Inner {
     known: Vec<KnownRule>,
-    /// Observability only. No decision ever reads it: every refusal is a pure function of the
+    /// Observability only, driven by the canonical head alone; execution attempts (build, import,
+    /// replay) never write it. No decision ever reads it: every refusal is a pure function of the
     /// parent state and the block's root epoch, so a cold and a warm node decide identically.
     state: Mutex<State>,
 }
@@ -426,13 +452,14 @@ impl UnicityRules {
         Ok((resolution.spec, resolution.active))
     }
 
-    /// [`Self::resolve`] with the whole [`Resolution`] (the pending warnings included).
+    /// [`Self::resolve`] with the whole [`Resolution`].
     ///
     /// The bounded schedule (at most 64 entries, 3 words each) is read and evaluated on every
     /// call. There is deliberately no result cache: a cache key cannot cover earlier entries
     /// without reading them, and an in-place latch changes an entry without changing its count, so
-    /// any cheaper key could serve another parent's schedule across a reorg or replay. The
-    /// observability state (gauge, log, `unicity_rulesV1`) follows the latest resolution.
+    /// any cheaper key could serve another parent's schedule across a reorg or replay. A
+    /// resolution is an execution attempt and never touches the operator view: historical
+    /// execution must not overwrite what the canonical head shows.
     pub fn resolve_full<DB: Database>(
         &self,
         parent_state: &mut DB,
@@ -441,16 +468,43 @@ impl UnicityRules {
     ) -> Result<Resolution, RuleError> {
         let entries =
             if vr == Address::ZERO { Vec::new() } else { read_schedule(parent_state, vr)? };
-        let resolution = evaluate(&entries, &self.inner.known, root_epoch);
-        self.observe(root_epoch, &resolution);
-        finish(resolution)
+        finish(evaluate(&entries, &self.inner.known, root_epoch))
     }
 
-    fn observe(&self, epoch: u64, resolution: &Resolution) {
+    /// Publishes the operator view (gauge `unicity_upgrade_required`, the warning log and
+    /// `unicity_rulesV1`) from the schedule in the canonical head's state. Call it only on a
+    /// canonical-head update (the canonical-state stream), never from execution of other blocks.
+    pub fn observe_head<DB: Database>(
+        &self,
+        head_state: &mut DB,
+        vr: Address,
+    ) -> Result<(), RuleError> {
+        let entries = if vr == Address::ZERO { Vec::new() } else { read_schedule(head_state, vr)? };
+        // the lacking set does not depend on the epoch
+        let resolution = evaluate(&entries, &self.inner.known, 0);
+        let mut effective: BTreeMap<B256, &ScheduleEntry> = BTreeMap::new();
+        for e in entries.iter().filter(|e| e.state != EntryState::Superseded) {
+            effective.insert(e.rule_id, e);
+        }
+        let scheduled = effective
+            .values()
+            .map(|e| ScheduledView {
+                rule_id: e.rule_id,
+                release_digest: e.release_digest,
+                root_epoch: e.root_epoch,
+                latched: e.state == EntryState::Latched,
+                known: self.inner.known.iter().any(|k| k.id == e.rule_id),
+            })
+            .collect();
+        self.publish(HeadView { scheduled, lacking: resolution.lacking });
+        Ok(())
+    }
+
+    fn publish(&self, view: HeadView) {
         let mut state = self.lock();
         let now: BTreeSet<(B256, u64)> =
-            resolution.lacking.iter().map(|l| (l.rule_id, l.root_epoch)).collect();
-        for l in &resolution.lacking {
+            view.lacking.iter().map(|l| (l.rule_id, l.root_epoch)).collect();
+        for l in &view.lacking {
             if state.reported.insert((l.rule_id, l.root_epoch)) {
                 tracing::warn!(
                     target: "unicity::rules",
@@ -479,7 +533,7 @@ impl UnicityRules {
             .set(0.0);
             state.reported.remove(&(rule, epoch));
         }
-        state.last = Some((epoch, resolution.clone()));
+        state.head = Some(view);
     }
 
     /// The structural check for sites that hold no state (`evm_env`, `next_evm_env`): the spec must
@@ -494,9 +548,9 @@ impl UnicityRules {
         Ok(())
     }
 
-    /// What the latest resolution saw, for `unicity_rulesV1`: `(block epoch, resolution)`.
-    pub fn latest(&self) -> Option<(u64, Resolution)> {
-        self.lock().last.clone()
+    /// The canonical head's schedule view, if one was observed (`unicity_rulesV1`).
+    pub fn head_view(&self) -> Option<HeadView> {
+        self.lock().head.clone()
     }
 }
 
@@ -719,16 +773,22 @@ mod tests {
     }
 
     #[test]
-    fn the_latest_resolution_drives_the_view_on_every_call() {
+    fn only_the_canonical_head_drives_the_operator_view() {
         let rules = UnicityRules::with_known(known_noop());
         let mut head = seed(&[entry("future", 10, EntryState::Active, 1)]);
         let mut older = seed(&[]);
-        rules.resolve(&mut head, VR, 5).unwrap();
-        assert_eq!(rules.latest().unwrap().1.lacking.len(), 1);
+        assert!(rules.head_view().is_none());
+        rules.observe_head(&mut head, VR).unwrap();
+        assert_eq!(rules.head_view().unwrap().lacking.len(), 1);
+        // replay or import of an older parent resolves its own schedule and leaves the view alone
         rules.resolve(&mut older, VR, 4).unwrap();
-        assert!(rules.latest().unwrap().1.lacking.is_empty());
-        rules.resolve(&mut head, VR, 5).unwrap();
-        assert_eq!(rules.latest().unwrap().1.lacking.len(), 1, "back at the head: warning is back");
+        assert!(rules.resolve_full(&mut head, VR, 5).is_ok());
+        assert_eq!(rules.head_view().unwrap().lacking.len(), 1, "head warning survives");
+        assert_eq!(rules.lock().reported.len(), 1, "and so does its gauge label");
+        // a new canonical head without the entry (postponed away) clears it
+        rules.observe_head(&mut older, VR).unwrap();
+        assert!(rules.head_view().unwrap().lacking.is_empty());
+        assert!(rules.lock().reported.is_empty());
     }
 
     #[test]

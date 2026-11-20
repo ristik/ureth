@@ -720,8 +720,11 @@ where
         let (spec, _active) =
             bound.resolve_parent(self.inner.evm.db_mut()).map_err(BlockExecutionError::other)?;
         // The resolved spec must be the one this block's EVM, and so every ordinary transaction,
-        // runs under. `evm_env` is built before any state is read, so a rule that selects another
-        // spec cannot be half applied: it fails here until the environment is rule-aware.
+        // runs under. `evm_env` is built before any state is read, so a known rule that selects a
+        // different spec cannot be applied yet: ordinary transactions under a newly selected spec
+        // are refused explicitly here rather than half applied (system VMs on the new spec,
+        // transactions on the old). Real fork support, a rule-aware environment, is
+        // ristik/bft-core#1230. The shipped no-op rule is fork-neutral and never hits this.
         let env_spec = self.inner.evm.cfg_env().spec;
         if format!("{env_spec:?}") != format!("{spec:?}") {
             return Err(BlockExecutionError::msg(format!(

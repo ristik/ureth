@@ -1419,10 +1419,10 @@ pub struct RulesV1 {
     pub genesis_spec: String,
     /// The rules this binary implements.
     pub known: Vec<KnownRuleV1>,
-    /// The block epoch of the latest resolution, if any block has been resolved.
-    pub latest_epoch: Option<u64>,
-    /// Known rules active at that epoch.
-    pub active: Vec<B256>,
+    /// Whether a canonical head has been observed yet; the lists below are empty until then.
+    pub observed: bool,
+    /// Effective or latched schedule entries at the canonical head.
+    pub scheduled: Vec<ScheduledRuleV1>,
     /// Scheduled rules this binary lacks, in force or not yet.
     pub lacking: Vec<LackingRuleV1>,
 }
@@ -1434,6 +1434,22 @@ pub struct KnownRuleV1 {
     pub name: String,
     /// `keccak256("unicity.rule/" + name)`.
     pub id: B256,
+}
+
+/// A schedule entry in [`RulesV1`].
+#[derive(Clone, Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduledRuleV1 {
+    /// The rule id.
+    pub rule_id: B256,
+    /// The release digest the schedule names.
+    pub release_digest: B256,
+    /// The root epoch it takes effect from.
+    pub root_epoch: u64,
+    /// Whether the entry is latched.
+    pub latched: bool,
+    /// Whether this binary knows the rule.
+    pub known: bool,
 }
 
 /// A scheduled rule the binary lacks, in [`RulesV1`].
@@ -1515,7 +1531,7 @@ where
 
     async fn rules_v1(&self) -> RpcResult<RulesV1> {
         let rules = reth_unicity_execution::rules::UnicityRules::global();
-        let latest = rules.latest();
+        let head = rules.head_view();
         Ok(RulesV1 {
             genesis_spec: format!("{:?}", reth_unicity_execution::rules::GENESIS_SPEC),
             known: rules
@@ -1523,15 +1539,21 @@ where
                 .iter()
                 .map(|k| KnownRuleV1 { name: k.name.to_string(), id: k.id })
                 .collect(),
-            latest_epoch: latest.as_ref().map(|(e, _)| *e),
-            active: latest
-                .as_ref()
-                .map(|(_, r)| r.active.ids().copied().collect())
-                .unwrap_or_default(),
-            lacking: latest
-                .map(|(_, r)| r.lacking)
-                .unwrap_or_default()
-                .into_iter()
+            observed: head.is_some(),
+            scheduled: head
+                .iter()
+                .flat_map(|h| h.scheduled.iter())
+                .map(|e| ScheduledRuleV1 {
+                    rule_id: e.rule_id,
+                    release_digest: e.release_digest,
+                    root_epoch: e.root_epoch,
+                    latched: e.latched,
+                    known: e.known,
+                })
+                .collect(),
+            lacking: head
+                .iter()
+                .flat_map(|h| h.lacking.iter())
                 .map(|l| LackingRuleV1 {
                     rule_id: l.rule_id,
                     release_digest: l.release_digest,

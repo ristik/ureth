@@ -41,6 +41,7 @@ pub mod prune;
 pub mod recovery;
 pub mod registry;
 pub mod rpc;
+pub mod rules_head;
 
 pub use consensus::UnicityConsensus;
 pub use engine::UnicityEngineTypes;
