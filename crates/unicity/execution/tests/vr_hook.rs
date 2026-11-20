@@ -79,10 +79,12 @@ const FIXTURE_SHA256_POA: B256 =
     alloy_primitives::b256!("54d69d3f95c67b4af77e59a8a64c3804b81848b6c9b40a3074ee679db00fa2ce");
 /// SHA-256 of `testdata/vr-hook-pos.json`, the copy of `test/vr/fixtures/vr-hook-pos.json` (the
 /// generator under `VR_BUILD=pos`: the PoS-capable VR build, H = 16).
-const FIXTURE_SHA256_POS: B256 = alloy_primitives::b256!("dadd3f0be855a6a6c9d6c7b111f8be5ed0be6e7c0fe9d7bb6d3603915be57a76");
+const FIXTURE_SHA256_POS: B256 =
+    alloy_primitives::b256!("dadd3f0be855a6a6c9d6c7b111f8be5ed0be6e7c0fe9d7bb6d3603915be57a76");
 /// The unicity-pos-contracts commit the fixture was copied from.
 const FIXTURE_SOURCE: &str = "vt14/genesis (ristik/unicity-pos-contracts, VT-14 combined fixtures)";
-const FIXTURE_SOURCE_POS: &str = "vt04b/hook-pins (ristik/unicity-pos-contracts, the PoS-capable build, H = 16)";
+const FIXTURE_SOURCE_POS: &str =
+    "vt04b/hook-pins (ristik/unicity-pos-contracts, the PoS-capable build, H = 16)";
 /// Every scenario the generator (`test/vr/VRHookState.t.sol`) dumps, exactly.
 const SCENARIOS: [&str; 36] = [
     "attach-revert",
@@ -215,8 +217,9 @@ struct Build {
     /// `R_H`: the smallest records reservation of the full H delivery at the maximum record cap
     /// (`batch32-max`, whatever H).
     batch_requirement: u64,
-    /// The same full batch with its ordinary records HolderRetirements (`batch32-retire`, the PoS-capable build's fixture only; 0
-    /// where the fixture has none). `R_H` is the larger of the two batches.
+    /// The same full batch with its ordinary records HolderRetirements (`batch32-retire`, the
+    /// PoS-capable build's fixture only; 0 where the fixture has none). `R_H` is the larger of the
+    /// two batches.
     retire_requirement: u64,
     /// The numbers the pins are asserted to be (the derivation's result; see the PR).
     expected_hook_record_gas: u64,
@@ -1187,7 +1190,11 @@ fn measure(s: &Scenario) -> HookGas {
             .unwrap_or(false)
     });
     assert!(min_records <= HOOK_READS_GAS + n * b().hook_record_gas(), "{}", s.name);
-    assert!(n == 0 || min_records.div_ceil(n) <= b().record_requirement, "{}: {min_records}", s.name);
+    assert!(
+        n == 0 || min_records.div_ceil(n) <= b().record_requirement,
+        "{}: {min_records}",
+        s.name
+    );
     assert!(min_elect <= b().elect_requirement, "{}: {min_elect}", s.name);
     assert!(min_elect <= b().elect_gas(), "{}", s.name);
     println!(
@@ -1365,8 +1372,15 @@ fn hook_gas_switching_boundary_alone_at_the_maximum_caps() {
         b().hook_record_gas(),
         b().record_analytical()
     );
-    assert_eq!(g.min_records, b().record_requirement, "the recorded requirement is this measurement");
-    assert!(g.min_records > b().record_analytical(), "the small-payload analytical figure is too low");
+    assert_eq!(
+        g.min_records,
+        b().record_requirement,
+        "the recorded requirement is this measurement"
+    );
+    assert!(
+        g.min_records > b().record_analytical(),
+        "the small-payload analytical figure is too low"
+    );
     assert!(g.min_records <= HOOK_READS_GAS + b().hook_record_gas());
 }
 
@@ -1407,7 +1421,10 @@ fn the_maximum_compound_paths_run_as_forge_computed() {
     assert_eq!((u64::from(s.h), s.records.len() as u64, s.expect.applied), (h, h, h));
     let (_, after) = World::new(s).build(pinned(s)).unwrap();
     assert_eq!(health_of(&after), 0);
-    assert_eq!(module_log(&after, mock), ["onResolved:1".to_string(), format!("onRecords:0:{h}"), "elect".to_string()]);
+    assert_eq!(
+        module_log(&after, mock),
+        ["onResolved:1".to_string(), format!("onRecords:0:{h}"), "elect".to_string()]
+    );
     assert_eq!(output_state(&after, r), 5, "R Acknowledged");
 
     // the same batch with onRecords exhausting its cap: applied, rolled back, Faulted
@@ -1428,14 +1445,23 @@ fn the_maximum_compound_paths_run_as_forge_computed() {
 
     // the 16-member switching Boundary at the maximum caps, delivered a block after its Ack
     let s = scenario("switch-max");
-    // the PoS-capable fixture first fills the activation table (ten records, applied before the block)
+    // the PoS-capable fixture first fills the activation table (ten records, applied before the
+    // block)
     let fill = s.records.len() as u64 - 2;
     let kinds: Vec<u8> = s.records.iter().map(|r| r.kind).collect();
     assert_eq!(kinds[kinds.len() - 2..], [2, 6]);
     assert_eq!(fill, if b().name == "pos" { 10 } else { 0 });
-    assert_eq!((s.expect.applied, s.expect.cursor), (1, 2 + fill), "the Boundary alone in this block");
+    assert_eq!(
+        (s.expect.applied, s.expect.cursor),
+        (1, 2 + fill),
+        "the Boundary alone in this block"
+    );
     let (before, _) = World::new(s).before_hooks();
-    assert_eq!(call(&before, VR, recordCursorCall {}), 1 + fill, "the Ack was applied a block earlier");
+    assert_eq!(
+        call(&before, VR, recordCursorCall {}),
+        1 + fill,
+        "the Ack was applied a block earlier"
+    );
     let (_, after) = World::new(s).build(pinned(s)).unwrap();
     assert_eq!(health_of(&after), 0);
     assert_eq!(Address::from_slice(&view(&after, activeModuleCall {}.abi_encode())[12..32]), next);
@@ -1500,15 +1526,19 @@ fn hook_gas_combined_switch_and_ordinary_records_fit_the_batch_allowance() {
             b().batch_allowance_requirement(),
             u64::from(b().h) * b().vr_hook_record_gas()
         );
-        assert!(g.min_records <= b().batch_allowance_requirement(), "{}: M_H must cover it", s.name);
+        assert!(
+            g.min_records <= b().batch_allowance_requirement(),
+            "{}: M_H must cover it",
+            s.name
+        );
     }
 }
 
 /// Every scenario under the VR profile's batch pins (the build's amortized allowance, H x
-/// `HookRecordGas`: 87,800,416 at H = 32 for the PoA build): the block builds with the system budget
-/// at exactly the hook envelope (150,000 + allowance + ElectGas), replays to itself and reaches forge's state, the combined fixtures
-/// included; and each combined fixture lands on its reference state with a records-only
-/// reservation of exactly `M_H`.
+/// `HookRecordGas`: 87,800,416 at H = 32 for the PoA build): the block builds with the system
+/// budget at exactly the hook envelope (150,000 + allowance + ElectGas), replays to itself and
+/// reaches forge's state, the combined fixtures included; and each combined fixture lands on its
+/// reference state with a records-only reservation of exactly `M_H`.
 #[test]
 fn every_scenario_runs_with_the_vr_batch_pins() {
     let h = u64::from(b().h);
@@ -1557,14 +1587,19 @@ fn every_scenario_runs_with_the_vr_batch_pins() {
             if before_boundary < ordinary {
                 assert_eq!(
                     new[1],
-                    format!("onRecords:{}:{}", fill + before_boundary + 2, ordinary - before_boundary)
+                    format!(
+                        "onRecords:{}:{}",
+                        fill + before_boundary + 2,
+                        ordinary - before_boundary
+                    )
                 );
             }
             let (before, env) = world.before_hooks();
             let records = RecordsHook { election: Address::ZERO, elect_gas: 0, ..hook };
             let (_, reference) =
                 hooks_on(&before, &env, &records, records.envelope_gas().unwrap()).unwrap();
-            let (out, st) = hooks_on(&before, &env, &records, b().batch_allowance_requirement()).unwrap();
+            let (out, st) =
+                hooks_on(&before, &env, &records, b().batch_allowance_requirement()).unwrap();
             assert_eq!(out.applied, h, "{}", s.name);
             assert_eq!(health_of(&st), 0, "{}", s.name);
             for a in &fixture().accounts {
@@ -1594,8 +1629,8 @@ fn every_scenario_runs_with_the_vr_batch_pins() {
 #[ignore = "the genesis plan's fresh measurement; run explicitly"]
 fn vr_hook_measurement() {
     use sha2::{Digest, Sha256};
-    // VR_HOOK_MODULE_CODE_HASH is parsed as a 32-byte hex value before any measurement runs: a blank or malformed value fails here instead
-    // of being copied into the measurement file.
+    // VR_HOOK_MODULE_CODE_HASH is parsed as a 32-byte hex value before any measurement runs: a
+    // blank or malformed value fails here instead of being copied into the measurement file.
     let module_override = std::env::var("VR_HOOK_MODULE_CODE_HASH").ok().map(|v| {
         let h: B256 = v.trim().parse().unwrap_or_else(|e| {
             panic!("VR_HOOK_MODULE_CODE_HASH {v:?} is not a 32-byte hex value: {e}")
@@ -1622,10 +1657,12 @@ fn vr_hook_measurement() {
         let a = fixture().accounts.iter().find(|a| a.role == role).unwrap();
         format!("{}", keccak256(&a.code))
     };
-    // VT-04: a generation whose module is not PoaElection (the PoS prototype's adapter) names its module's runtime hash. Every module
-    // path of the measurement runs the cap-bounded test module (`elect-max`, `batch32-max`, `switch-max`), which is the most VR accepts
-    // from any module whose declared gas bounds are within VR's caps; the PoA election scenarios stay in the maximum as extra cases. The
-    // source line records the override so a reader of the file sees which module the hash names.
+    // VT-04: a generation whose module is not PoaElection (the PoS prototype's adapter) names its
+    // module's runtime hash. Every module path of the measurement runs the cap-bounded test module
+    // (`elect-max`, `batch32-max`, `switch-max`), which is the most VR accepts from any module
+    // whose declared gas bounds are within VR's caps; the PoA election scenarios stay in the
+    // maximum as extra cases. The source line records the override so a reader of the file sees
+    // which module the hash names.
     let module_hash = module_override.clone().unwrap_or_else(|| code("poa"));
     let caps = serde_json::json!({
         "elect": b().cap_elect, "output": b().cap_output, "record": b().cap_record, "resolved": CAP_RESOLVED,
