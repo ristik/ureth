@@ -79,7 +79,7 @@ const FIXTURE_SHA256_POA: B256 =
     alloy_primitives::b256!("54d69d3f95c67b4af77e59a8a64c3804b81848b6c9b40a3074ee679db00fa2ce");
 /// SHA-256 of `testdata/vr-hook-pos.json`, the copy of `test/vr/fixtures/vr-hook-pos.json` (the
 /// generator under `VR_BUILD=pos`: the PoS-capable VR build, H = 16).
-const FIXTURE_SHA256_POS: B256 = alloy_primitives::b256!("4d7379f2e0e902f13a11e32f03fdd68c5df87cfa9c3fc1d16348a05c0fe37f8a");
+const FIXTURE_SHA256_POS: B256 = alloy_primitives::b256!("fa8f62c92c40521cc572d16d75358ed42485b771182ea02e0b8a7c8843024ff4");
 /// The unicity-pos-contracts commit the fixture was copied from.
 const FIXTURE_SOURCE: &str = "vt14/genesis (ristik/unicity-pos-contracts, VT-14 combined fixtures)";
 const FIXTURE_SOURCE_POS: &str = "vt04b/hook-pins (ristik/unicity-pos-contracts, the PoS-capable build, H = 16)";
@@ -122,6 +122,15 @@ const SCENARIOS: [&str; 36] = [
     "resolved-revert",
     "switch-max",
 ];
+/// The scenarios of the build under test: the PoS-capable fixture also declares `batch32-retire`.
+fn scenario_names() -> Vec<&'static str> {
+    let mut v = SCENARIOS.to_vec();
+    if b().name == "pos" {
+        let at = v.iter().position(|n| *n == "boundary-worst").unwrap();
+        v.insert(at, "batch32-retire");
+    }
+    v
+}
 const VR: Address = address!("ff00000000000000000000000000000000000003");
 const FEE_COLLECTOR: Address = Address::new([0x77; 20]);
 
@@ -206,6 +215,9 @@ struct Build {
     /// `R_H`: the smallest records reservation of the full H delivery at the maximum record cap
     /// (`batch32-max`, whatever H).
     batch_requirement: u64,
+    /// The same full batch with its ordinary records HolderRetirements (`batch32-retire`, the PoS-capable build's fixture only; 0
+    /// where the fixture has none). `R_H` is the larger of the two batches.
+    retire_requirement: u64,
     /// The numbers the pins are asserted to be (the derivation's result; see the PR).
     expected_hook_record_gas: u64,
     expected_elect_gas: u64,
@@ -242,7 +254,11 @@ impl Build {
     }
     /// `M_H = R_H + B`, B the complete switching Boundary delivered alone.
     const fn batch_allowance_requirement(&self) -> u64 {
-        self.batch_requirement + self.record_requirement
+        self.r_h() + self.record_requirement
+    }
+    /// `R_H`: the larger of the closure batch and the retirement batch.
+    const fn r_h(&self) -> u64 {
+        max(self.batch_requirement, self.retire_requirement)
     }
     /// The VR profile's `HookRecordGas`: `ceil(ceil(5/4 x M_H) / H)`.
     const fn vr_hook_record_gas(&self) -> u64 {
@@ -267,6 +283,7 @@ const POA: Build = Build {
     elect_requirement: 7_981_443,
     record_requirement: 17_977_590,
     batch_requirement: 52_262_738,
+    retire_requirement: 0,
     expected_hook_record_gas: 2_743_763,
     expected_elect_gas: 9_976_804,
     expected_envelope: 97_927_220,
@@ -281,12 +298,13 @@ const POS: Build = Build {
     cap_elect: 5_000_000,
     cap_output: 1_500_000,
     cap_record: 2_500_000,
-    elect_requirement: 9_529_439,
-    record_requirement: 18_993_473,
+    elect_requirement: 9_596_639,
+    record_requirement: 19_855_486,
     batch_requirement: 43_320_364,
-    expected_hook_record_gas: 4_868_269,
-    expected_elect_gas: 11_911_799,
-    expected_envelope: 89_954_103,
+    retire_requirement: 43_605_367,
+    expected_hook_record_gas: 4_957_880,
+    expected_elect_gas: 11_995_799,
+    expected_envelope: 91_471_879,
 };
 
 /// The build under test: the PoA build, or the PoS-capable one with `VR_HOOK_BUILD=pos`.
@@ -867,7 +885,7 @@ fn the_fixture_runs_contracts_main_bytecode() {
 #[test]
 fn every_scenario_reproduces_forge_through_the_block_path() {
     let names: Vec<&str> = fixture().scenarios.iter().map(|s| s.name.as_str()).collect();
-    assert_eq!(names, SCENARIOS, "exactly the generator's scenarios");
+    assert_eq!(names, scenario_names(), "exactly the generator's scenarios");
     for s in &fixture().scenarios {
         let world = World::new(s);
         let hook = pinned(s);
@@ -1184,6 +1202,7 @@ fn measure(s: &Scenario) -> HookGas {
 fn gas_group(s: &Scenario) -> &'static str {
     match s.name.as_str() {
         "batch32-max" => "h32-healthy",
+        "batch32-retire" => "h32-retire",
         "batch32-exhausted" => "h32-exhausted",
         "elect-max" => "max-election",
         "switch-max" => "max-switch",
@@ -1227,6 +1246,7 @@ fn hook_gas_groups_cover_every_scenario() {
         "elections",
         "record-batches",
         "h32-healthy",
+        "h32-retire",
         "h32-exhausted",
         "max-election",
         "max-switch",
@@ -1237,7 +1257,8 @@ fn hook_gas_groups_cover_every_scenario() {
     }
     let elections = fixture().scenarios.iter().filter(|s| gas_group(s) == "elections").count();
     let batches = fixture().scenarios.iter().filter(|s| gas_group(s) == "record-batches").count();
-    assert_eq!(elections + batches + 4 + COMBINED.len(), SCENARIOS.len());
+    let retire = fixture().scenarios.iter().filter(|s| gas_group(s) == "h32-retire").count();
+    assert_eq!(elections + batches + 4 + retire + COMBINED.len(), scenario_names().len());
 }
 
 #[test]
@@ -1281,6 +1302,23 @@ fn hook_gas_full_h32_batch_at_the_maximum_record_cap() {
     );
     assert!(g.min_records <= HOOK_READS_GAS + u64::from(b().h) * b().hook_record_gas());
     assert_eq!(g.min_records, b().batch_requirement, "the recorded R_H is this measurement");
+}
+
+/// The full batch with HolderRetirements as its ordinary records (the PoS-capable build): its
+/// requirement is the recorded one, and `R_H` is the larger of the two batches.
+#[test]
+fn hook_gas_full_batch_of_holder_retirements() {
+    if b().name != "pos" {
+        return;
+    }
+    let [(s, g)] = measure_group("h32-retire").try_into().ok().unwrap();
+    assert_eq!((s.h, s.expect.applied), (b().h, u64::from(b().h)));
+    println!(
+        "vr-hook: max H={} batch of holder retirements: records gas {}, min budget {} against the closure batch {}",
+        b().h, g.records_gas, g.min_records, b().batch_requirement
+    );
+    assert_eq!(g.min_records, b().retire_requirement, "the recorded retirement batch");
+    assert!(g.min_records <= HOOK_READS_GAS + u64::from(b().h) * b().vr_hook_record_gas());
 }
 
 /// The same batch with onRecords exhausting its cap.
@@ -1390,14 +1428,21 @@ fn the_maximum_compound_paths_run_as_forge_computed() {
 
     // the 16-member switching Boundary at the maximum caps, delivered a block after its Ack
     let s = scenario("switch-max");
-    assert_eq!(s.records.iter().map(|r| r.kind).collect::<Vec<_>>(), [2, 6]);
-    assert_eq!((s.expect.applied, s.expect.cursor), (1, 2), "the Boundary alone in this block");
+    // the PoS-capable fixture first fills the activation table (eight records, applied before the block)
+    let fill = s.records.len() as u64 - 2;
+    let kinds: Vec<u8> = s.records.iter().map(|r| r.kind).collect();
+    assert_eq!(kinds[kinds.len() - 2..], [2, 6]);
+    assert_eq!(fill, if b().name == "pos" { 8 } else { 0 });
+    assert_eq!((s.expect.applied, s.expect.cursor), (1, 2 + fill), "the Boundary alone in this block");
     let (before, _) = World::new(s).before_hooks();
-    assert_eq!(call(&before, VR, recordCursorCall {}), 1, "the Ack was applied a block earlier");
+    assert_eq!(call(&before, VR, recordCursorCall {}), 1 + fill, "the Ack was applied a block earlier");
     let (_, after) = World::new(s).build(pinned(s)).unwrap();
     assert_eq!(health_of(&after), 0);
     assert_eq!(Address::from_slice(&view(&after, activeModuleCall {}.abi_encode())[12..32]), next);
-    assert_eq!(module_log(&after, mock), ["onResolved:1", "onRecords:1:1", "detach"]);
+    assert_eq!(
+        module_log(&after, mock),
+        ["onResolved:1".to_string(), format!("onRecords:{}:1", 1 + fill), "detach".to_string()]
+    );
     assert_eq!(module_log(&after, next).first().map(String::as_str), Some("attach"));
     assert_eq!(call(&after, next, attachMembersCall {}), U256::from(16));
     assert_eq!(call(&after, next, attachPreviousCall {}), mock);
@@ -1495,6 +1540,7 @@ fn every_scenario_runs_with_the_vr_batch_pins() {
         if let Some(at) = COMBINED.iter().position(|c| *c == s.name) {
             let before_boundary = b().mixed_before()[at];
             let ordinary = u64::from(b().h) - 2;
+            let fill = s.records.len() as u64 - u64::from(b().h);
             assert_eq!(health_of(&after), 0, "{}", s.name);
             assert_eq!(
                 Address::from_slice(&view(&after, activeModuleCall {}.abi_encode())[12..32]),
@@ -1503,7 +1549,7 @@ fn every_scenario_runs_with_the_vr_batch_pins() {
             let old = module_log(&after, mock);
             assert_eq!(
                 old[..2],
-                ["onResolved:1".to_string(), format!("onRecords:0:{}", before_boundary + 2)]
+                ["onResolved:1".to_string(), format!("onRecords:{fill}:{}", before_boundary + 2)]
             );
             assert_eq!(old[2], "detach");
             let new = module_log(&after, next);
@@ -1511,7 +1557,7 @@ fn every_scenario_runs_with_the_vr_batch_pins() {
             if before_boundary < ordinary {
                 assert_eq!(
                     new[1],
-                    format!("onRecords:{}:{}", before_boundary + 2, ordinary - before_boundary)
+                    format!("onRecords:{}:{}", fill + before_boundary + 2, ordinary - before_boundary)
                 );
             }
             let (before, env) = world.before_hooks();
@@ -1549,7 +1595,11 @@ fn every_scenario_runs_with_the_vr_batch_pins() {
 fn vr_hook_measurement() {
     use sha2::{Digest, Sha256};
     let min_records = |name: &str| measure(scenario(name)).min_records;
-    let records = min_records("batch32-max");
+    let records = if b().name == "pos" {
+        min_records("batch32-max").max(min_records("batch32-retire"))
+    } else {
+        min_records("batch32-max")
+    };
     let boundary = min_records("switch-max");
     let combined: Vec<_> = COMBINED
         .iter()
