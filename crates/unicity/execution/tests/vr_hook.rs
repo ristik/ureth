@@ -79,7 +79,7 @@ const FIXTURE_SHA256_POA: B256 =
     alloy_primitives::b256!("54d69d3f95c67b4af77e59a8a64c3804b81848b6c9b40a3074ee679db00fa2ce");
 /// SHA-256 of `testdata/vr-hook-pos.json`, the copy of `test/vr/fixtures/vr-hook-pos.json` (the
 /// generator under `VR_BUILD=pos`: the PoS-capable VR build, H = 16).
-const FIXTURE_SHA256_POS: B256 = alloy_primitives::b256!("fa8f62c92c40521cc572d16d75358ed42485b771182ea02e0b8a7c8843024ff4");
+const FIXTURE_SHA256_POS: B256 = alloy_primitives::b256!("dadd3f0be855a6a6c9d6c7b111f8be5ed0be6e7c0fe9d7bb6d3603915be57a76");
 /// The unicity-pos-contracts commit the fixture was copied from.
 const FIXTURE_SOURCE: &str = "vt14/genesis (ristik/unicity-pos-contracts, VT-14 combined fixtures)";
 const FIXTURE_SOURCE_POS: &str = "vt04b/hook-pins (ristik/unicity-pos-contracts, the PoS-capable build, H = 16)";
@@ -299,12 +299,12 @@ const POS: Build = Build {
     cap_output: 1_500_000,
     cap_record: 2_500_000,
     elect_requirement: 9_596_639,
-    record_requirement: 19_855_486,
+    record_requirement: 19_926_554,
     batch_requirement: 43_320_364,
     retire_requirement: 43_605_367,
-    expected_hook_record_gas: 4_957_880,
+    expected_hook_record_gas: 4_963_432,
     expected_elect_gas: 11_995_799,
-    expected_envelope: 91_471_879,
+    expected_envelope: 91_560_711,
 };
 
 /// The build under test: the PoA build, or the PoS-capable one with `VR_HOOK_BUILD=pos`.
@@ -1428,11 +1428,11 @@ fn the_maximum_compound_paths_run_as_forge_computed() {
 
     // the 16-member switching Boundary at the maximum caps, delivered a block after its Ack
     let s = scenario("switch-max");
-    // the PoS-capable fixture first fills the activation table (eight records, applied before the block)
+    // the PoS-capable fixture first fills the activation table (ten records, applied before the block)
     let fill = s.records.len() as u64 - 2;
     let kinds: Vec<u8> = s.records.iter().map(|r| r.kind).collect();
     assert_eq!(kinds[kinds.len() - 2..], [2, 6]);
-    assert_eq!(fill, if b().name == "pos" { 8 } else { 0 });
+    assert_eq!(fill, if b().name == "pos" { 10 } else { 0 });
     assert_eq!((s.expect.applied, s.expect.cursor), (1, 2 + fill), "the Boundary alone in this block");
     let (before, _) = World::new(s).before_hooks();
     assert_eq!(call(&before, VR, recordCursorCall {}), 1 + fill, "the Ack was applied a block earlier");
