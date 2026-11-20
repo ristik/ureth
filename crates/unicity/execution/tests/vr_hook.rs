@@ -217,7 +217,7 @@ struct Build {
     /// `R_H`: the smallest records reservation of the full H delivery at the maximum record cap
     /// (`batch32-max`, whatever H).
     batch_requirement: u64,
-    /// The same full batch with its ordinary records HolderRetirements (`batch32-retire`, the
+    /// The same full batch with its ordinary records `HolderRetirements` (`batch32-retire`, the
     /// PoS-capable build's fixture only; 0 where the fixture has none). `R_H` is the larger of the
     /// two batches.
     retire_requirement: u64,
@@ -310,7 +310,7 @@ const POS: Build = Build {
     expected_envelope: 91_560_711,
 };
 
-/// The build under test: the PoA build, or the PoS-capable one with `VR_HOOK_BUILD=pos`.
+/// The build under test: the `PoA` build, or the PoS-capable one with `VR_HOOK_BUILD=pos`.
 fn b() -> &'static Build {
     static B: OnceLock<&'static Build> = OnceLock::new();
     B.get_or_init(|| match std::env::var("VR_HOOK_BUILD").as_deref() {
@@ -1311,7 +1311,7 @@ fn hook_gas_full_h32_batch_at_the_maximum_record_cap() {
     assert_eq!(g.min_records, b().batch_requirement, "the recorded R_H is this measurement");
 }
 
-/// The full batch with HolderRetirements as its ordinary records (the PoS-capable build): its
+/// The full batch with `HolderRetirements` as its ordinary records (the PoS-capable build): its
 /// requirement is the recorded one, and `R_H` is the larger of the two batches.
 #[test]
 fn hook_gas_full_batch_of_holder_retirements() {
@@ -1535,8 +1535,8 @@ fn hook_gas_combined_switch_and_ordinary_records_fit_the_batch_allowance() {
 }
 
 /// Every scenario under the VR profile's batch pins (the build's amortized allowance, H x
-/// `HookRecordGas`: 87,800,416 at H = 32 for the PoA build): the block builds with the system
-/// budget at exactly the hook envelope (150,000 + allowance + ElectGas), replays to itself and
+/// `HookRecordGas`: 87,800,416 at H = 32 for the `PoA` build): the block builds with the system
+/// budget at exactly the hook envelope (150,000 + allowance + `ElectGas`), replays to itself and
 /// reaches forge's state, the combined fixtures included; and each combined fixture lands on its
 /// reference state with a records-only reservation of exactly `M_H`.
 #[test]
@@ -1675,7 +1675,7 @@ fn vr_hook_measurement() {
         "h": b().h,
         "registry": format!("{VR}").to_lowercase(),
         "registryCodeHash": code("vr"),
-        "moduleCodeHash": module_hash.clone(),
+        "moduleCodeHash": module_hash,
         "caps": caps,
         "ceilings": ceilings,
         "records": records,
