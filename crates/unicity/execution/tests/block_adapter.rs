@@ -867,6 +867,8 @@ struct HookWorld {
     update: Bytes,
     /// System gas reserved beyond the records hook's, for a world whose profile pins an election.
     extra_gas: u64,
+    /// A private rule resolver for the world, so no process-wide state leaks between tests.
+    rules: reth_unicity_execution::rules::UnicityRules,
 }
 
 fn hook_world(import: &[u8], custody: Address) -> HookWorld {
@@ -890,7 +892,16 @@ fn hook_world_with(import: &[u8], install: impl FnOnce(&mut FixtureProvider)) ->
     install(&mut provider);
     let mut root = input(1, 1, genesis_hash());
     let update = testing::seal_with_import(&mut root, 0, GENESIS_TAIL, import);
-    HookWorld { provider, parent, root, chain_spec, import: import.to_vec(), update, extra_gas: 0 }
+    HookWorld {
+        provider,
+        parent,
+        root,
+        chain_spec,
+        import: import.to_vec(),
+        update,
+        extra_gas: 0,
+        rules: private_rules(),
+    }
 }
 
 impl HookWorld {
@@ -931,7 +942,8 @@ impl HookWorld {
                 genesis_hash(),
                 FEE_COLLECTOR,
             )
-            .unwrap(),
+            .unwrap()
+            .with_rules(self.rules.clone()),
         );
         UnicityEvmConfig::new(
             unicity_eth_config(
@@ -966,6 +978,12 @@ impl HookWorld {
 }
 
 use reth_unicity_execution::hook::RecordsHook;
+
+fn private_rules() -> reth_unicity_execution::rules::UnicityRules {
+    reth_unicity_execution::rules::UnicityRules::with_known(
+        reth_unicity_execution::rules::builtin_rules(),
+    )
+}
 
 #[test]
 fn the_records_hook_runs_after_eip_4788_and_its_gas_joins_the_system_total_only() {
@@ -1379,4 +1397,137 @@ fn an_election_priced_below_its_cost_invalidates_the_block() {
         panic!("an election that cannot finish inside its reserved gas must invalidate the block")
     };
     assert!(err.to_string().contains("elect"), "{err}");
+}
+
+// ---- VT-07b: the rule resolver at the executor sites (builder, importer, replay) ----
+
+mod rules_sites {
+    use super::*;
+    use reth_unicity_execution::{
+        rules::{noop_test_rule_id, rule_id, schedule_storage, EntryState, ScheduleEntry},
+        VALIDATOR_REGISTRY,
+    };
+
+    const CUSTODY: Address = Address::new([0xc5; 20]);
+
+    const fn entry(id: B256, epoch: u64, state: EntryState) -> ScheduleEntry {
+        ScheduleEntry {
+            rule_id: id,
+            release_digest: B256::repeat_byte(0xd1),
+            root_epoch: epoch,
+            not_before_uc_time: 0,
+            state,
+            change_id: 1,
+        }
+    }
+
+    /// The hook world whose genesis also holds VR (a stand-in account) with `entries`.
+    fn world_with_schedule(entries: &[ScheduleEntry]) -> HookWorld {
+        let slots = schedule_storage(entries);
+        hook_world_with(&testing::import_of(3), |provider| {
+            provider.insert_contract(
+                CUSTODY,
+                testing::custody_code(testing::ADVANCE),
+                U256::ZERO,
+                &[(U256::from(1), U256::from(32))], // limits.maxBatch
+            );
+            provider.insert_contract(
+                VALIDATOR_REGISTRY,
+                Bytes::from_static(testing::NOTHING),
+                U256::ZERO,
+                &slots,
+            );
+        })
+    }
+
+    fn hook() -> RecordsHook {
+        RecordsHook { custody: CUSTODY, h_records: 2, record_gas: 1_000_000, ..Default::default() }
+    }
+
+    fn built_error(world: &HookWorld) -> String {
+        let config = world.config(hook());
+        let mut state =
+            State::builder().with_database(world.provider.clone()).with_bundle_update().build();
+        match build_complete(
+            &config,
+            &world.parent,
+            world.attributes(),
+            &mut state,
+            world.provider.clone(),
+            vec![],
+        ) {
+            Ok(_) => String::new(),
+            Err(e) => e.to_string(),
+        }
+    }
+
+    #[test]
+    fn unknown_active_rule_is_refused_by_builder_and_replay_known_rule_changes_nothing() {
+        let clean = world_with_schedule(&[]);
+        let (plain, plain_state) = clean.build(hook());
+
+        // block root epoch is 1: a known rule active from 1 changes nothing observable. A binary
+        // built with `no-test-rule` lacks the rule, so there the same schedule must refuse.
+        let known = world_with_schedule(&[entry(noop_test_rule_id(), 1, EntryState::Active)]);
+        if cfg!(feature = "no-test-rule") {
+            assert!(built_error(&known).contains("UpgradeRequired"));
+        } else {
+            let (known_built, known_state) = known.build(hook());
+            // (the state roots differ only by the schedule words themselves)
+            assert_eq!(
+                known_built.outcome.execution_result.gas_used,
+                plain.outcome.execution_result.gas_used
+            );
+            assert_eq!(known_state.storage_of(CUSTODY)[&U256::ZERO], U256::from(2));
+        }
+        let _ = plain_state;
+
+        // an unknown rule effective at epoch 1 refuses the builder ...
+        for state in [EntryState::Active, EntryState::Latched] {
+            let unknown = world_with_schedule(&[entry(rule_id("future-rule"), 1, state)]);
+            let err = built_error(&unknown);
+            assert!(err.contains("UpgradeRequired"), "{state:?}: {err}");
+            // ... and replay of a block that was built without it
+            let replay = replay_complete(
+                &unknown.config(hook()),
+                unknown.provider.clone(),
+                &unknown.provider,
+                &plain.outcome.block,
+            );
+            assert!(replay.unwrap_err().to_string().contains("UpgradeRequired"), "{state:?}");
+        }
+        // scheduled for a later epoch: still runs (the warning fires, the gauge is set)
+        let ahead = world_with_schedule(&[entry(rule_id("future-rule"), 2, EntryState::Active)]);
+        assert_eq!(built_error(&ahead), "");
+        // a superseded (postponed) entry is ignored
+        let postponed =
+            world_with_schedule(&[entry(rule_id("future-rule"), 1, EntryState::Superseded)]);
+        assert_eq!(built_error(&postponed), "");
+    }
+
+    /// The resolved spec is threaded: a supported rule that selects another spec cannot be half
+    /// applied (system VMs on the new spec, transactions on Cancun). Until the environment is
+    /// rule-aware the block fails with the spec named, for the builder and for replay. The shipped
+    /// no-op rule is fork-neutral (spec Cancun), which the earlier test shows builds identically.
+    #[test]
+    fn a_rule_that_selects_another_spec_is_not_half_applied() {
+        use reth_unicity_execution::rules::{KnownRule, UnicityRules};
+        let (plain, _) = world_with_schedule(&[]).build(hook());
+        let fork = rule_id("fork-rule");
+        let mut world = world_with_schedule(&[entry(fork, 1, EntryState::Active)]);
+        world.rules = UnicityRules::with_known(vec![KnownRule {
+            name: "fork-rule",
+            id: fork,
+            spec: revm::primitives::hardfork::SpecId::PRAGUE,
+        }]);
+        let err = built_error(&world);
+        assert!(err.contains("resolves spec"), "{err}");
+        let replay = replay_complete(
+            &world.config(hook()),
+            world.provider.clone(),
+            &world.provider,
+            &plain.outcome.block,
+        );
+        assert!(replay.unwrap_err().to_string().contains("resolves spec"));
+    }
 }

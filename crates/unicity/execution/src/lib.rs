@@ -17,7 +17,6 @@ use revm::{
     context_interface::{ContextSetters, ContextTr, JournalTr},
     database::{CacheDB, DatabaseRef},
     handler::{EvmTr, Handler, MainnetHandler, SystemCallTx},
-    primitives::hardfork::SpecId,
     Context, Database, DatabaseCommit, MainBuilder, MainContext,
 };
 use sha2::{Digest, Sha256};
@@ -34,6 +33,7 @@ pub mod node_evm;
 pub mod pairing;
 pub mod quant;
 pub mod records;
+pub mod rules;
 #[cfg(any(test, feature = "test-utils"))]
 pub mod testing;
 pub mod update;
@@ -114,6 +114,11 @@ pub const SYSTEM_CALLER: Address =
 /// Fixed registry destination from the pinned profile.
 pub const SEAL_REGISTRY: Address =
     Address::new([0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2]);
+/// The validator registry (VR): a protocol constant and genesis system account, like the
+/// `SealRegistry`. The rule resolver reads the activation schedule from it; no flag or profile
+/// field can name another address, because a node reading a different schedule would split.
+pub const VALIDATOR_REGISTRY: Address =
+    Address::new([0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 3]);
 /// Keccak-256 of the pinned `SealRegistry` runtime artifact: B1 plus the authenticated root-record
 /// log, permanent layout (contracts `registry/permanent-layout`).
 pub const SEAL_REGISTRY_CODE_HASH: B256 =
@@ -347,6 +352,8 @@ pub enum ExecutionError {
     B1ProfileMismatch(&'static str),
     /// The records hook invalidated the block.
     Hook(hook::HookError),
+    /// The activation schedule holds a rule this binary lacks, or is malformed.
+    Rules(rules::RuleError),
     /// Combined gross gas exceeded the configured cap.
     GasBudgetExceeded {
         /// Gross gas spent when the failure was detected.
@@ -656,7 +663,13 @@ where
     ExtDB: DatabaseRef + Clone,
 {
     let mut candidate = parent.clone();
-    let result = execute_registry_transition_on_db(input, update, &mut candidate, config)?;
+    let result = execute_registry_transition_on_db(
+        input,
+        update,
+        &mut candidate,
+        &rules::UnicityRules::global(),
+        config,
+    )?;
     Ok((result, candidate))
 }
 
@@ -669,6 +682,7 @@ pub(crate) fn execute_registry_transition_on_db<DB>(
     input: &RootInputV2,
     update: UpdateInput<'_>,
     db: &mut DB,
+    rules: &rules::UnicityRules,
     config: ExecutionConfig,
 ) -> Result<ExecutionResult, ExecutionError>
 where
@@ -799,8 +813,12 @@ where
             limit: config.system_gas_limit,
         })?;
     let prepared = prepare_transition(input, &admitted.update, genesis_shard_conf_hash)?;
+    // the system calls run under the spec the authenticated schedule resolves for this block
+    let (spec, _) = rules
+        .resolve(db, VALIDATOR_REGISTRY, input.origin.root_epoch)
+        .map_err(ExecutionError::Rules)?;
     let mut evm = Context::mainnet()
-        .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(SpecId::CANCUN))
+        .modify_cfg_chained(|cfg| cfg.set_spec_and_mainnet_gas_params(spec))
         .with_db(db)
         .build_mainnet();
     let mut open_tx =
@@ -1071,7 +1089,7 @@ mod tests {
     }
     use super::*;
     use alloy_primitives::{address, U256};
-    use revm::{database::EmptyDB, state::AccountInfo};
+    use revm::{database::EmptyDB, primitives::hardfork::SpecId, state::AccountInfo};
     use serde::Deserialize;
 
     #[derive(Deserialize)]
@@ -1278,6 +1296,42 @@ mod tests {
             parent,
             ExecutionConfig { system_gas_limit: limit, b1: testing::b1_context() },
         )
+    }
+
+    #[test]
+    fn unknown_active_rule_is_refused_by_the_registry_transition() {
+        use crate::rules::{rule_id, seed_schedule, EntryState, RuleError, ScheduleEntry};
+        let vr = VALIDATOR_REGISTRY;
+        let input = executable_input(1, 1);
+        let epoch = input.origin.root_epoch;
+        let at = |e: u64| ScheduleEntry {
+            rule_id: rule_id("future-rule"),
+            release_digest: B256::repeat_byte(0xd1),
+            root_epoch: e,
+            not_before_uc_time: 0,
+            state: EntryState::Active,
+            change_id: 1,
+        };
+        let run_with = |entries: &[ScheduleEntry]| {
+            let mut parent = genesis_db();
+            seed_schedule(&mut parent, vr, entries);
+            let mut input = input.clone();
+            let parent_number = input.authorized_round - 1;
+            let update = testing::seal(&mut input, parent_number, tail_of(&parent));
+            let b1 = testing::b1_context();
+            execute_registry_transition(
+                &input,
+                UpdateInput { bytes: &update, records: &testing::empty_import(), parent_number },
+                &parent,
+                ExecutionConfig { system_gas_limit: testing::world().system_gas, b1 },
+            )
+        };
+        assert!(run_with(&[]).is_ok());
+        assert!(run_with(&[at(epoch + 1)]).is_ok(), "ahead of E only warns");
+        assert!(matches!(
+            run_with(&[at(epoch)]).unwrap_err(),
+            ExecutionError::Rules(RuleError::UpgradeRequired(_))
+        ));
     }
 
     #[test]

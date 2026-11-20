@@ -39,7 +39,7 @@ use reth_evm::{
 use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 use reth_primitives_traits::{RecoveredBlock, SealedBlock, SealedHeader};
 use reth_storage_api::StateProvider;
-use revm::{database::State, DatabaseCommit, Inspector};
+use revm::{database::State, primitives::hardfork::SpecId, DatabaseCommit, Inspector};
 use std::{
     convert::Infallible,
     error::Error,
@@ -69,9 +69,33 @@ pub struct BoundExecutionInput {
     parent_execution: ParentExecutionOutcome,
     fee_collector: Address,
     b1: B1Job,
+    /// The rule resolver every site of this job asks (the process-wide one by default).
+    rules: crate::rules::UnicityRules,
 }
 
 impl BoundExecutionInput {
+    /// The same job resolved by `rules` instead of the process-wide resolver (tests, embedders).
+    pub fn with_rules(mut self, rules: crate::rules::UnicityRules) -> Self {
+        self.rules = rules;
+        self
+    }
+
+    /// The structural check for the sites that hold no state (`evm_env`, `next_evm_env`): the
+    /// chain spec must still be the genesis spec.
+    pub fn check_chain_spec(&self, spec: SpecId) -> Result<(), crate::rules::RuleError> {
+        crate::rules::UnicityRules::check_chain_spec(spec)
+    }
+
+    /// Resolves the spec and active rules of this job's block from the authenticated parent
+    /// `db`. A pure function of that state and the bound root epoch; refuses with the typed
+    /// `UpgradeRequired`. The builder, replay and the executor's prefix all go through it.
+    pub fn resolve_parent<DB: revm::Database>(
+        &self,
+        db: &mut DB,
+    ) -> Result<(SpecId, crate::rules::RuleSet), crate::rules::RuleError> {
+        self.rules.resolve(db, crate::VALIDATOR_REGISTRY, self.input.origin.root_epoch)
+    }
+
     /// Binds the first post-genesis job to a genesis header already validated against the
     /// configured standard JSON. This is the sole numeric parent-accounting bootstrap.
     pub fn from_validated_genesis(
@@ -110,6 +134,7 @@ impl BoundExecutionInput {
             parent_execution,
             fee_collector,
             b1,
+            rules: crate::rules::UnicityRules::global(),
         })
     }
 
@@ -161,6 +186,7 @@ impl BoundExecutionInput {
             parent_execution: completed.0,
             fee_collector,
             b1,
+            rules: crate::rules::UnicityRules::global(),
         })
     }
 
@@ -344,6 +370,8 @@ where
             "epoch acknowledgement block contains user transactions",
         ));
     }
+    // the typed refusal comes first, from the authenticated parent state
+    config.bound.resolve_parent(state).map_err(BlockExecutionError::other)?;
     let mut builder = config
         .builder_for_next_block(state, parent, attributes)
         .map_err(BlockExecutionError::other)?;
@@ -388,6 +416,8 @@ where
     DB: Database,
     P: StateProvider,
 {
+    let mut db = db;
+    config.bound.resolve_parent(&mut db).map_err(BlockExecutionError::other)?;
     validate_fixed_block(config, block)?;
     let output = config.executor(db).execute(block)?;
     validate_block_post_execution(block, config.inner.chain_spec(), &output.result, None, None)
@@ -719,6 +749,23 @@ where
         }
         self.prefix = PrefixState::Poisoned;
         let bound = self.bound()?.clone();
+        // The first site that holds the parent state: the schedule resolves before any system
+        // call, so an unknown active rule refuses the block on build, import and replay alike.
+        let (spec, _active) =
+            bound.resolve_parent(self.inner.evm.db_mut()).map_err(BlockExecutionError::other)?;
+        // The resolved spec must be the one this block's EVM, and so every ordinary transaction,
+        // runs under. `evm_env` is built before any state is read, so a known rule that selects a
+        // different spec cannot be applied yet: ordinary transactions under a newly selected spec
+        // are refused explicitly here rather than half applied (system VMs on the new spec,
+        // transactions on the old). Real fork support, a rule-aware environment, is
+        // ristik/bft-core#1230. The shipped no-op rule is fork-neutral and never hits this.
+        let env_spec = self.inner.evm.cfg_env().spec;
+        if format!("{env_spec:?}") != format!("{spec:?}") {
+            return Err(BlockExecutionError::msg(format!(
+                "the activation schedule resolves spec {spec:?} but the block environment is \
+                 {env_spec:?}"
+            )));
+        }
         bound.profile.validate().map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
         let result = execute_registry_transition_on_db(
             &bound.input,
@@ -728,6 +775,7 @@ where
                 parent_number: bound.parent_number,
             },
             self.inner.evm.db_mut(),
+            &bound.rules,
             ExecutionConfig { system_gas_limit: bound.profile.system_gas, b1: bound.b1.context },
         )
         .map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
@@ -744,7 +792,9 @@ where
             let remaining = bound.profile.system_gas.checked_sub(system).ok_or_else(|| {
                 BlockExecutionError::msg("system gas exhausted before the records hook")
             })?;
-            let env = crate::hook::HookEnv::from_evm(&self.inner.evm);
+            let env = crate::hook::HookEnv::from_evm(&self.inner.evm)
+                .with_root_epoch(bound.input.origin.root_epoch)
+                .with_rules(bound.rules.clone());
             // the election is called with the identity of the block's authenticated root origin
             let origin = bound
                 .input
@@ -863,9 +913,9 @@ impl ConfigureEvm for UnicityEvmConfig {
 
     fn evm_env(&self, header: &Header) -> Result<EvmEnv, Self::Error> {
         let env = self.inner.evm_env(header).map_err(|never: Infallible| match never {})?;
-        if env.cfg_env.spec != revm::primitives::hardfork::SpecId::CANCUN {
-            return Err(BindingError("only the fixed Cancun profile is supported"));
-        }
+        self.bound
+            .check_chain_spec(env.cfg_env.spec)
+            .map_err(|_| BindingError("only the fixed Cancun profile is supported"))?;
         Ok(env)
     }
 
@@ -881,9 +931,9 @@ impl ConfigureEvm for UnicityEvmConfig {
             .inner
             .next_evm_env(parent.header(), attributes)
             .map_err(|never: Infallible| match never {})?;
-        if env.cfg_env.spec != revm::primitives::hardfork::SpecId::CANCUN {
-            return Err(BindingError("only the fixed Cancun profile is supported"));
-        }
+        self.bound
+            .check_chain_spec(env.cfg_env.spec)
+            .map_err(|_| BindingError("only the fixed Cancun profile is supported"))?;
         env.block_env.basefee =
             next_base_fee_for_child(self.bound.parent_execution, self.bound.profile)
                 .map_err(|_| BindingError("next base fee derivation failed"))?;

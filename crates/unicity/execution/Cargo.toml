@@ -21,6 +21,8 @@ alloy-evm.workspace = true
 alloy-rpc-types-engine.workspace = true
 alloy-sol-types.workspace = true
 revm.workspace = true
+metrics.workspace = true
+tracing.workspace = true
 reth-chainspec.workspace = true
 reth-consensus.workspace = true
 reth-consensus-common.workspace = true
@@ -38,6 +40,9 @@ serde_json = { workspace = true, features = ["std"], optional = true }
 sha2.workspace = true
 
 [features]
+# Builds a binary that does NOT know the harmless test rule (unicity.rule/noop-test-v1), so a
+# scheduled activation of it is refused with UpgradeRequired. Never part of a release build.
+no-test-rule = []
 # Shared B1 world fixtures for dependents' tests; never part of a node build.
 test-utils = [
     "dep:serde_json",

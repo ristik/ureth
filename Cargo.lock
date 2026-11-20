@@ -10813,6 +10813,7 @@ dependencies = [
  "alloy-rpc-types-engine",
  "alloy-sol-types",
  "alloy-trie",
+ "metrics",
  "reth-chainspec",
  "reth-consensus",
  "reth-consensus-common",
@@ -10831,6 +10832,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
+ "tracing",
 ]
 
 [[package]]

@@ -32,6 +32,10 @@ tracing.workspace = true
 [features]
 default = ["jemalloc"]
 
+# A binary that does not know the harmless test rule unicity.rule/noop-test-v1, to show the
+# UpgradeRequired refusal. Never for release.
+no-test-rule = ["reth-unicity-execution/no-test-rule"]
+
 jemalloc = [
     "reth-cli-util/jemalloc",
     "reth-ethereum-cli/jemalloc",

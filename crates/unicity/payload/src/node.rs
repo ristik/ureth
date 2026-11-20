@@ -333,6 +333,11 @@ where
                 // The stream fires on every canonical change, including reorgs, so the block
                 // cadence is the rate limit and no timer is needed. A failed pass is logged inside
                 // the task and never takes the node down.
+                // The activation-schedule operator view follows the canonical head the same way.
+                ctx.node().task_executor().spawn_task(crate::rules_head::run_rules_head_observer(
+                    provider.clone(),
+                    reth_unicity_execution::rules::UnicityRules::global(),
+                ));
                 ctx.node().task_executor().spawn_task(run_companion_pruner(
                     provider,
                     store,
