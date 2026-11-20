@@ -51,6 +51,8 @@ pub struct HookEnv {
     /// The root epoch of the block's authenticated origin, which the activation schedule is
     /// resolved at.
     pub root_epoch: u64,
+    /// The rule resolver the hook's schedule read goes through (the process-wide one by default).
+    pub rules: crate::rules::UnicityRules,
 }
 
 impl HookEnv {
@@ -68,7 +70,7 @@ impl HookEnv {
             blob_excess_gas_and_price: b.blob_excess_gas_and_price(),
             ..Default::default()
         };
-        Self { chain_id: evm.chain_id(), block, root_epoch: 0 }
+        Self { chain_id: evm.chain_id(), block, root_epoch: 0, rules: Default::default() }
     }
 
     /// A block environment of the given chain, number and timestamp, for tests.
@@ -81,12 +83,19 @@ impl HookEnv {
                 ..Default::default()
             },
             root_epoch: 0,
+            rules: Default::default(),
         }
     }
 
     /// The same environment for a block of root epoch `root_epoch`.
     pub const fn with_root_epoch(mut self, root_epoch: u64) -> Self {
         self.root_epoch = root_epoch;
+        self
+    }
+
+    /// The same environment resolving rules through `rules`.
+    pub fn with_rules(mut self, rules: crate::rules::UnicityRules) -> Self {
+        self.rules = rules;
         self
     }
 }
@@ -255,7 +264,8 @@ where
         return Ok(HookOutcome::default());
     }
     // The schedule is read before the hook changes anything: the parent state's schedule rules.
-    let (spec, _) = crate::rules::UnicityRules::global()
+    let (spec, _) = env
+        .rules
         .resolve(db, crate::VALIDATOR_REGISTRY, env.root_epoch)
         .map_err(ExecutionError::Rules)?;
     let mut evm = Context::mainnet()

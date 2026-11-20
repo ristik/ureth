@@ -1410,7 +1410,7 @@ mod rules_sites {
 
     const CUSTODY: Address = Address::new([0xc5; 20]);
 
-    fn entry(id: B256, epoch: u64, state: EntryState) -> ScheduleEntry {
+    const fn entry(id: B256, epoch: u64, state: EntryState) -> ScheduleEntry {
         ScheduleEntry {
             rule_id: id,
             release_digest: B256::repeat_byte(0xd1),
@@ -1466,15 +1466,20 @@ mod rules_sites {
         let clean = world_with_schedule(&[]);
         let (plain, plain_state) = clean.build(hook());
 
-        // block root epoch is 1: a known rule active from 1 changes nothing observable
+        // block root epoch is 1: a known rule active from 1 changes nothing observable. A binary
+        // built with `no-test-rule` lacks the rule, so there the same schedule must refuse.
         let known = world_with_schedule(&[entry(noop_test_rule_id(), 1, EntryState::Active)]);
-        let (known_built, known_state) = known.build(hook());
-        // (the state roots differ only by the schedule words themselves)
-        assert_eq!(
-            known_built.outcome.execution_result.gas_used,
-            plain.outcome.execution_result.gas_used
-        );
-        assert_eq!(known_state.storage_of(CUSTODY)[&U256::ZERO], U256::from(2));
+        if cfg!(feature = "no-test-rule") {
+            assert!(built_error(&known).contains("UpgradeRequired"));
+        } else {
+            let (known_built, known_state) = known.build(hook());
+            // (the state roots differ only by the schedule words themselves)
+            assert_eq!(
+                known_built.outcome.execution_result.gas_used,
+                plain.outcome.execution_result.gas_used
+            );
+            assert_eq!(known_state.storage_of(CUSTODY)[&U256::ZERO], U256::from(2));
+        }
         let _ = plain_state;
 
         // an unknown rule effective at epoch 1 refuses the builder ...
@@ -1498,5 +1503,31 @@ mod rules_sites {
         let postponed =
             world_with_schedule(&[entry(rule_id("future-rule"), 1, EntryState::Superseded)]);
         assert_eq!(built_error(&postponed), "");
+    }
+
+    /// The resolved spec is threaded: a supported rule that selects another spec cannot be half
+    /// applied (system VMs on the new spec, transactions on Cancun). Until the environment is
+    /// rule-aware the block fails with the spec named, for the builder and for replay. The shipped
+    /// no-op rule is fork-neutral (spec Cancun), which the earlier test shows builds identically.
+    #[test]
+    fn a_rule_that_selects_another_spec_is_not_half_applied() {
+        use reth_unicity_execution::rules::{KnownRule, UnicityRules};
+        let (plain, _) = world_with_schedule(&[]).build(hook());
+        let fork = rule_id("fork-rule");
+        let mut world = world_with_schedule(&[entry(fork, 1, EntryState::Active)]);
+        world.rules = UnicityRules::with_known(vec![KnownRule {
+            name: "fork-rule",
+            id: fork,
+            spec: revm::primitives::hardfork::SpecId::PRAGUE,
+        }]);
+        let err = built_error(&world);
+        assert!(err.contains("resolves spec"), "{err}");
+        let replay = replay_complete(
+            &world.config(hook()),
+            world.provider.clone(),
+            &world.provider,
+            &plain.outcome.block,
+        );
+        assert!(replay.unwrap_err().to_string().contains("resolves spec"));
     }
 }

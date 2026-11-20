@@ -5,7 +5,6 @@ use crate::{
     derive_beacon_root, derive_prev_randao, derive_timestamp,
     evm_factory::{UnicityEvmFactory, UnicityInnerEvmConfig},
     execute_registry_transition_on_db,
-    rules::GENESIS_SPEC,
     update::B1Job,
     ExecutionConfig, RootInputV2, UpdateInput, SYSTEM_CALLER,
 };
@@ -78,10 +77,20 @@ impl BoundExecutionInput {
         self
     }
 
-    /// The stateless half of the rule resolver for this job's block: the spec must be the genesis
-    /// spec and no latched rule the binary lacks may be in force at the block's root epoch.
-    pub fn rules_check(&self, spec: SpecId) -> Result<(), crate::rules::RuleError> {
-        self.rules.check_stateless(spec, self.input.origin.root_epoch)
+    /// The structural check for the sites that hold no state (`evm_env`, `next_evm_env`): the
+    /// chain spec must still be the genesis spec.
+    pub fn check_chain_spec(&self, spec: SpecId) -> Result<(), crate::rules::RuleError> {
+        crate::rules::UnicityRules::check_chain_spec(spec)
+    }
+
+    /// Resolves the spec and active rules of this job's block from the authenticated parent
+    /// `db`. A pure function of that state and the bound root epoch; refuses with the typed
+    /// `UpgradeRequired`. The builder, replay and the executor's prefix all go through it.
+    pub fn resolve_parent<DB: revm::Database>(
+        &self,
+        db: &mut DB,
+    ) -> Result<(SpecId, crate::rules::RuleSet), crate::rules::RuleError> {
+        self.rules.resolve(db, crate::VALIDATOR_REGISTRY, self.input.origin.root_epoch)
     }
 
     /// Binds the first post-genesis job to a genesis header already validated against the
@@ -327,6 +336,8 @@ where
             "epoch acknowledgement block contains user transactions",
         ));
     }
+    // the typed refusal comes first, from the authenticated parent state
+    config.bound.resolve_parent(state).map_err(BlockExecutionError::other)?;
     let mut builder = config
         .builder_for_next_block(state, parent, attributes)
         .map_err(BlockExecutionError::other)?;
@@ -371,6 +382,8 @@ where
     DB: Database,
     P: StateProvider,
 {
+    let mut db = db;
+    config.bound.resolve_parent(&mut db).map_err(BlockExecutionError::other)?;
     validate_fixed_block(config, block)?;
     let output = config.executor(db).execute(block)?;
     validate_block_post_execution(block, config.inner.chain_spec(), &output.result, None, None)
@@ -418,8 +431,6 @@ fn validate_fixed_block(
     EthBeaconConsensus::new(config.inner.chain_spec().clone())
         .validate_header(&sealed_header)
         .map_err(BlockExecutionError::other)?;
-    // header validation: the stateless half of the rule resolver
-    config.bound.rules_check(GENESIS_SPEC).map_err(BlockExecutionError::other)?;
     if block.header().blob_gas_used != Some(0) ||
         block.header().excess_blob_gas != Some(0) ||
         block.header().requests_hash.is_some() ||
@@ -706,14 +717,18 @@ where
         let bound = self.bound()?.clone();
         // The first site that holds the parent state: the schedule resolves before any system
         // call, so an unknown active rule refuses the block on build, import and replay alike.
-        bound
-            .rules
-            .resolve(
-                self.inner.evm.db_mut(),
-                crate::VALIDATOR_REGISTRY,
-                bound.input.origin.root_epoch,
-            )
-            .map_err(BlockExecutionError::other)?;
+        let (spec, _active) =
+            bound.resolve_parent(self.inner.evm.db_mut()).map_err(BlockExecutionError::other)?;
+        // The resolved spec must be the one this block's EVM, and so every ordinary transaction,
+        // runs under. `evm_env` is built before any state is read, so a rule that selects another
+        // spec cannot be half applied: it fails here until the environment is rule-aware.
+        let env_spec = self.inner.evm.cfg_env().spec;
+        if format!("{env_spec:?}") != format!("{spec:?}") {
+            return Err(BlockExecutionError::msg(format!(
+                "the activation schedule resolves spec {spec:?} but the block environment is \
+                 {env_spec:?}"
+            )));
+        }
         bound.profile.validate().map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
         let result = execute_registry_transition_on_db(
             &bound.input,
@@ -723,6 +738,7 @@ where
                 parent_number: bound.parent_number,
             },
             self.inner.evm.db_mut(),
+            &bound.rules,
             ExecutionConfig { system_gas_limit: bound.profile.system_gas, b1: bound.b1.context },
         )
         .map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
@@ -740,7 +756,8 @@ where
                 BlockExecutionError::msg("system gas exhausted before the records hook")
             })?;
             let env = crate::hook::HookEnv::from_evm(&self.inner.evm)
-                .with_root_epoch(bound.input.origin.root_epoch);
+                .with_root_epoch(bound.input.origin.root_epoch)
+                .with_rules(bound.rules.clone());
             // the election is called with the identity of the block's authenticated root origin
             let origin = bound
                 .input
@@ -860,7 +877,7 @@ impl ConfigureEvm for UnicityEvmConfig {
     fn evm_env(&self, header: &Header) -> Result<EvmEnv, Self::Error> {
         let env = self.inner.evm_env(header).map_err(|never: Infallible| match never {})?;
         self.bound
-            .rules_check(env.cfg_env.spec)
+            .check_chain_spec(env.cfg_env.spec)
             .map_err(|_| BindingError("only the fixed Cancun profile is supported"))?;
         Ok(env)
     }
@@ -878,7 +895,7 @@ impl ConfigureEvm for UnicityEvmConfig {
             .next_evm_env(parent.header(), attributes)
             .map_err(|never: Infallible| match never {})?;
         self.bound
-            .rules_check(env.cfg_env.spec)
+            .check_chain_spec(env.cfg_env.spec)
             .map_err(|_| BindingError("only the fixed Cancun profile is supported"))?;
         env.block_env.basefee = next_base_fee(self.bound.parent_execution)
             .map_err(|_| BindingError("next base fee derivation failed"))?;

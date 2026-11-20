@@ -1213,7 +1213,8 @@ mod import {
         let mut second = import_of(&log[32..], 40, 61, 2_001);
         second.target_tip = log[39].record_id;
         let mut first = first;
-        first.target_tip = log[39].record_id; // the source log's tip as of the origin, not the batch tail
+        first.target_tip = log[39].record_id; // the source log's tip as of the origin, not the
+                                              // batch tail
         let (_, db) = run_imports(&[first.clone()], world().system_gas).unwrap();
         assert_eq!(slot_value(&db, f("records.count")), u(32));
         assert_eq!(slot_value(&db, f("records.targetCount")), u(40));
@@ -1490,6 +1491,7 @@ fn an_update_touches_only_the_current_suffix_however_long_the_history_is() {
                 parent_number: step.parent_number,
             },
             &mut touched,
+            &crate::rules::UnicityRules::global(),
             config(world().system_gas),
         )
         .unwrap();

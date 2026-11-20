@@ -20,7 +20,7 @@
 use alloy_primitives::{b256, keccak256, Address, B256, U256};
 use revm::{primitives::hardfork::SpecId, Database};
 use std::{
-    collections::{BTreeMap, BTreeSet, VecDeque},
+    collections::{BTreeMap, BTreeSet},
     fmt,
     sync::{Arc, Mutex, MutexGuard, OnceLock},
 };
@@ -57,8 +57,6 @@ pub const VR_NAMESPACE: B256 =
 const STATUS_OFFSET: u64 = 6;
 /// Slot offset of the `activations` mapping.
 const ACTIVATIONS_OFFSET: u64 = 35;
-/// How many resolutions the per-epoch cache keeps.
-const CACHE_CAPACITY: usize = 16;
 
 /// A rule this binary implements.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -358,22 +356,19 @@ pub fn evaluate(entries: &[ScheduleEntry], known: &[KnownRule], block_epoch: u64
     Resolution { spec, active: RuleSet { ids: active }, lacking, refusal }
 }
 
-type CacheKey = (u64, u32, B256);
-
 #[derive(Debug, Default)]
 struct State {
-    cache: VecDeque<(CacheKey, Resolution)>,
     /// `(rule, epoch)` labels currently reported on the gauge.
     reported: BTreeSet<(B256, u64)>,
-    /// Latched entries the binary lacks, by rule: permanent, so safe to refuse on without state.
-    latched_lacking: BTreeMap<B256, Lacking>,
-    /// The latest fresh resolution, for introspection.
+    /// The latest resolution, for introspection (`unicity_rulesV1`).
     last: Option<(u64, Resolution)>,
 }
 
 #[derive(Debug)]
 struct Inner {
     known: Vec<KnownRule>,
+    /// Observability only. No decision ever reads it: every refusal is a pure function of the
+    /// parent state and the block's root epoch, so a cold and a warm node decide identically.
     state: Mutex<State>,
 }
 
@@ -396,7 +391,7 @@ impl UnicityRules {
         GLOBAL.get_or_init(|| Self::with_known(builtin_rules())).clone()
     }
 
-    /// A resolver over exactly `known` (own cache and metric state; for tests and embedders).
+    /// A resolver over exactly `known` (own observability state; for tests and embedders).
     pub fn with_known(known: Vec<KnownRule>) -> Self {
         Self { inner: Arc::new(Inner { known, state: Mutex::new(State::default()) }) }
     }
@@ -433,42 +428,25 @@ impl UnicityRules {
 
     /// [`Self::resolve`] with the whole [`Resolution`] (the pending warnings included).
     ///
-    /// Cached per epoch: the key is the epoch, the count and the last entry's words. Every
-    /// transition that changes what an epoch resolves to appends an entry (a postponement
-    /// supersedes by appending); a latch changes an entry in place but not its meaning here.
+    /// The bounded schedule (at most 64 entries, 3 words each) is read and evaluated on every
+    /// call. There is deliberately no result cache: a cache key cannot cover earlier entries
+    /// without reading them, and an in-place latch changes an entry without changing its count, so
+    /// any cheaper key could serve another parent's schedule across a reorg or replay. The
+    /// observability state (gauge, log, `unicity_rulesV1`) follows the latest resolution.
     pub fn resolve_full<DB: Database>(
         &self,
         parent_state: &mut DB,
         vr: Address,
         root_epoch: u64,
     ) -> Result<Resolution, RuleError> {
-        if vr == Address::ZERO {
-            return Ok(evaluate(&[], &self.inner.known, root_epoch));
-        }
-        let count = read_count(parent_state, vr)?;
-        let tail = match count {
-            0 => B256::ZERO,
-            n => {
-                let base = entry_base(n - 1);
-                let mut words = Vec::with_capacity(96);
-                for j in 0..3u64 {
-                    words.extend_from_slice(&load(parent_state, vr, base + U256::from(j))?);
-                }
-                keccak256(words)
-            }
-        };
-        let key = (root_epoch, count, tail);
-        if let Some(hit) = self.lock().cache.iter().find(|(k, _)| *k == key).map(|(_, r)| r.clone())
-        {
-            return finish(hit);
-        }
-        let entries = read_schedule(parent_state, vr)?;
+        let entries =
+            if vr == Address::ZERO { Vec::new() } else { read_schedule(parent_state, vr)? };
         let resolution = evaluate(&entries, &self.inner.known, root_epoch);
-        self.record(key, &resolution);
+        self.observe(root_epoch, &resolution);
         finish(resolution)
     }
 
-    fn record(&self, key: CacheKey, resolution: &Resolution) {
+    fn observe(&self, epoch: u64, resolution: &Resolution) {
         let mut state = self.lock();
         let now: BTreeSet<(B256, u64)> =
             resolution.lacking.iter().map(|l| (l.rule_id, l.root_epoch)).collect();
@@ -490,9 +468,6 @@ impl UnicityRules {
                 "epoch" => l.root_epoch.to_string()
             )
             .set(1.0);
-            if l.latched {
-                state.latched_lacking.insert(l.rule_id, *l);
-            }
         }
         let cleared: Vec<(B256, u64)> = state.reported.difference(&now).copied().collect();
         for (rule, epoch) in cleared {
@@ -504,29 +479,17 @@ impl UnicityRules {
             .set(0.0);
             state.reported.remove(&(rule, epoch));
         }
-        if state.cache.len() >= CACHE_CAPACITY {
-            state.cache.pop_front();
-        }
-        state.cache.push_back((key, resolution.clone()));
-        state.last = Some((key.0, resolution.clone()));
+        state.last = Some((epoch, resolution.clone()));
     }
 
-    /// The check for sites that hold no state (`evm_env`, header validation): the spec must be
-    /// the genesis spec, and no permanently latched rule the binary lacks may be in force at
-    /// `root_epoch`. An unlatched entry is judged only where state is available, so a pending
-    /// postponement can never be blocked by a stale view.
-    pub fn check_stateless(&self, spec: SpecId, root_epoch: u64) -> Result<(), RuleError> {
+    /// The structural check for sites that hold no state (`evm_env`, `next_evm_env`): the spec must
+    /// be the genesis spec, because chain-spec timestamp forks never move it. It carries no
+    /// schedule information and so cannot differ between a cold and a warm node; the
+    /// epoch-dependent refusal happens where the parent state is, with the typed
+    /// [`UpgradeRequired`].
+    pub fn check_chain_spec(spec: SpecId) -> Result<(), RuleError> {
         if spec != GENESIS_SPEC {
             return Err(RuleError::UnsupportedSpec(format!("{spec:?}")));
-        }
-        let state = self.lock();
-        if let Some(l) = state.latched_lacking.values().find(|l| l.root_epoch <= root_epoch) {
-            return Err(RuleError::UpgradeRequired(UpgradeRequired {
-                rule_id: l.rule_id,
-                release_digest: l.release_digest,
-                root_epoch: l.root_epoch,
-                block_epoch: root_epoch,
-            }));
         }
         Ok(())
     }
@@ -684,35 +647,6 @@ mod tests {
     }
 
     #[test]
-    fn latched_unknown_is_refused_and_stateless_sites_see_it() {
-        let rules = UnicityRules::with_known(known_noop());
-        let mut db = seed(&[entry("future", 10, EntryState::Latched, 1)]);
-        assert!(matches!(rules.resolve(&mut db, VR, 10), Err(RuleError::UpgradeRequired(_))));
-        // a stateless site now refuses at and after E, never before
-        assert!(rules.check_stateless(SpecId::CANCUN, 9).is_ok());
-        assert!(matches!(
-            rules.check_stateless(SpecId::CANCUN, 10),
-            Err(RuleError::UpgradeRequired(_))
-        ));
-    }
-
-    #[test]
-    fn active_unknown_never_blocks_a_stateless_site() {
-        let rules = UnicityRules::with_known(known_noop());
-        let mut db = seed(&[entry("future", 10, EntryState::Active, 1)]);
-        let _ = rules.resolve(&mut db, VR, 9);
-        assert!(rules.check_stateless(SpecId::CANCUN, 50).is_ok());
-    }
-
-    #[test]
-    fn stateless_site_refuses_a_moved_spec() {
-        let rules = UnicityRules::with_known(known_noop());
-        for spec in [SpecId::SHANGHAI, SpecId::PRAGUE, SpecId::OSAKA] {
-            assert!(matches!(rules.check_stateless(spec, 0), Err(RuleError::UnsupportedSpec(_))));
-        }
-    }
-
-    #[test]
     fn superseded_entries_are_ignored_and_postponement_moves_e() {
         let rules = UnicityRules::with_known(known_noop());
         // "future" at 10 was postponed to 20: only the effective entry counts
@@ -728,33 +662,73 @@ mod tests {
     }
 
     #[test]
-    fn cache_is_per_epoch_and_follows_appended_entries() {
+    fn latched_unknown_is_refused() {
         let rules = UnicityRules::with_known(known_noop());
-        let mut db = seed(&[entry("noop", 10, EntryState::Active, 1)]);
-        assert!(rules.resolve(&mut db, VR, 10).unwrap().1.contains(&rule_id("noop")));
-        // an epoch resolved earlier keeps its own answer
-        assert!(rules.resolve(&mut db, VR, 9).unwrap().1.is_empty());
-        assert_eq!(rules.lock().cache.len(), 2);
-        // an appended entry (count 2) is not served from the older cache line
-        let mut db2 = seed(&[
-            entry("noop", 10, EntryState::Active, 1),
-            entry("future", 10, EntryState::Active, 2),
-        ]);
-        assert!(matches!(rules.resolve(&mut db2, VR, 10), Err(RuleError::UpgradeRequired(_))));
-        // a hit does not re-read the entries: wipe them and only the count and tail are checked
-        let again = rules.resolve(&mut db2, VR, 10);
-        assert!(matches!(again, Err(RuleError::UpgradeRequired(_))));
-        assert_eq!(rules.lock().cache.len(), 3);
+        let mut db = seed(&[entry("future", 10, EntryState::Latched, 1)]);
+        assert!(rules.resolve(&mut db, VR, 9).is_ok());
+        assert!(matches!(rules.resolve(&mut db, VR, 10), Err(RuleError::UpgradeRequired(_))));
     }
 
     #[test]
-    fn cache_is_bounded() {
-        let rules = UnicityRules::with_known(known_noop());
-        let mut db = seed(&[entry("noop", 1, EntryState::Active, 1)]);
-        for epoch in 0..(CACHE_CAPACITY as u64 * 3) {
-            rules.resolve(&mut db, VR, epoch).unwrap();
+    fn a_moved_chain_spec_is_refused_structurally() {
+        assert!(UnicityRules::check_chain_spec(SpecId::CANCUN).is_ok());
+        for spec in [SpecId::SHANGHAI, SpecId::PRAGUE, SpecId::OSAKA] {
+            assert!(matches!(
+                UnicityRules::check_chain_spec(spec),
+                Err(RuleError::UnsupportedSpec(_))
+            ));
         }
-        assert_eq!(rules.lock().cache.len(), CACHE_CAPACITY);
+    }
+
+    /// Cold and warm resolvers, and parents that agree on count and tail but differ in an earlier
+    /// entry, decide identically: the answer is a function of the parent state alone.
+    #[test]
+    fn decisions_are_a_pure_function_of_the_parent_state() {
+        let warm = UnicityRules::with_known(known_noop());
+        let tail = entry("noop", 50, EntryState::Active, 3);
+        let a = [
+            entry("future", 10, EntryState::Active, 1),
+            entry("x", 99, EntryState::Active, 2),
+            tail,
+        ];
+        let b = [
+            entry("future", 10, EntryState::Superseded, 1),
+            entry("x", 99, EntryState::Active, 2),
+            tail,
+        ];
+        // warm up on A, then ask B and A again, against a cold resolver each time
+        for epoch in [9, 10, 11] {
+            for entries in [&a, &b, &a] {
+                let cold = UnicityRules::with_known(known_noop());
+                let mut db1 = seed(entries);
+                let mut db2 = seed(entries);
+                assert_eq!(
+                    format!("{:?}", warm.resolve(&mut db1, VR, epoch)),
+                    format!("{:?}", cold.resolve(&mut db2, VR, epoch))
+                );
+            }
+        }
+        let mut db_a = seed(&a);
+        let mut db_b = seed(&b);
+        assert!(warm.resolve(&mut db_a, VR, 10).is_err());
+        assert!(warm.resolve(&mut db_b, VR, 10).is_ok(), "the earlier entry is superseded in B");
+        assert!(warm.resolve(&mut db_b, VR, 99).is_err(), "x (unknown) is in force from 99");
+        let b2 = [entry("future", 10, EntryState::Superseded, 1), tail];
+        let mut db_b2 = seed(&b2);
+        assert!(warm.resolve(&mut db_b2, VR, 10).is_ok());
+    }
+
+    #[test]
+    fn the_latest_resolution_drives_the_view_on_every_call() {
+        let rules = UnicityRules::with_known(known_noop());
+        let mut head = seed(&[entry("future", 10, EntryState::Active, 1)]);
+        let mut older = seed(&[]);
+        rules.resolve(&mut head, VR, 5).unwrap();
+        assert_eq!(rules.latest().unwrap().1.lacking.len(), 1);
+        rules.resolve(&mut older, VR, 4).unwrap();
+        assert!(rules.latest().unwrap().1.lacking.is_empty());
+        rules.resolve(&mut head, VR, 5).unwrap();
+        assert_eq!(rules.latest().unwrap().1.lacking.len(), 1, "back at the head: warning is back");
     }
 
     #[test]

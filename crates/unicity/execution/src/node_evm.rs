@@ -369,11 +369,10 @@ impl ConfigureEvm for UnicityNodeEvmConfig {
 
     fn evm_env(&self, header: &Header) -> Result<EvmEnv, Self::Error> {
         let env = self.inner.evm_env(header).map_err(|never: Infallible| match never {})?;
-        // The header carries no root epoch, so the spec half of the resolver applies here; the
-        // epoch-dependent refusal runs in the executor, where the bound input and the parent
-        // state are.
-        crate::rules::UnicityRules::global()
-            .check_stateless(env.cfg_env.spec, 0)
+        // The header carries no root epoch and there is no state here, so only the structural
+        // half applies; the epoch-dependent, typed refusal runs in the executor, where the bound
+        // input and the parent state are.
+        crate::rules::UnicityRules::check_chain_spec(env.cfg_env.spec)
             .map_err(|_| UnicityNodeEvmError::UnsupportedSpec)?;
         Ok(env)
     }

@@ -663,7 +663,13 @@ where
     ExtDB: DatabaseRef + Clone,
 {
     let mut candidate = parent.clone();
-    let result = execute_registry_transition_on_db(input, update, &mut candidate, config)?;
+    let result = execute_registry_transition_on_db(
+        input,
+        update,
+        &mut candidate,
+        &rules::UnicityRules::global(),
+        config,
+    )?;
     Ok((result, candidate))
 }
 
@@ -676,6 +682,7 @@ pub(crate) fn execute_registry_transition_on_db<DB>(
     input: &RootInputV2,
     update: UpdateInput<'_>,
     db: &mut DB,
+    rules: &rules::UnicityRules,
     config: ExecutionConfig,
 ) -> Result<ExecutionResult, ExecutionError>
 where
@@ -807,7 +814,7 @@ where
         })?;
     let prepared = prepare_transition(input, &admitted.update, genesis_shard_conf_hash)?;
     // the system calls run under the spec the authenticated schedule resolves for this block
-    let (spec, _) = rules::UnicityRules::global()
+    let (spec, _) = rules
         .resolve(db, VALIDATOR_REGISTRY, input.origin.root_epoch)
         .map_err(ExecutionError::Rules)?;
     let mut evm = Context::mainnet()
