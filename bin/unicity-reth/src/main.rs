@@ -124,6 +124,11 @@ struct UnicityArgs {
     #[arg(long = "unicity.no-proof-source")]
     no_proof_source: bool,
 
+    /// Serve state proofs for the full retained chain on private RPC for validator-registry
+    /// replay.
+    #[arg(long = "unicity.archive-state-proofs")]
+    archive_state_proofs: bool,
+
     /// Maximum historical blocks replayed from a durable parent-accounting token at startup.
     #[arg(long = "unicity.accounting-repair-limit", default_value_t = 64, value_name = "BLOCKS")]
     accounting_repair_limit: u64,
@@ -214,7 +219,7 @@ impl UnicityArgs {
         cli_prune: Option<reth_config::PruneConfig>,
         toml_prune: reth_config::PruneConfig,
     ) -> eyre::Result<()> {
-        if !self.proof_source_enabled() {
+        if !self.proof_source_enabled() && !self.archive_state_proofs {
             return Ok(());
         }
         let effective = match cli_prune {
@@ -224,10 +229,20 @@ impl UnicityArgs {
             }
             None => toml_prune,
         };
-        reth_unicity_payload::prune::validate_proof_retention(
-            &effective.segments,
-            self.companion_retention_depth,
-        )
+        if self.archive_state_proofs {
+            eyre::ensure!(
+                effective.segments.account_history.is_none() &&
+                    effective.segments.storage_history.is_none(),
+                "--unicity.archive-state-proofs requires unpruned account and storage history"
+            );
+        }
+        if self.proof_source_enabled() {
+            reth_unicity_payload::prune::validate_proof_retention(
+                &effective.segments,
+                self.companion_retention_depth,
+            )?;
+        }
+        Ok(())
     }
 }
 
@@ -240,11 +255,11 @@ fn main() {
     }
 
     if let Err(err) = Cli::<EthereumChainSpecParser, UnicityArgs>::parse().run(
-        async move |builder, args: UnicityArgs| {
+        async move |mut builder, args: UnicityArgs| {
             let profile = args.profile()?;
             let b1 = args.b1(&profile)?;
             args.validate_retention()?;
-            if args.proof_source_enabled() {
+            if args.proof_source_enabled() || args.archive_state_proofs {
                 // Validate before launch starts payload-building and other node services.
                 // Keep the same CLI-over-TOML precedence as LaunchContext::prune_config.
                 let node_config = builder.config();
@@ -254,7 +269,18 @@ fn main() {
                     .unwrap_or_else(|| node_config.datadir().config());
                 let disk_config = RethConfig::from_path(config_path)?;
                 args.validate_proof_source(node_config.prune_config(), disk_config.prune)?;
-            } else {
+            }
+            if args.archive_state_proofs {
+                let rpc = &mut builder.config_mut().rpc;
+                eyre::ensure!(
+                    (!rpc.http || rpc.http_addr.is_loopback()) &&
+                        (!rpc.ws || rpc.ws_addr.is_loopback()) &&
+                        rpc.auth_addr.is_loopback(),
+                    "--unicity.archive-state-proofs requires loopback RPC addresses"
+                );
+                rpc.rpc_eth_proof_window = u64::MAX;
+            }
+            if !args.proof_source_enabled() {
                 warn!(
                     target: "reth::unicity",
                     "proof-source retention protection is disabled; pruning may permanently remove data required for offline proof capture"
@@ -355,6 +381,7 @@ mod tests {
             companion_retention_depth: Some(ACCOUNTING_WINDOW + 2 - 1),
             accounting_repair_limit: 2,
             no_proof_source: false,
+            archive_state_proofs: false,
         };
         assert!(args.validate_retention().is_err());
         let args = UnicityArgs { companion_retention_depth: Some(ACCOUNTING_WINDOW + 2), ..args };
@@ -382,8 +409,27 @@ mod tests {
             base_fee_change_denominator: 8,
             companion_retention_depth,
             no_proof_source: !enabled,
+            archive_state_proofs: false,
             accounting_repair_limit: 64,
         }
+    }
+
+    #[test]
+    fn archive_state_proofs_require_account_and_storage_history() {
+        let args = UnicityArgs { archive_state_proofs: true, ..proof_args(false, None) };
+        let mut disk = RethConfig::default().prune;
+        assert!(args.validate_proof_source(None, disk.clone()).is_ok());
+
+        disk.segments.storage_history = Some(PruneMode::Distance(64));
+        assert!(args.validate_proof_source(None, disk).is_err());
+        let cli = reth_config::PruneConfig {
+            segments: reth_prune_types::PruneModes {
+                account_history: Some(PruneMode::Distance(64)),
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(args.validate_proof_source(Some(cli), RethConfig::default().prune).is_err());
     }
 
     #[test]
