@@ -545,7 +545,7 @@ tar = "0.4.46"
 tracing = { version = "0.1.0", default-features = false, features = ["attributes"] }
 tracing-appender = "0.2.5"
 url = { version = "2.3", default-features = false }
-zstd = "0.13"
+zstd = "0.13.5"
 byteorder = "1"
 fixed-cache = { version = "0.1.10", default-features = false, features = ["alloc"] }
 moka = "0.12"
@@ -670,7 +670,7 @@ data-encoding = "2"
 delegate = "0.13"
 digest = "0.10.5"
 hash-db = "=0.15.2"
-hickory-resolver = "0.26.1"
+hickory-resolver = "0.26.3"
 hmac = "0.12.1"
 human_bytes = "0.4.1"
 indexmap = "2"
