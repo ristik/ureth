@@ -68,7 +68,7 @@ pub struct CertBatchPrecompile {
 impl CertBatchPrecompile {
     /// Construct a provider; installing it in a precompile map is the integration's decision.
     pub fn new(pins: Pins) -> Self {
-        Self { pins, id: PrecompileId::Custom("unicity-b1-cert-batch-v2".into()) }
+        Self { pins, id: PrecompileId::Custom("unicity-b1-cert-batch-v2-tip".into()) }
     }
     /// Wrap for an explicitly supplied map. The result is stateful: no result cache.
     pub fn into_dyn(self) -> DynPrecompile {

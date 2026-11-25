@@ -84,8 +84,11 @@ fn journal_values_warmth_revert_and_status_conversion() {
     assert_eq!(cold.bytes[31], 2);
     assert_eq!(cold.bytes[63], 1);
     // The registry reads warm the journal exactly as ordinary SLOADs do.
+    for name in ["b1.network", "b1.originReady", "clock.rootRound", "origin.rootEpoch"] {
+        let key = fixed_slot(name);
+        assert!(!EvmInternals::from_context(&mut ctx).sload(REGISTRY, key).unwrap().is_cold);
+    }
     let key = fixed_slot("b1.network");
-    assert!(!EvmInternals::from_context(&mut ctx).sload(REGISTRY, key).unwrap().is_cold);
     assert_eq!(call(&pc, &mut ctx, &input, u64::MAX).unwrap(), cold);
     ctx.journaled_state.checkpoint_revert(checkpoint);
     assert!(EvmInternals::from_context(&mut ctx).sload(REGISTRY, key).unwrap().is_cold);
