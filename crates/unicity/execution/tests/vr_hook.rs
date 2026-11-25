@@ -76,13 +76,14 @@ const FIXTURE_POS: &str = include_str!("../testdata/vr-hook-pos.json");
 /// `test/vr/fixtures/vr-hook.json` at `FIXTURE_SOURCE`, whose CI regenerates that file and compares
 /// it byte for byte. A changed copy here, or a regenerated file there, shows as a mismatch.
 const FIXTURE_SHA256_POA: B256 =
-    alloy_primitives::b256!("54d69d3f95c67b4af77e59a8a64c3804b81848b6c9b40a3074ee679db00fa2ce");
+    alloy_primitives::b256!("a4d62fc043df7e37331d4b0ca67163a824f6b7cf258612af9b3f6cfca7f62a15");
 /// SHA-256 of `testdata/vr-hook-pos.json`, the copy of `test/vr/fixtures/vr-hook-pos.json` (the
 /// generator under `VR_BUILD=pos`: the PoS-capable VR build, H = 16).
 const FIXTURE_SHA256_POS: B256 =
     alloy_primitives::b256!("dadd3f0be855a6a6c9d6c7b111f8be5ed0be6e7c0fe9d7bb6d3603915be57a76");
 /// The unicity-pos-contracts commit the fixture was copied from.
-const FIXTURE_SOURCE: &str = "vt14/genesis (ristik/unicity-pos-contracts, VT-14 combined fixtures)";
+const FIXTURE_SOURCE: &str =
+    "unicity-pos-contracts e2b995b with the origin of the bft-core#1297 registry genesis (VRHookState ORIGIN)";
 const FIXTURE_SOURCE_POS: &str =
     "vt04b/hook-pins (ristik/unicity-pos-contracts, the PoS-capable build, H = 16)";
 /// Every scenario the generator (`test/vr/VRHookState.t.sol`) dumps, exactly.
@@ -283,13 +284,13 @@ const POA: Build = Build {
     cap_elect: 4_000_000,
     cap_output: 1_000_000,
     cap_record: 1_500_000,
-    elect_requirement: 7_981_443,
-    record_requirement: 17_977_590,
-    batch_requirement: 52_262_738,
+    elect_requirement: 7_981_487,
+    record_requirement: 17_977_731,
+    batch_requirement: 52_264_495,
     retire_requirement: 0,
-    expected_hook_record_gas: 2_743_763,
-    expected_elect_gas: 9_976_804,
-    expected_envelope: 97_927_220,
+    expected_hook_record_gas: 2_743_837,
+    expected_elect_gas: 9_976_859,
+    expected_envelope: 97_929_643,
 };
 
 const POS: Build = Build {
@@ -1535,7 +1536,7 @@ fn hook_gas_combined_switch_and_ordinary_records_fit_the_batch_allowance() {
 }
 
 /// Every scenario under the VR profile's batch pins (the build's amortized allowance, H x
-/// `HookRecordGas`: 87,800,416 at H = 32 for the `PoA` build): the block builds with the system
+/// `HookRecordGas`: 87,802,784 at H = 32 for the `PoA` build): the block builds with the system
 /// budget at exactly the hook envelope (150,000 + allowance + `ElectGas`), replays to itself and
 /// reaches forge's state, the combined fixtures included; and each combined fixture lands on its
 /// reference state with a records-only reservation of exactly `M_H`.

@@ -1432,7 +1432,7 @@ mod tests {
                 second.finalize_gas_spent,
                 second.total_gas_spent
             ),
-            (7_728, 123_314, 24_905, 47_303, 203_250)
+            (7_728, 123_336, 24_930, 47_325, 203_319)
         );
         let exact = second.total_gas_spent;
         assert!(run(&second_input, &after_first, exact).is_ok());
