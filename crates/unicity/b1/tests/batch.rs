@@ -161,7 +161,7 @@ fn a_single_claim_and_a_shared_batch_verify_with_the_exact_counters() {
             signatures: 3,
             claims: 1,
             folds: 1,
-            reads: 8 + 11 + 32
+            reads: 11 + 11 + 32
         }
     );
 
@@ -233,7 +233,7 @@ fn a_claim_for_an_unusable_epoch_is_false_at_the_full_charge_without_loading_it(
     let (out, c) = ok(&one, &mut s);
     assert!(!verdict(&out));
     assert_eq!(out.gas, batch::dimensions(&request(&one)).unwrap().gas());
-    assert_eq!((c.epoch_loads, c.signatures, s.reads), (0, 0, 8));
+    assert_eq!((c.epoch_loads, c.signatures, s.reads), (0, 0, 11));
     // Usable range [8,8]: the claim declares epoch 7 < g.
     let mut s = registry(8, 8, &members("cert.single.ok"));
     let (out, c) = ok(&one, &mut s);
@@ -273,14 +273,14 @@ fn phase_one_refuses_before_loading_genesis_authority() {
     s.words.insert(fixed_slot("phase"), U256::from(1));
     let (out, c) = ok(&one, &mut s);
     assert!(!verdict(&out));
-    assert_eq!((c.epoch_loads, s.reads), (0, 8));
+    assert_eq!((c.epoch_loads, s.reads), (0, 11));
     let mut s = base();
     s.words.insert(fixed_slot("b1.originReady"), U256::ZERO);
     s.words.insert(fixed_slot("clock.rootRound"), U256::ZERO);
     s.words.insert(fixed_slot("origin.rootEpoch"), U256::ZERO);
     let (out, _) = ok(&one, &mut s);
     assert!(verdict(&out));
-    assert_eq!(s.reads, 8 + 11 + 32);
+    assert_eq!(s.reads, 11 + 11 + 32);
 }
 
 #[test]

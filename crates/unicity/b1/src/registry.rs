@@ -139,9 +139,6 @@ pub struct Pins {
     /// Expected `b1.profileHash` word.
     pub profile_hash: U256,
 }
-/// Number of registry words read before loading epoch authorities.
-pub(crate) const COMMON_WORDS: usize = 8;
-
 #[derive(Debug)]
 pub(crate) struct CommonV2 {
     pub phase: u64,
@@ -154,7 +151,7 @@ pub(crate) fn common_v2<R: RegistryRead>(
     r: &mut R,
     pins: &Pins,
 ) -> Result<CommonV2, Error<R::Error>> {
-    let mut w = [U256::ZERO; COMMON_WORDS];
+    let mut w = [U256::ZERO; 11];
     for (dst, name) in w.iter_mut().zip([
         "genesisCommitment",
         "phase",
@@ -164,6 +161,10 @@ pub(crate) fn common_v2<R: RegistryRead>(
         "b1.format",
         "b1.genesisEpoch",
         "b1.importedTipEpoch",
+        // Keep the journal's storage warming for callers reading these slots after B1.
+        "b1.originReady",
+        "clock.rootRound",
+        "origin.rootEpoch",
     ]) {
         *dst = read(r, fixed_slot(name))?;
     }

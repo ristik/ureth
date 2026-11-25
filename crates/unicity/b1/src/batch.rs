@@ -281,7 +281,7 @@ fn evaluate<R: RegistryRead>(
     counters: &mut Counters,
 ) -> Result<bool, Error<R::Error>> {
     let common = registry::common_v2(state, pins)?;
-    counters.reads += registry::COMMON_WORDS as u64;
+    counters.reads += COMMON_WORDS;
     if common.phase == 1 {
         return Ok(false);
     }
