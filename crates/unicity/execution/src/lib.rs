@@ -122,7 +122,7 @@ pub const VALIDATOR_REGISTRY: Address =
 /// Keccak-256 of the pinned `SealRegistry` runtime artifact: B1 plus the authenticated root-record
 /// log, permanent layout (contracts `registry/permanent-layout`).
 pub const SEAL_REGISTRY_CODE_HASH: B256 =
-    b256!("ebbadc64b3f723741dbf79e3ffd7bf2ea31daf4e4a949a3e01e5656926f446ae");
+    b256!("8b3105bfc06dae2a5755e78a66e9675172da8cd9d532dc4e8f44b01afd6f0e6c");
 const GENESIS_SHARD_CONF_HASH_SLOT: B256 =
     b256!("4d19b7530faa2fa3495319b01857830cdc6ca35a5b20c4084d10119118d44afe");
 const ASSIGNMENT_EPOCH_SLOT: B256 =
@@ -1432,7 +1432,7 @@ mod tests {
                 second.finalize_gas_spent,
                 second.total_gas_spent
             ),
-            (7_728, 123_314, 24_905, 47_303, 203_250)
+            (7_728, 123_336, 24_930, 47_325, 203_319)
         );
         let exact = second.total_gas_spent;
         assert!(run(&second_input, &after_first, exact).is_ok());

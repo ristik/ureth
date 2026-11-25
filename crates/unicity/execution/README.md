@@ -4,7 +4,7 @@ This crate contains the bounded execution kernel and shared Reth block-execution
 single B1 profile: full authenticated root members in deterministically pruned ordinary EVM state.
 It pins the `SealRegistry` of unicity-pos-contracts (B1 plus the authenticated root-record log with
 the validator-registry kinds 6 to 8, VT-15), whose runtime is in `testdata/seal-registry.json` with code hash
-`0xebbadc64b3f723741dbf79e3ffd7bf2ea31daf4e4a949a3e01e5656926f446ae`. There is no layout version
+`0x8b3105bfc06dae2a5755e78a66e9675172da8cd9d532dc4e8f44b01afd6f0e6c` (contracts e2b995b: read-only `sealEpoch`/`sealMember` views for post-term evidence, bft-core#1297; the storage layout is unchanged). There is no layout version
 and no older registry: the fixed words, the circular live-set queue and the entry and member words
 are the one layout, and a genesis that does not carry it is refused.
 
