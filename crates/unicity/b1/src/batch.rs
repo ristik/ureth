@@ -339,10 +339,7 @@ fn evaluate<R: RegistryRead>(
             continue;
         };
         let r = f[2].arg;
-        if f[1].arg != common.network ||
-            r < entry.start ||
-            entry.end.is_some_and(|end| r >= end)
-        {
+        if f[1].arg != common.network || r < entry.start || entry.end.is_some_and(|end| r >= end) {
             valid = false;
             continue;
         }
