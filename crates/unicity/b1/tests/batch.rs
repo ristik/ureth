@@ -161,7 +161,7 @@ fn a_single_claim_and_a_shared_batch_verify_with_the_exact_counters() {
             signatures: 3,
             claims: 1,
             folds: 1,
-            reads: 11 + 11 + 32
+            reads: 8 + 11 + 32
         }
     );
 
@@ -233,7 +233,7 @@ fn a_claim_for_an_unusable_epoch_is_false_at_the_full_charge_without_loading_it(
     let (out, c) = ok(&one, &mut s);
     assert!(!verdict(&out));
     assert_eq!(out.gas, batch::dimensions(&request(&one)).unwrap().gas());
-    assert_eq!((c.epoch_loads, c.signatures, s.reads), (0, 0, 11));
+    assert_eq!((c.epoch_loads, c.signatures, s.reads), (0, 0, 8));
     // Usable range [8,8]: the claim declares epoch 7 < g.
     let mut s = registry(8, 8, &members("cert.single.ok"));
     let (out, c) = ok(&one, &mut s);
@@ -242,7 +242,7 @@ fn a_claim_for_an_unusable_epoch_is_false_at_the_full_charge_without_loading_it(
 }
 
 #[test]
-fn seal_interval_and_origin_round_gates_are_semantic() {
+fn seal_interval_gates_use_the_imported_tip() {
     let one = claims("cert.single.ok");
     // Seal round is 990. Closed before it: epoch 7 ends at 980 (and is not the tip).
     let ms = members("cert.single.ok");
@@ -252,10 +252,10 @@ fn seal_interval_and_origin_round_gates_are_semantic() {
     // The same epoch, ending after the round, verifies.
     put_epoch(&mut s, 7, 900, 995, &ms);
     assert!(verdict(&ok(&one, &mut s).0));
-    // Round above the origin round.
+    // Open-tip seals ahead of the observed round verify.
     let mut s = base();
     s.words.insert(fixed_slot("clock.rootRound"), U256::from(985));
-    assert!(!verdict(&ok(&one, &mut s).0));
+    assert!(verdict(&ok(&one, &mut s).0));
     // Round before the epoch start (start 991 > 990).
     let mut s = base();
     put_epoch(&mut s, 7, 991, 0, &ms);
@@ -267,20 +267,20 @@ fn seal_interval_and_origin_round_gates_are_semantic() {
 }
 
 #[test]
-fn phase_one_and_not_ready_are_false_after_only_the_common_reads() {
+fn phase_one_refuses_before_loading_genesis_authority() {
     let one = claims("cert.single.ok");
     let mut s = base();
     s.words.insert(fixed_slot("phase"), U256::from(1));
     let (out, c) = ok(&one, &mut s);
     assert!(!verdict(&out));
-    assert_eq!((c.epoch_loads, s.reads), (0, 11));
+    assert_eq!((c.epoch_loads, s.reads), (0, 8));
     let mut s = base();
     s.words.insert(fixed_slot("b1.originReady"), U256::ZERO);
     s.words.insert(fixed_slot("clock.rootRound"), U256::ZERO);
     s.words.insert(fixed_slot("origin.rootEpoch"), U256::ZERO);
     let (out, _) = ok(&one, &mut s);
-    assert!(!verdict(&out));
-    assert_eq!(s.reads, 11);
+    assert!(verdict(&out));
+    assert_eq!(s.reads, 8 + 11 + 32);
 }
 
 #[test]
@@ -375,25 +375,19 @@ fn impossible_registry_state_is_an_infrastructure_error_never_a_verdict() {
         v.push(("zero network", s));
         let mut s = base();
         s.words.insert(fixed_slot("b1.importedTipEpoch"), U256::from(8));
-        v.push(("tip above the usable epoch while ready", s));
-        let mut s = base();
-        s.words.insert(fixed_slot("b1.originReady"), U256::from(2));
-        v.push(("ready not a boolean", s));
+        v.push(("historical entry left open", s));
         let mut s = base();
         s.words.insert(fixed_slot("b1.genesisEpoch"), U256::from(8));
         v.push(("genesis above tip", s));
         let mut s = base();
-        s.words.insert(fixed_slot("clock.rootRound"), U256::MAX);
+        s.words.insert(fixed_slot("b1.importedTipEpoch"), U256::MAX);
         v.push(("wide word", s));
         let mut s = base();
         put_epoch(&mut s, 7, 900, 1000, &ms);
         v.push(("closed usable tip", s));
         let mut s = base();
-        put_epoch(&mut s, 7, 1001, 0, &ms);
-        v.push(("start after the origin round", s));
-        let mut s = base();
         s.words.insert(entry_slot(7, 0), U256::ZERO);
-        v.push(("requested epoch missing", s));
+        v.push(("absent epoch with nonzero metadata", s));
         let mut s = base();
         s.words.insert(entry_slot(7, 9), U256::from(17));
         v.push(("more than sixteen members", s));

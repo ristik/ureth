@@ -139,22 +139,22 @@ pub struct Pins {
     /// Expected `b1.profileHash` word.
     pub profile_hash: U256,
 }
-/// The eleven common words of a batch call (contract section 5).
+/// Number of registry words read before loading epoch authorities.
+pub(crate) const COMMON_WORDS: usize = 8;
+
 #[derive(Debug)]
 pub(crate) struct CommonV2 {
     pub phase: u64,
     pub network: u64,
     pub genesis: u64,
-    pub ready: bool,
-    pub origin: u64,
-    pub round: u64,
+    pub tip: u64,
 }
 /// Read and validate the common words. Any impossible value is a `Registry` error, not a verdict.
 pub(crate) fn common_v2<R: RegistryRead>(
     r: &mut R,
     pins: &Pins,
 ) -> Result<CommonV2, Error<R::Error>> {
-    let mut w = [U256::ZERO; 11];
+    let mut w = [U256::ZERO; COMMON_WORDS];
     for (dst, name) in w.iter_mut().zip([
         "genesisCommitment",
         "phase",
@@ -164,9 +164,6 @@ pub(crate) fn common_v2<R: RegistryRead>(
         "b1.format",
         "b1.genesisEpoch",
         "b1.importedTipEpoch",
-        "b1.originReady",
-        "clock.rootRound",
-        "origin.rootEpoch",
     ]) {
         *dst = read(r, fixed_slot(name))?;
     }
@@ -174,9 +171,6 @@ pub(crate) fn common_v2<R: RegistryRead>(
     let network = small(w[3])?;
     let genesis = small(w[6])?;
     let tip = small(w[7])?;
-    let ready = small(w[8])?;
-    let round = small(w[9])?;
-    let origin = small(w[10])?;
     if w[0].is_zero() ||
         w[0] != pins.genesis_commitment ||
         w[4].is_zero() ||
@@ -185,15 +179,9 @@ pub(crate) fn common_v2<R: RegistryRead>(
         w[5] != U256::from(2) ||
         !matches!(phase, 1 | 2) ||
         !(1..=u64::from(u16::MAX)).contains(&network) ||
-        genesis > tip ||
-        ready > 1
+        genesis > tip
     {
         return Err(Error::Registry);
     }
-    // Before the first origin the operational pair is zero; afterwards the usable epoch is the
-    // import tip (no preload: the acknowledgement block installs the whole missing range).
-    if (ready == 0 && (origin != 0 || round != 0)) || (ready == 1 && origin != tip) {
-        return Err(Error::Registry);
-    }
-    Ok(CommonV2 { phase, network, genesis, ready: ready == 1, origin, round })
+    Ok(CommonV2 { phase, network, genesis, tip })
 }

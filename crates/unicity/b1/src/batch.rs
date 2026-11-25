@@ -281,8 +281,8 @@ fn evaluate<R: RegistryRead>(
     counters: &mut Counters,
 ) -> Result<bool, Error<R::Error>> {
     let common = registry::common_v2(state, pins)?;
-    counters.reads += 11;
-    if common.phase == 1 || !common.ready {
+    counters.reads += registry::COMMON_WORDS as u64;
+    if common.phase == 1 {
         return Ok(false);
     }
     // Distinct claims in first-use order, with the declared epochs they use.
@@ -293,10 +293,10 @@ fn evaluate<R: RegistryRead>(
         .map(|&i| s.claims[i].seal_fields[3].arg)
         .filter(|&e| first_use.insert(e))
         .collect();
-    // Load and validate every requested epoch inside [g,U] before any cryptography.
+    // Load and validate every requested epoch inside [g,I] before any cryptography.
     let mut loaded: HashMap<u64, Entry> = HashMap::with_capacity(epochs.len());
     for &e in &epochs {
-        if e < common.genesis || e > common.origin {
+        if e < common.genesis || e > common.tip {
             continue;
         }
         let Some(entry) = registry::entry(state, e)? else {
@@ -305,13 +305,8 @@ fn evaluate<R: RegistryRead>(
         counters.epoch_loads += 1;
         counters.key_parses += entry.members.len() as u64;
         counters.reads += 11 + 8 * entry.members.len() as u64;
-        let closed = entry.end;
-        let impossible = if e < common.origin {
-            closed.is_none_or(|end| end > common.round) || entry.start > common.round
-        } else {
-            closed.is_some() || entry.start > common.round
-        };
-        if impossible {
+        // The writer closes each historical epoch at its immediate successor's start.
+        if (e < common.tip) != entry.end.is_some() {
             return Err(Error::Registry);
         }
         loaded.insert(e, entry);
@@ -346,8 +341,7 @@ fn evaluate<R: RegistryRead>(
         let r = f[2].arg;
         if f[1].arg != common.network ||
             r < entry.start ||
-            entry.end.is_some_and(|end| r >= end) ||
-            r > common.round
+            entry.end.is_some_and(|end| r >= end)
         {
             valid = false;
             continue;
