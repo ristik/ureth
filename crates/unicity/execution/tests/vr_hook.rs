@@ -85,7 +85,7 @@ const FIXTURE_SHA256_POS: B256 =
 const FIXTURE_SOURCE: &str =
     "unicity-pos-contracts e2b995b with the origin of the bft-core#1297 registry genesis (VRHookState ORIGIN)";
 const FIXTURE_SOURCE_POS: &str =
-    "unicity-pos-contracts 7e64c0c (bft-core#1286: ElectionPolicy, PosElectionAdapter, the PoS-capable build, H = 16)";
+    "unicity-pos-contracts f0e569c2 (bft-core#1286 package pin; byte-identical since 7e64c0c: ElectionPolicy, PosElectionAdapter, the PoS-capable build, H = 16)";
 /// Every scenario the generator (`test/vr/VRHookState.t.sol`) dumps, exactly.
 const SCENARIOS: [&str; 36] = [
     "attach-revert",
