@@ -80,12 +80,12 @@ const FIXTURE_SHA256_POA: B256 =
 /// SHA-256 of `testdata/vr-hook-pos.json`, the copy of `test/vr/fixtures/vr-hook-pos.json` (the
 /// generator under `VR_BUILD=pos`: the PoS-capable VR build, H = 16).
 const FIXTURE_SHA256_POS: B256 =
-    alloy_primitives::b256!("dadd3f0be855a6a6c9d6c7b111f8be5ed0be6e7c0fe9d7bb6d3603915be57a76");
+    alloy_primitives::b256!("e2273a50e21bb557289c46fbb84e3e555a3bab64f1f5cb53cf1dbf0a90058493");
 /// The unicity-pos-contracts commit the fixture was copied from.
 const FIXTURE_SOURCE: &str =
     "unicity-pos-contracts e2b995b with the origin of the bft-core#1297 registry genesis (VRHookState ORIGIN)";
 const FIXTURE_SOURCE_POS: &str =
-    "vt04b/hook-pins (ristik/unicity-pos-contracts, the PoS-capable build, H = 16)";
+    "unicity-pos-contracts f0e569c2 (bft-core#1286 package pin; byte-identical since 7e64c0c: ElectionPolicy, PosElectionAdapter, the PoS-capable build, H = 16)";
 /// Every scenario the generator (`test/vr/VRHookState.t.sol`) dumps, exactly.
 const SCENARIOS: [&str; 36] = [
     "attach-revert",
