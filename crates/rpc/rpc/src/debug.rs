@@ -356,30 +356,18 @@ where
         overrides: EvmOverrides,
     ) -> Result<GethTrace, Eth::Error> {
         // Get the target block to check transaction count
-        let block = self
-            .eth_api()
-            .recovered_block(block_id)
-            .await?
-            .ok_or(EthApiError::HeaderNotFound(block_id))?;
-
-        if tx_index >= block.transaction_count() {
+        let block = self.eth_api().call_block_at(block_id).await?;
+        let transaction_count = block.block.transaction_count();
+        if tx_index >= transaction_count {
             // tx_index out of bounds
             return Err(EthApiError::InvalidParams(format!(
-                "tx_index {} out of bounds for block with {} transactions",
-                tx_index,
-                block.transaction_count()
+                "tx_index {tx_index} out of bounds for block with {transaction_count} transactions",
             ))
             .into())
         }
 
-        let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
-
         self.eth_api()
-            .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
-                // 1. replay the required number of transactions
-                eth_api.replay_block_until(&mut db, &block, tx_index)?;
-
-                // 2. now execute the trace call on this state
+            .spawn_with_call_block(block, Some(tx_index), move |eth_api, mut db, evm_env| {
                 let (evm_env, tx_env) =
                     eth_api.prepare_call_env(evm_env, call, &mut db, overrides)?;
 
@@ -410,47 +398,18 @@ where
         }
 
         let StateContext { transaction_index, block_number } = state_context.unwrap_or_default();
-        let transaction_index = transaction_index.unwrap_or_default();
+        let tx_index = transaction_index.unwrap_or_default().index();
 
         let target_block = block_number.unwrap_or_default();
-        let block = self
-            .eth_api()
-            .recovered_block(target_block)
-            .await?
-            .ok_or(EthApiError::HeaderNotFound(target_block))?;
-        let mut evm_env =
-            self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
+        let block = self.eth_api().call_block_at(target_block).await?;
 
         let opts = opts.unwrap_or_default();
         let GethDebugTracingCallOptions { tracing_options, mut state_overrides, .. } = opts;
 
-        // we're essentially replaying the transactions in the block here, hence we need the state
-        // that points to the beginning of the block, which is the state at the parent block
-        let mut at = block.parent_hash();
-        let mut replay_block_txs = true;
-
-        // if a transaction index is provided, we need to replay the transactions until the index
-        let num_txs =
-            transaction_index.index().unwrap_or_else(|| block.body().transactions().len());
-        // but if all transactions are to be replayed, we can use the state at the block itself
-        // this works with the exception of the PENDING block, because its state might not exist if
-        // built locally
-        if !target_block.is_pending() && num_txs == block.body().transactions().len() {
-            at = block.hash();
-            replay_block_txs = false;
-        }
-
         self.eth_api()
-            .spawn_with_state_at_block(at, move |eth_api, mut db| {
+            .spawn_with_call_block(block, tx_index, move |eth_api, mut db, mut evm_env| {
                 // the outer vec for the bundles
                 let mut all_bundles = Vec::with_capacity(bundles.len());
-
-                if replay_block_txs {
-                    // only need to replay the transactions in the block if not all transactions are
-                    // to be replayed
-                    // Execute all transactions until index
-                    eth_api.replay_block_until(&mut db, &block, num_txs)?;
-                }
 
                 // Trace all bundles
                 let mut bundles = bundles.into_iter().peekable();
@@ -482,7 +441,8 @@ where
                             .map_err(Eth::Error::from_eth_err)?;
 
                         // If there is more transactions, commit the database
-                        // If there is no transactions, but more bundles, commit to the database too
+                        // If there is no transactions, but more bundles, commit to the database
+                        // too
                         if transactions.peek().is_some() || bundles.peek().is_some() {
                             inspector.fuse().map_err(Eth::Error::from_eth_err)?;
                             db.commit(res.state);
@@ -1286,6 +1246,9 @@ impl<B: BlockTrait> Default for BadBlockStore<B> {
         Self::new(64)
     }
 }
+
+#[cfg(test)]
+mod pending_tests;
 
 #[cfg(test)]
 mod tests {

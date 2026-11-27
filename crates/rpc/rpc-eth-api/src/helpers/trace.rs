@@ -1,24 +1,112 @@
 //! Loads a pending block from database. Helper trait for `eth_` call and trace RPC methods.
 
-use super::{Call, LoadBlock, LoadState, LoadTransaction};
+use super::{state::RpcStateSource, Call, LoadBlock, LoadState, LoadTransaction};
 use crate::{FromEthApiError, FromEvmError};
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_primitives::B256;
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
 use futures::Future;
+use reth_errors::RethError;
 use reth_evm::{
     block::BlockExecutor, evm::EvmFactoryExt, tracing::TracingCtx, ConfigureEvm, Evm, EvmEnvFor,
     EvmFor, HaltReasonFor, InspectorFor, IntoTxEnv, TxEnvFor,
 };
 use reth_primitives_traits::{BlockBody, BlockTy, Recovered, RecoveredBlock};
-use reth_rpc_eth_types::cache::db::StateCacheDb;
-use reth_storage_api::{ProviderBlock, ProviderTx};
+use reth_revm::database::StateProviderDatabase;
+use reth_rpc_eth_types::{cache::db::StateCacheDb, EthApiError, PendingBlockEnvOrigin};
+use reth_storage_api::{ProviderBlock, ProviderTx, StateProviderBox, StateProviderFactory};
 use revm::{context::Block, context_interface::result::ResultAndState};
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
 use std::sync::Arc;
 
 /// Executes CPU heavy tasks.
 pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
+    /// Loads a concrete block and retains the post-state of an executed pending block.
+    fn call_block_at(
+        &self,
+        at: BlockId,
+    ) -> impl Future<Output = Result<CallBlock<Self::Evm>, Self::Error>> + Send
+    where
+        Self: LoadBlock,
+    {
+        async move {
+            let (block, evm_env, pending_state) = if at.is_pending() {
+                if self.pending_block_kind().is_none() {
+                    return Err(EthApiError::HeaderNotFound(at).into())
+                }
+
+                let (pending, state) = self.pending_block_env_and_state()?;
+                match pending.origin {
+                    PendingBlockEnvOrigin::ActualPending(block, _) => {
+                        (block, Some(pending.evm_env), state)
+                    }
+                    PendingBlockEnvOrigin::DerivedFromLatest(parent) => {
+                        let pending = self
+                            .build_pool_pending_block(parent, pending.evm_env)
+                            .await?
+                            .ok_or(EthApiError::HeaderNotFound(at))?;
+                        (pending.into_block_and_receipts().block, None, None)
+                    }
+                }
+            } else {
+                let block =
+                    self.recovered_block(at).await?.ok_or(EthApiError::HeaderNotFound(at))?;
+                (block, None, None)
+            };
+
+            Ok(CallBlock { block, evm_env, pending_state, is_pending: at.is_pending() })
+        }
+    }
+
+    /// Executes a call at a block's post-state or after replaying a prefix of its transactions.
+    fn spawn_with_call_block<F, R>(
+        &self,
+        call_block: CallBlock<Self::Evm>,
+        transaction_index: Option<usize>,
+        f: F,
+    ) -> impl Future<Output = Result<R, Self::Error>> + Send
+    where
+        F: FnOnce(Self, StateCacheDb, EvmEnvFor<Self::Evm>) -> Result<R, Self::Error>
+            + Send
+            + 'static,
+        R: Send + 'static,
+    {
+        async move {
+            let CallBlock { block, evm_env, mut pending_state, is_pending } = call_block;
+            let evm_env = match evm_env {
+                Some(env) => env,
+                None => self.evm_env_for_header(block.sealed_header())?,
+            };
+
+            let transaction_count = block.transaction_count();
+            let num_txs = transaction_index.unwrap_or(transaction_count);
+            // Locally built pending blocks have no provider-backed post-state.
+            let replay = num_txs != transaction_count || (is_pending && pending_state.is_none());
+            let state = if replay {
+                RpcStateSource::Block(block.parent_hash().into())
+            } else {
+                pending_state.take().map_or_else(
+                    || RpcStateSource::Block(block.hash().into()),
+                    RpcStateSource::Pending,
+                )
+            };
+
+            self.spawn_with_state(state, move |this, mut db| {
+                if replay {
+                    this.replay_block_until_with_env(
+                        &mut db,
+                        &block,
+                        num_txs,
+                        evm_env.clone(),
+                        pending_state,
+                    )?;
+                }
+                f(this, db, evm_env)
+            })
+            .await
+        }
+    }
+
     /// Executes the [`TxEnvFor`] with [`reth_evm::EvmEnv`] against the given [`StateCacheDb`]
     /// without committing state changes.
     fn inspect<'a>(
@@ -134,9 +222,33 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         block: &RecoveredBlock<BlockTy<Self::Primitives>>,
         target_tx_index: usize,
     ) -> Result<(), Self::Error> {
-        self.apply_pre_execution_changes(block, db)?;
-
         let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
+        self.replay_block_until_with_env(db, block, target_tx_index, evm_env, None)
+    }
+
+    /// Replays a block prefix using an already resolved EVM environment. The replay database
+    /// starts at the parent. The captured post-state supplies the block's fork rules.
+    fn replay_block_until_with_env(
+        &self,
+        db: &mut StateCacheDb,
+        block: &RecoveredBlock<BlockTy<Self::Primitives>>,
+        target_tx_index: usize,
+        evm_env: EvmEnvFor<Self::Evm>,
+        pending_state: Option<StateProviderBox>,
+    ) -> Result<(), Self::Error> {
+        self.evm_config()
+            .rpc_executor_for_block(db, block.sealed_block(), || {
+                let state = match pending_state {
+                    Some(state) => state,
+                    None => self.provider().state_by_block_hash(block.hash())?,
+                };
+                Ok(StateProviderDatabase::new(state))
+            })
+            .map_err(RethError::Other)
+            .map_err(Self::Error::from_eth_err)?
+            .apply_pre_execution_changes()
+            .map_err(Self::Error::from_eth_err)?;
+
         let mut evm = self.evm_config().evm_with_env(db, evm_env);
         self.replay_transactions_until_with_evm(
             &mut evm,
@@ -399,4 +511,14 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
             .map_err(Self::Error::from_eth_err)?;
         Ok(())
     }
+}
+
+/// A concrete block and any execution state captured with it for call simulation.
+#[expect(missing_debug_implementations)]
+pub struct CallBlock<Evm: ConfigureEvm> {
+    /// The block whose environment and transactions the call uses.
+    pub block: Arc<RecoveredBlock<BlockTy<Evm::Primitives>>>,
+    evm_env: Option<EvmEnvFor<Evm>>,
+    pending_state: Option<StateProviderBox>,
+    is_pending: bool,
 }
