@@ -1585,6 +1585,17 @@ async fn capture_route_history_with(
     schedule: &[(u64, u64, bool)],
     setup: impl FnOnce(&mut FixtureProvider),
 ) -> CapturedRouteHistory {
+    capture_route_history_with_paid_tx(schedule, setup, |_, gas_price| {
+        signed_call(0, gas_price, Address::repeat_byte(0x42), U256::from(1), 21_000)
+    })
+    .await
+}
+
+async fn capture_route_history_with_paid_tx(
+    schedule: &[(u64, u64, bool)],
+    setup: impl FnOnce(&mut FixtureProvider),
+    paid_tx: impl Fn(u64, u128) -> TransactionSigned,
+) -> CapturedRouteHistory {
     let (mut genesis_client, mut parent, _, _, mut context, validator) = seal_fixture();
     setup(&mut genesis_client.state);
     let chain_spec = genesis_client.chain_spec.clone();
@@ -1595,6 +1606,7 @@ async fn capture_route_history_with(
     let mut state = genesis_state.clone();
     let mut prior_headers = Vec::new();
     let mut blocks = Vec::new();
+    let mut tail = b1::tail();
     for &(round, root_epoch, paid) in schedule {
         let parent_for_block = parent.clone();
         let mut root = input(round, round, parent.hash());
@@ -1613,26 +1625,33 @@ async fn capture_route_history_with(
         if root_epoch == 2 {
             let old_conf = root.origin.shard_conf_hash;
             let new_conf = B256::repeat_byte(0x56);
-            root.certified_epoch = 0;
             root.authorized_epoch = 1;
             root.technical.epoch = 1;
-            root.origin.input_record.epoch = 0;
             root.origin.shard_conf_hash = new_conf;
             root.origin.tr_hash = technical_record_hash(&root.technical);
-            root.transitions = vec![epoch_ack_transition(EpochAck {
-                old_root_epoch: 1,
-                new_root_epoch: 2,
-                old_shard_epoch: 0,
-                new_shard_epoch: 1,
-                old_active_conf_hash: old_conf,
-                new_active_conf_hash: new_conf,
-                span: 0,
-                span_commitment: B256::ZERO,
-                round,
-                parent: parent.hash(),
-            })];
+            if tail.epoch == 1 {
+                root.transitions = vec![epoch_ack_transition(EpochAck {
+                    old_root_epoch: 1,
+                    new_root_epoch: 2,
+                    old_shard_epoch: 0,
+                    new_shard_epoch: 1,
+                    old_active_conf_hash: old_conf,
+                    new_active_conf_hash: new_conf,
+                    span: 0,
+                    span_commitment: B256::ZERO,
+                    round,
+                    parent: parent.hash(),
+                })];
+            } else {
+                root.certified_epoch = 1;
+                root.origin.input_record.epoch = 1;
+            }
         }
-        b1::reseal(&mut root);
+        let b1_update = reth_unicity_execution::testing::seal(&mut root, parent.number, tail);
+        let records = reth_unicity_execution::testing::empty_import();
+        if root_epoch > tail.epoch {
+            tail = reth_unicity_execution::testing::Tail { epoch: root_epoch, start: round };
+        }
         let attrs = attributes(&root, parent.timestamp);
         let client = Client {
             chain_spec: chain_spec.clone(),
@@ -1651,18 +1670,22 @@ async fn capture_route_history_with(
             &validator,
             &forkchoice,
             Some(&attrs),
-            &seal_input(&parent, &root, &attrs),
+            &SealBuildInput {
+                root_input: root.canonical_cbor().unwrap().into(),
+                transitions: root.transitions.iter().cloned().map(Into::into).collect(),
+                b1_update: b1_update.clone(),
+                records: records.clone(),
+                pair_binding: pair_binding(&parent, &root, build_subject(&attrs))
+                    .canonical_cbor()
+                    .into(),
+            },
         )
         .unwrap();
 
         let pool = test_pool();
         if paid {
             let gas_price = u128::from(parent.base_fee_per_gas.unwrap()) + 100;
-            add(
-                &pool,
-                signed_call(0, gas_price, Address::repeat_byte(0x42), U256::from(1), 21_000),
-            )
-            .await;
+            add(&pool, paid_tx(round, gas_price)).await;
         }
         let config =
             PayloadConfig::new(parent.clone(), attrs.clone(), attrs.payload_id(&parent.hash()));
@@ -1720,12 +1743,22 @@ async fn capture_route_history_with(
         .await;
         let companion = build_seal_companion(
             &root,
-            &b1::job(&root).update,
-            &b1::job(&root).records,
+            &b1_update,
+            &records,
             &pair_binding(&parent_for_block, &root, build_subject(&attrs)),
         )
         .unwrap();
-        let import_companion = import_companion(&parent_for_block, &root, payload.block().hash());
+        let import_companion = SealCompanion {
+            pair_binding: pair_binding(
+                &parent_for_block,
+                &root,
+                ExpectedSubject::Import { block_hash: payload.block().hash() },
+            )
+            .canonical_cbor()
+            .into(),
+            provenance: "newPayload".to_owned(),
+            ..companion.clone()
+        };
         assert_eq!(response.seal_companion, companion);
         assert_eq!(declared_block_hash(&response.execution_payload), payload.block().hash());
         match store.get(payload.block().hash()).unwrap() {
@@ -5268,23 +5301,43 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
     };
     use serde_json::{json, Value};
 
+    let not_before_uc_time = 42;
+    let to = Address::repeat_byte(0x42);
+    let data = alloy_primitives::Bytes::from(vec![1; 100]);
+    let signed = |tx: Transaction| {
+        let signature = sign_message(B256::with_last_byte(1), tx.signature_hash()).unwrap();
+        TransactionSigned::new_unhashed(tx, signature)
+    };
     let storage = schedule_storage(&[ScheduleEntry {
         rule_id: rule_id(PRAGUE_TEST_RULE_NAME),
         release_digest: B256::repeat_byte(0xd1),
         root_epoch: 2,
-        not_before_uc_time: 0,
+        not_before_uc_time,
         state: EntryState::Active,
         change_id: 1,
     }]);
-    let history =
-        capture_route_history_with(&[(1, 1, false), (2, 1, false), (3, 2, false)], |state| {
+    let history = capture_route_history_with_paid_tx(
+        &[(1, 1, false), (2, 1, false), (3, 2, false), (4, 2, true), (5, 2, true)],
+        |state| {
             state.insert_contract(
                 VALIDATOR_REGISTRY,
                 alloy_primitives::Bytes::from_static(NOTHING),
                 &storage,
             )
-        })
-        .await;
+        },
+        |round, gas_price| {
+            signed(Transaction::Legacy(TxLegacy {
+                chain_id: Some(1337),
+                nonce: round - 4,
+                gas_price,
+                gas_limit: 30_000,
+                to: TxKind::Call(to),
+                value: U256::ZERO,
+                input: data.clone(),
+            }))
+        },
+    )
+    .await;
     let (_, genesis, root, _, context, validator) = seal_fixture();
     let unicity = UnicityNode::new(SealJobRegistry::new(), context.seal);
     let companion_store = unicity.companion_store().clone();
@@ -5356,7 +5409,6 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
         Authorization { chain_id: U256::from(1337), address: Address::repeat_byte(0xde), nonce: 0 };
     let auth_signature =
         sign_message(B256::with_last_byte(2), authorization.signature_hash()).unwrap();
-    let to = Address::repeat_byte(0x42);
     let tx7702 = Transaction::Eip7702(TxEip7702 {
         chain_id: 1337,
         nonce: 0,
@@ -5369,7 +5421,6 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
         authorization_list: vec![authorization.into_signed(auth_signature)],
         input: Default::default(),
     });
-    let data = alloy_primitives::Bytes::from(vec![1; 100]);
     let below_floor = Transaction::Legacy(TxLegacy {
         chain_id: Some(1337),
         nonce: 0,
@@ -5379,10 +5430,6 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
         value: U256::ZERO,
         input: data.clone(),
     });
-    let signed = |tx: Transaction| {
-        let signature = sign_message(B256::with_last_byte(1), tx.signature_hash()).unwrap();
-        TransactionSigned::new_unhashed(tx, signature)
-    };
     let raw = alloy_primitives::Bytes::from(signed(tx7702).encoded_2718());
     let floor_tx =
         EthPooledTransaction::new(signed(below_floor).try_into_recovered().unwrap(), 200);
@@ -5415,7 +5462,11 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
     assert_eq!(before["current"]["activationTime"], 0);
     assert!(before["current"]["precompiles"].get("BLS12_G1ADD").is_none());
     assert_eq!(before["next"], before["last"]);
-    assert_eq!(before["next"]["activationRootEpoch"], 2);
+    for entry in ["next", "last"] {
+        assert_eq!(before[entry].get("activationTime"), Some(&Value::Null));
+        assert_eq!(before[entry]["activationRootEpoch"], 2);
+        assert_eq!(before[entry]["notBeforeUcTime"], not_before_uc_time);
+    }
     assert_eq!(
         before["next"]["precompiles"]["BLS12_G1ADD"],
         format!("{:#x}", Address::with_last_byte(11))
@@ -5433,9 +5484,9 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
     // Register the exact production-bound input before publishing the block, then evict it after
     // the first RPC queries. Use a fake engine because the test only installs already replayed
     // state.
-    let mut import = context.clone();
+    let mut import = context;
     import.state.parent_accounting = UnicityParentAccountings::default();
-    for parent in &history.blocks[..2] {
+    for parent in &history.blocks[..4] {
         import.parent_accounting.insert_for_chain(
             parent.payload.block().hash(),
             parent.completed,
@@ -5444,18 +5495,22 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
         );
     }
     import.state.execution_inputs = node.evm_config.registry().clone();
-    let (engine, _) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
-    let handler = seal_import_handler(ack.client.clone(), import, validator, engine);
-    let status = handler
-        .new_payload_with_seal(
-            ack.execution_payload.clone(),
-            vec![],
-            ack.beacon_root,
-            &ack.import_companion,
-        )
-        .await?;
-    assert!(status.is_valid(), "{status:?}");
-    let commitment = ack.root.input_commitment().unwrap();
+    let traced = &history.blocks[4];
+    for captured in [ack, traced] {
+        let (engine, _) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
+        let handler =
+            seal_import_handler(captured.client.clone(), import.clone(), validator.clone(), engine);
+        let status = handler
+            .new_payload_with_seal(
+                captured.execution_payload.clone(),
+                vec![],
+                captured.beacon_root,
+                &captured.import_companion,
+            )
+            .await?;
+        assert!(status.is_valid(), "{status:?}");
+    }
+    let commitment = traced.root.input_commitment().unwrap();
 
     canonical.set_pending_block(execute_fixture(ack, ack.execution.clone()));
     let prague_estimate: U256 =
@@ -5471,13 +5526,30 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
         .await?;
     assert_eq!(gas, cancun_estimate);
 
+    assert!(matches!(
+        validate_floor().as_invalid(),
+        Some(InvalidPoolTransactionError::IntrinsicGasTooLow)
+    ));
+    let accepted =
+        client.request::<B256, _>("eth_sendRawTransaction", rpc_params![raw.clone()]).await?;
+    assert_eq!(node.pool.remove_transactions(vec![accepted]).len(), 1);
+
+    // Updating the chain clears pending state. An empty update leaves the same canonical tip and
+    // exercises removal without a canonical-tip notification to refresh admission.
+    canonical.update_chain(NewCanonicalChain::Commit { new: vec![] });
+    for at in ["latest", "pending"] {
+        let gas: U256 =
+            client.request("eth_estimateGas", rpc_params![estimate.clone(), at]).await?;
+        assert_eq!(gas, cancun_estimate);
+    }
+    assert!(validate_floor().is_valid());
+    let refusal = client
+        .request::<B256, _>("eth_sendRawTransaction", rpc_params![raw.clone()])
+        .await
+        .unwrap_err();
+    assert!(refusal.to_string().contains("transaction type not supported"), "{refusal}");
+
     install(ack, ack.execution.clone());
-    tokio::time::timeout(std::time::Duration::from_secs(5), async {
-        while !pool_validator.fork_tracker().is_prague_activated() {
-            tokio::task::yield_now().await;
-        }
-    })
-    .await?;
     assert!(matches!(
         validate_floor().as_invalid(),
         Some(InvalidPoolTransactionError::IntrinsicGasTooLow)
@@ -5504,16 +5576,26 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
     assert_eq!(after["next"], Value::Null);
     assert_eq!(after["last"], Value::Null);
     assert_eq!(after["unicityActive"], before["next"]);
+    assert_eq!(after["unicityActive"].get("activationTime"), Some(&Value::Null));
+    assert_eq!(after["unicityActive"]["notBeforeUcTime"], not_before_uc_time);
 
+    for captured in &history.blocks[3..] {
+        install(captured, captured.execution.clone());
+    }
+    let traced_hash = traced.payload.block().hash();
+    let parent_hash = traced.parent.hash();
     let registry = node.evm_config.registry();
     assert!(registry.get(&commitment).is_some());
-    let replay: Value =
-        client.request("debug_traceBlockByHash", rpc_params![ack.payload.block().hash()]).await?;
+    let replay: Value = client.request("debug_traceBlockByHash", rpc_params![traced_hash]).await?;
+    assert_eq!(replay.as_array().unwrap().len(), 1);
+    assert_eq!(replay[0]["result"]["failed"], false);
+    assert_eq!(replay[0]["result"]["gas"], 25_000);
     for byte in 1..=registry.capacity() as u8 {
         let other = bound_input(&root_with_tree_root(&root, B256::repeat_byte(byte)), &genesis);
         registry.insert(other.root_input().input_commitment().unwrap(), other)?;
     }
     assert!(registry.get(&commitment).is_none());
+    assert!(store.get_accounting(parent_hash)?.is_some());
     assert!(client
         .request::<String, _>("eth_call", rpc_params![request.clone(), e.clone()])
         .await
@@ -5521,8 +5603,22 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
     let gas: U256 = client.request("eth_estimateGas", rpc_params![estimate.clone(), e]).await?;
     assert_eq!(gas, prague_estimate);
     let retained: Value =
-        client.request("debug_traceBlockByHash", rpc_params![ack.payload.block().hash()]).await?;
+        client.request("debug_traceBlockByHash", rpc_params![traced_hash]).await?;
     assert_eq!(retained, replay);
+
+    // Advance only the pruner's persisted frontier to cross its default accounting window.
+    let mut pruning_provider = history.recovery_provider(history.blocks.len());
+    pruning_provider.client.persisted_number = traced.parent.number +
+        reth_unicity_payload::recovery::ACCOUNTING_WINDOW +
+        reth_unicity_payload::recovery::DEFAULT_REPAIR_LIMIT +
+        1;
+    CompanionPruner::new(pruning_provider, store.clone(), None)
+        .prune_once(traced.payload.block().header().number)?;
+    assert!(store.get_accounting(parent_hash)?.is_none());
+    assert!(matches!(store.get(traced_hash)?, Lookup::Found(_)));
+    let pruned: Value = client.request("debug_traceBlockByHash", rpc_params![traced_hash]).await?;
+    assert_eq!(pruned, replay);
+    assert!(store.get_accounting(parent_hash)?.is_none());
     assert_eq!(
         client.request::<String, _>("eth_call", rpc_params![request, e_minus_one.clone()]).await?,
         "0x"

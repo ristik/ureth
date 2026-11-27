@@ -40,6 +40,7 @@ use reth_evm::{
 };
 use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
+use reth_storage_api::StateProviderFactory;
 use revm::Inspector;
 
 use crate::{
@@ -440,6 +441,19 @@ impl ConfigureEvm for UnicityNodeEvmConfig {
         let spec =
             crate::rules::assigned_spec(&mut post_state()?, &crate::rules::UnicityRules::global())?;
         Ok(self.rpc_env_with_spec(header, attributes, spec)?)
+    }
+
+    fn tx_pool_prague(
+        &self,
+        provider: &impl StateProviderFactory,
+    ) -> Result<Option<bool>, RpcError> {
+        let parent = provider.chain_info()?.best_hash;
+        let state = provider.state_for_next_block(parent)?;
+        let spec = crate::rules::assigned_spec(
+            &mut reth_revm::database::StateProviderDatabase::new(state),
+            &crate::rules::UnicityRules::global(),
+        )?;
+        Ok(Some(spec >= revm::primitives::hardfork::SpecId::PRAGUE))
     }
 
     fn next_evm_env(

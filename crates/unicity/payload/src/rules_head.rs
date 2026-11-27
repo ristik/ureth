@@ -14,26 +14,18 @@ use alloy_primitives::B256;
 use futures_util::{Stream, StreamExt};
 use reth_provider::{CanonStateNotification, CanonStateSubscriptions, StateProviderFactory};
 use reth_revm::database::StateProviderDatabase;
-use reth_unicity_execution::{
-    rules::{assigned_spec, UnicityRules, GENESIS_SPEC},
-    VALIDATOR_REGISTRY,
-};
+use reth_unicity_execution::{rules::UnicityRules, VALIDATOR_REGISTRY};
 
 /// Observes the schedule at the canonical tip now and at every canonical change until the stream
 /// ends. A failed read is logged and leaves the previous view in place.
-pub(crate) async fn run_rules_head_observer<P>(
-    provider: P,
-    rules: UnicityRules,
-    set_prague: impl Fn(bool) + Send,
-) where
+pub(crate) async fn run_rules_head_observer<P>(provider: P, rules: UnicityRules)
+where
     P: StateProviderFactory + CanonStateSubscriptions + Send + 'static,
 {
     // subscribe before the first read so no change between the two is missed
     let stream = provider.canonical_state_stream().map(|n| tip_of(&n));
     drive(stream, |tip| {
-        if let Err(error) = observe_tip(&provider, &rules, tip)
-            .and_then(|()| update_pool(&provider, &rules, tip, &set_prague))
-        {
+        if let Err(error) = observe_tip(&provider, &rules, tip) {
             tracing::error!(
                 target: "unicity::rules",
                 %error,
@@ -78,24 +70,6 @@ pub(crate) fn observe_tip<P: StateProviderFactory>(
     .map_err(|e| e.to_string())?;
     let mut db = StateProviderDatabase::new(state);
     rules.observe_head(&mut db, VALIDATOR_REGISTRY).map_err(|e| e.to_string())
-}
-
-/// Refreshes admission from the post-state at the canonical tip, including on a reorg.
-pub(crate) fn update_pool<P: StateProviderFactory>(
-    provider: &P,
-    rules: &UnicityRules,
-    tip: Option<B256>,
-    set_prague: impl FnOnce(bool),
-) -> Result<(), String> {
-    let state = match tip {
-        Some(hash) => provider.state_by_block_hash(hash),
-        None => provider.latest(),
-    }
-    .map_err(|error| error.to_string())?;
-    let spec = assigned_spec(&mut StateProviderDatabase::new(state), rules)
-        .map_err(|error| error.to_string())?;
-    set_prague(spec != GENESIS_SPEC);
-    Ok(())
 }
 
 /// Resolves a freshly bound job's EVM spec from the state of its parent `parent_hash`

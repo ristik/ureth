@@ -311,6 +311,9 @@ pub enum InvalidPoolTransactionError {
     /// invocation.
     #[error("intrinsic gas too low")]
     IntrinsicGasTooLow,
+    /// Chain state could not supply the pool's admission rules.
+    #[error("could not resolve transaction pool rules: {0}")]
+    AdmissionRulesUnavailable(#[source] Box<dyn core::error::Error + Send + Sync>),
     /// The transaction priority fee is below the minimum required priority fee.
     #[error("transaction priority fee below minimum required priority fee {minimum_priority_fee}")]
     PriorityFeeBelowMinimum {
@@ -388,6 +391,7 @@ impl InvalidPoolTransactionError {
                 false
             }
             Self::IntrinsicGasTooLow => true,
+            Self::AdmissionRulesUnavailable(_) => false,
             Self::Overdraft { .. } => false,
             Self::Other(err) => err.is_bad_transaction(),
             Self::Eip2681 => true,

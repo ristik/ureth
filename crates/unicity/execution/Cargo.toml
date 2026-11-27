@@ -31,6 +31,7 @@ reth-ethereum-primitives.workspace = true
 reth-evm = { workspace = true, features = ["std"] }
 reth-evm-ethereum = { workspace = true, features = ["std"] }
 reth-primitives-traits.workspace = true
+reth-revm.workspace = true
 reth-storage-api.workspace = true
 reth-unicity-b1.workspace = true
 reth-unicity-b2.workspace = true

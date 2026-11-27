@@ -353,7 +353,7 @@ where
     }
 }
 
-/// Builds the Ethereum pool and refreshes its Prague admission rules from the canonical schedule.
+/// Builds the Ethereum pool and starts the canonical activation-schedule observer.
 #[derive(Debug, Clone, Copy)]
 pub struct UnicityPoolBuilder;
 
@@ -372,21 +372,7 @@ where
         let pool = EthereumPoolBuilder::default().build_pool(ctx, evm_config).await?;
         let provider = ctx.provider().clone();
         let rules = reth_unicity_execution::rules::UnicityRules::global();
-        let validation = pool.validator().clone();
-        let set_prague = move |active| {
-            validation
-                .validator()
-                .fork_tracker()
-                .prague
-                .store(active, std::sync::atomic::Ordering::Relaxed);
-        };
-        // Set admission before returning the pool to its callers. The observer subscribes and
-        // refreshes again once it starts, closing the gap between initialization and subscription.
-        if let Err(error) = crate::rules_head::update_pool(&provider, &rules, None, &set_prague) {
-            tracing::error!(target: "unicity::rules", %error, "could not initialize the pool activation spec");
-        }
-        ctx.task_executor()
-            .spawn_task(crate::rules_head::run_rules_head_observer(provider, rules, set_prague));
+        ctx.task_executor().spawn_task(crate::rules_head::run_rules_head_observer(provider, rules));
         Ok(pool)
     }
 }

@@ -236,6 +236,15 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         .map_err(Into::into)
     }
 
+    /// Optionally resolves Prague admission from chain state instead of the pool's timestamp
+    /// tracker. The validator uses one result for all checks on a transaction.
+    fn tx_pool_prague(
+        &self,
+        _provider: &impl reth_storage_api::StateProviderFactory,
+    ) -> Result<Option<bool>, alloc::boxed::Box<dyn Error + Send + Sync>> {
+        Ok(None)
+    }
+
     /// Returns the configured [`EvmEnv`] for `parent + 1` block.
     ///
     /// This is intended for usage in block building after the merge and requires additional

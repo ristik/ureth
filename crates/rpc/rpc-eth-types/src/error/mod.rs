@@ -1128,6 +1128,7 @@ impl From<InvalidPoolTransactionError> for RpcPoolError {
             InvalidPoolTransactionError::IntrinsicGasTooLow => {
                 Self::Invalid(RpcInvalidTransactionError::GasTooLow)
             }
+            InvalidPoolTransactionError::AdmissionRulesUnavailable(err) => Self::Other(err),
             InvalidPoolTransactionError::OversizedData { size, limit } => {
                 Self::OversizedData { size, limit }
             }

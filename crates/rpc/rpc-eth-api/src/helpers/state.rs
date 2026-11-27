@@ -3,7 +3,7 @@
 
 use super::{EthApiSpec, LoadBlock, LoadPendingBlock, SpawnBlocking};
 use crate::{EthApiTypes, FromEthApiError, RpcNodeCore, RpcNodeCoreExt};
-use alloy_consensus::{constants::KECCAK_EMPTY, BlockHeader};
+use alloy_consensus::constants::KECCAK_EMPTY;
 use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::{Account, AccountInfo, EIP1186AccountProofResponse};
@@ -20,8 +20,7 @@ use reth_rpc_eth_types::{
 };
 use reth_rpc_server_types::constants::DEFAULT_MAX_STORAGE_VALUES_SLOTS;
 use reth_storage_api::{
-    BlockIdReader, BlockReader, BlockReaderIdExt, StateProvider, StateProviderBox,
-    StateProviderFactory,
+    BlockIdReader, BlockReaderIdExt, StateProvider, StateProviderBox, StateProviderFactory,
 };
 use reth_transaction_pool::TransactionPool;
 use reth_trie_common::MultiProofTargets;
@@ -384,14 +383,12 @@ pub trait LoadState:
         let provider = self.provider();
         self.evm_config()
             .rpc_evm_env(header, None, || {
-                let mut hash = header.hash();
-                if latest &&
-                    let Some(pending) = provider.pending_block()? &&
-                    pending.header().parent_hash() == hash
-                {
-                    hash = pending.hash();
-                }
-                Ok(StateProviderDatabase::new(provider.state_by_block_hash(hash)?))
+                let state = if latest {
+                    provider.state_for_next_block(header.hash())?
+                } else {
+                    provider.state_by_block_hash(header.hash())?
+                };
+                Ok(StateProviderDatabase::new(state))
             })
             .map_err(RethError::Other)
             .map_err(Self::Error::from_eth_err)

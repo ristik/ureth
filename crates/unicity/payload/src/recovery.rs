@@ -1,15 +1,20 @@
 //! Canonical-only hydration of durable parent accounting at node startup.
 
-use alloy_consensus::Header;
+use alloy_consensus::{Header, TxReceipt, EMPTY_ROOT_HASH};
 use alloy_primitives::B256;
 use reth_chainspec::{ChainSpec, ChainSpecProvider};
-use reth_ethereum_primitives::{Block, TransactionSigned};
+use reth_ethereum_primitives::{calculate_receipt_root_no_memo, Block, Receipt, TransactionSigned};
 use reth_primitives_traits::{Block as _, SealedHeader};
 use reth_revm::database::StateProviderDatabase;
-use reth_storage_api::{BlockNumReader, BlockReader, HeaderProvider, StateProviderFactory};
+use reth_storage_api::{
+    BlockNumReader, BlockReader, HeaderProvider, ReceiptProvider, StateProviderFactory,
+};
 use reth_unicity_execution::{
     block::BlockProfile,
-    block_executor::{replay_complete, BoundExecutionInput, UnicityEvmConfig},
+    block_executor::{
+        replay_complete, BoundExecutionInput, CompletedParent, LocalParentAccounting,
+        UnicityEvmConfig,
+    },
     evm_factory::unicity_eth_config,
     pairing::{
         header_attributes_digest, verify_pair_binding, ExpectedSubject, PairBinding,
@@ -203,7 +208,8 @@ pub(crate) fn retained_rpc_input<P>(
 where
     P: ChainSpecProvider<ChainSpec = ChainSpec>
         + StateProviderFactory
-        + HeaderProvider<Header = Header>,
+        + HeaderProvider<Header = Header>
+        + ReceiptProvider<Receipt = Receipt>,
 {
     let number = block.header().number;
     eyre::ensure!(number > 0, "genesis cannot be replayed");
@@ -218,22 +224,21 @@ where
     let bound = if number == 1 {
         bind_validated_genesis(root, b1, child.profile, &parent, genesis, child.collector)
     } else {
-        let record = store.get_accounting(parent.hash())?.ok_or_else(|| {
-            eyre::eyre!("no retained accounting for replay parent {}", parent.hash())
-        })?;
-        eyre::ensure!(
-            record.chain_id == chain.chain().id() &&
-                record.genesis_hash == genesis &&
-                record.block_number == parent.number,
-            "RPC replay parent accounting has a different chain identity"
-        );
         let parent_profile = fees.for_block(parent.number).profile;
-        let token = reth_unicity_execution::block_executor::CompletedParent::from_local_storage(
-            record.accounting,
-            &parent,
-            parent_profile,
-        )
-        .map_err(|error| eyre::eyre!("RPC replay parent accounting refused: {error:?}"))?;
+        let accounting = match store.get_accounting(parent.hash())? {
+            Some(record) => {
+                eyre::ensure!(
+                    record.chain_id == chain.chain().id() &&
+                        record.genesis_hash == genesis &&
+                        record.block_number == parent.number,
+                    "RPC replay parent accounting has a different chain identity"
+                );
+                record.accounting
+            }
+            None => rpc_accounting_from_receipts(provider, &parent, parent_profile)?,
+        };
+        let token = CompletedParent::from_local_storage(accounting, &parent, parent_profile)
+            .map_err(|error| eyre::eyre!("RPC replay parent accounting refused: {error:?}"))?;
         BoundExecutionInput::from_completed_parent_with_fees(
             Arc::new(root),
             b1,
@@ -246,6 +251,40 @@ where
     }
     .map_err(|error| eyre::eyre!("RPC replay input refused: {error:?}"))?;
     Ok(crate::rules_head::with_parent_spec(provider, parent.hash(), bound)?)
+}
+
+fn rpc_accounting_from_receipts(
+    provider: &impl ReceiptProvider<Receipt = Receipt>,
+    parent: &SealedHeader<Header>,
+    profile: BlockProfile,
+) -> eyre::Result<LocalParentAccounting> {
+    let hash = parent.hash();
+    // The header charges the system prefix and ordinary transactions. The receipts commit only
+    // ordinary gas. Check their root so a partial or pruned receipt list cannot change the split.
+    let ordinary_gas = if parent.receipts_root == EMPTY_ROOT_HASH {
+        0
+    } else {
+        let receipts = provider
+            .receipts_by_block(hash.into())?
+            .ok_or_else(|| eyre::eyre!("receipts unavailable for RPC replay parent {hash}"))?;
+        eyre::ensure!(
+            calculate_receipt_root_no_memo(&receipts) == parent.receipts_root,
+            "receipt root mismatch for RPC replay parent {hash}"
+        );
+        receipts.last().map(TxReceipt::cumulative_gas_used).unwrap_or(0)
+    };
+    Ok(LocalParentAccounting {
+        block_hash: hash,
+        profile,
+        header_gas: parent.gas_used,
+        system_gas: parent.gas_used.checked_sub(ordinary_gas).ok_or_else(|| {
+            eyre::eyre!("gross gas below receipt gas for RPC replay parent {hash}")
+        })?,
+        ordinary_gas,
+        base_fee: parent
+            .base_fee_per_gas
+            .ok_or_else(|| eyre::eyre!("base fee missing for RPC replay parent {hash}"))?,
+    })
 }
 
 /// Recovery admission of the canonical head, the only way a token read back from the sidecar
@@ -477,11 +516,7 @@ mod tests {
     use super::*;
     use alloy_primitives::Address;
     use reth_provider::test_utils::MockEthProvider;
-    use reth_unicity_execution::{
-        block_executor::{CompletedParent, LocalParentAccounting},
-        pairing::PairPins,
-        update::B1Context,
-    };
+    use reth_unicity_execution::{pairing::PairPins, update::B1Context};
 
     const PROFILE: BlockProfile = BlockProfile {
         max_gas: 30_000_001,

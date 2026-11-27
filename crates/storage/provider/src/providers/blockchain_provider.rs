@@ -742,6 +742,16 @@ impl<N: NodeTypesWithDB> ChainSpecProvider for BlockchainProvider<N> {
 }
 
 impl<N: ProviderNodeTypes> StateProviderFactory for BlockchainProvider<N> {
+    fn state_for_next_block(&self, parent: B256) -> ProviderResult<StateProviderBox> {
+        // Use the same pending snapshot for the parent comparison and the state overlay.
+        if let Some(pending) = self.canonical_in_memory_state.pending_state() &&
+            pending.block_ref().recovered_block().parent_hash() == parent
+        {
+            return Ok(Box::new(self.block_state_provider(&pending)?));
+        }
+        self.state_by_block_hash(parent)
+    }
+
     /// Storage provider for latest block
     fn latest(&self) -> ProviderResult<StateProviderBox> {
         trace!(target: "providers::blockchain", "Getting latest block state provider");
