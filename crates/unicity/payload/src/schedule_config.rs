@@ -111,12 +111,9 @@ where
         }
         check_supported_spec(resolution.spec)?;
         // Several entries can share an epoch. Attribute the transition to the rule selecting it.
-        if !rules
-            .known_rules()
-            .iter()
-            .any(|rule| rule.id == entry.rule_id && rule.spec == resolution.spec) ||
-            !resolution.active.contains(&entry.rule_id)
-        {
+        let entry_spec =
+            rules.known_rules().iter().find(|rule| rule.id == entry.rule_id).map(|rule| rule.spec);
+        if entry_spec != Some(resolution.spec) {
             continue;
         }
         let env = evm.rpc_env_with_spec(&header, None, resolution.spec)?;
