@@ -5278,7 +5278,7 @@ async fn the_production_bind_sites_resolve_a_prague_rule_across_e() {
 #[tokio::test]
 async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyre::Result<()> {
     use alloy_consensus::TxEip7702;
-    use alloy_eips::{eip2718::Encodable2718, eip7702::Authorization};
+    use alloy_eips::{eip2718::Encodable2718, eip7702::Authorization, BlockId};
     use jsonrpsee::{core::client::ClientT, rpc_params};
     use reth_chain_state::{ExecutedBlock, NewCanonicalChain};
     use reth_node_builder::{NodeBuilder, NodeHandle};
@@ -5286,7 +5286,9 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
         args::{NetworkArgs, RpcServerArgs},
         node_config::NodeConfig,
     };
+    use reth_rpc_eth_api::helpers::LoadState;
     use reth_rpc_server_types::RpcModuleSelection;
+    use reth_storage_api::PendingBlockSnapshot;
     use reth_tasks::Runtime;
     use reth_transaction_pool::error::InvalidPoolTransactionError;
     use reth_unicity_execution::{
@@ -5297,6 +5299,7 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
     use reth_unicity_store::StoredAccounting;
     use revm::{
         database::BundleState,
+        primitives::hardfork::SpecId,
         state::{AccountInfo, Bytecode},
     };
     use serde_json::{json, Value};
@@ -5534,9 +5537,35 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
         client.request::<B256, _>("eth_sendRawTransaction", rpc_params![raw.clone()]).await?;
     assert_eq!(node.pool.remove_transactions(vec![accepted]).len(), 1);
 
-    // Updating the chain clears pending state. An empty update leaves the same canonical tip and
-    // exercises removal without a canonical-tip notification to refresh admission.
+    let eth_api = node.add_ons_handle.eth_api();
+    let (rpc_env, execution_state) = eth_api.evm_env_and_state_at(BlockId::pending()).await?;
+    assert_eq!(rpc_env.cfg_env.spec, SpecId::PRAGUE);
+
+    // Capture the acknowledgement's block and receipts, then remove it before opening the state.
+    // An empty update leaves the canonical tip unchanged.
+    let PendingBlockSnapshot { block, receipts, open_state } = node
+        .provider
+        .pending_block_snapshot(|hash| node.provider.state_by_block_hash(hash))?
+        .expect("executed pending acknowledgement");
+    assert_eq!(block.hash(), ack.payload.block().hash());
+    assert_eq!(receipts, ack.execution.receipts);
     canonical.update_chain(NewCanonicalChain::Commit { new: vec![] });
+    assert!(matches!(
+        node.provider.state_by_block_hash(block.hash()),
+        Err(ProviderError::StateForHashNotFound(hash)) if hash == block.hash()
+    ));
+    let state = open_state()?;
+    let env = node
+        .evm_config
+        .rpc_evm_env(block.header(), None, || Ok(StateProviderDatabase::new(&state)))
+        .expect("resolve the EVM environment from the captured pending state");
+    assert_eq!(env.cfg_env.spec, SpecId::PRAGUE);
+    assert_eq!(state.block_hash(block.header().number)?, Some(block.hash()));
+    drop(state);
+    let state = eth_api.state_for_execution(execution_state).await?;
+    assert_eq!(state.block_hash(block.header().number)?, Some(block.hash()));
+    drop(state);
+
     for at in ["latest", "pending"] {
         let gas: U256 =
             client.request("eth_estimateGas", rpc_params![estimate.clone(), at]).await?;

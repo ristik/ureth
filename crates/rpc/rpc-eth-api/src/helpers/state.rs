@@ -16,7 +16,8 @@ use reth_revm::database::StateProviderDatabase;
 use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_types::{
     error::{FromEvmError, IntoEthApiError},
-    EthApiError, PendingBlockEnv, RpcInvalidTransactionError, SignError, StateCacheDb,
+    EthApiError, PendingBlockEnv, PendingBlockEnvOrigin, RpcInvalidTransactionError, SignError,
+    StateCacheDb,
 };
 use reth_rpc_server_types::constants::DEFAULT_MAX_STORAGE_VALUES_SLOTS;
 use reth_storage_api::{
@@ -25,6 +26,25 @@ use reth_storage_api::{
 use reth_transaction_pool::TransactionPool;
 use reth_trie_common::MultiProofTargets;
 use std::{collections::HashMap, sync::Arc};
+
+/// The state to execute against after choosing an RPC EVM environment.
+#[expect(missing_debug_implementations)]
+pub enum RpcStateSource {
+    /// Resolve the state for this block when execution starts.
+    Block(BlockId),
+    /// Use the post-state of the captured pending block.
+    Pending(StateProviderBox),
+}
+
+impl RpcStateSource {
+    /// Returns the block identifier represented by this source.
+    pub const fn block_id(&self) -> BlockId {
+        match self {
+            Self::Block(id) => *id,
+            Self::Pending(_) => BlockId::pending(),
+        }
+    }
+}
 
 /// Helper methods for `eth_` methods relating to state (accounts).
 pub trait EthState: LoadState + SpawnBlocking {
@@ -341,6 +361,22 @@ pub trait LoadState:
         }
     }
 
+    /// Opens the execution state, keeping an already captured pending overlay.
+    fn state_for_execution(
+        &self,
+        source: RpcStateSource,
+    ) -> impl Future<Output = Result<StateProviderBox, Self::Error>> + Send
+    where
+        Self: SpawnBlocking,
+    {
+        async move {
+            match source {
+                RpcStateSource::Block(id) => self.state_at_block_id(id).await,
+                RpcStateSource::Pending(state) => Ok(state),
+            }
+        }
+    }
+
     /// Returns the _latest_ state
     fn latest_state(&self) -> Result<StateProviderBox, Self::Error> {
         self.provider().latest().map_err(Self::Error::from_eth_err)
@@ -448,6 +484,30 @@ pub trait LoadState:
         }
     }
 
+    /// Returns the environment and execution state source for the requested block.
+    fn evm_env_and_state_at(
+        &self,
+        at: BlockId,
+    ) -> impl Future<Output = Result<(EvmEnvFor<Self::Evm>, RpcStateSource), Self::Error>> + Send
+    where
+        Self: SpawnBlocking,
+    {
+        async move {
+            if at.is_pending() {
+                let (PendingBlockEnv { evm_env, origin }, state) =
+                    self.pending_block_env_and_state()?;
+                let source = state.map_or_else(
+                    || RpcStateSource::Block(origin.state_block_id()),
+                    RpcStateSource::Pending,
+                );
+                Ok((evm_env, source))
+            } else {
+                let (evm_env, block_id) = self.evm_env_at(at).await?;
+                Ok((evm_env, RpcStateSource::Block(block_id)))
+            }
+        }
+    }
+
     /// Returns the recovered block, EVM environment, and state block id for the requested
     /// [`BlockId`].
     ///
@@ -468,14 +528,44 @@ pub trait LoadState:
         Self: SpawnBlocking + LoadBlock,
     {
         async move {
+            let (block, env, state) = self.evm_env_recovered_block_and_state_at(at).await?;
+            Ok((block, env, state.block_id()))
+        }
+    }
+
+    /// Returns the recovered block, EVM environment, and state source from the same pending view.
+    #[expect(clippy::type_complexity)]
+    fn evm_env_recovered_block_and_state_at(
+        &self,
+        at: BlockId,
+    ) -> impl Future<
+        Output = Result<
+            (Arc<RecoveredBlock<BlockTy<Self::Primitives>>>, EvmEnvFor<Self::Evm>, RpcStateSource),
+            Self::Error,
+        >,
+    > + Send
+    where
+        Self: SpawnBlocking + LoadBlock,
+    {
+        async move {
             if at.is_pending() {
-                let (evm_env, block_id) = self.evm_env_at(at).await?;
+                let (PendingBlockEnv { evm_env, origin }, state) =
+                    self.pending_block_env_and_state()?;
+                if let (PendingBlockEnvOrigin::ActualPending(block, _), Some(state)) =
+                    (&origin, state)
+                {
+                    if self.pending_block_kind().is_none() {
+                        return Err(EthApiError::HeaderNotFound(at).into());
+                    }
+                    return Ok((Arc::clone(block), evm_env, RpcStateSource::Pending(state)))
+                }
+                let block_id = origin.state_block_id();
                 let block = self
                     .recovered_block(block_id)
                     .await?
                     .ok_or_else(|| EthApiError::HeaderNotFound(at))?;
 
-                Ok((block, evm_env, block_id))
+                Ok((block, evm_env, RpcStateSource::Block(block_id)))
             } else {
                 let block = self
                     .recovered_block(at)
@@ -484,7 +574,7 @@ pub trait LoadState:
                 let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
                 let block_id = block.hash().into();
 
-                Ok((block, evm_env, block_id))
+                Ok((block, evm_env, RpcStateSource::Block(block_id)))
             }
         }
     }

@@ -24,8 +24,8 @@ use reth_rpc_eth_types::{
     PendingBlockEnv, PendingBlockEnvOrigin,
 };
 use reth_storage_api::{
-    noop::NoopProvider, BlockReader, BlockReaderIdExt, ProviderHeader, ProviderTx,
-    StateProviderBox, StateProviderFactory,
+    noop::NoopProvider, BlockReader, BlockReaderIdExt, PendingBlockSnapshot, ProviderHeader,
+    ProviderTx, StateProviderBox, StateProviderFactory,
 };
 use reth_transaction_pool::{
     error::InvalidPoolTransactionError, BestTransactions, BestTransactionsAttributes,
@@ -64,25 +64,36 @@ pub trait LoadPendingBlock:
     ///
     /// If no pending block is available, this will derive it from the `latest` block
     fn pending_block_env_and_cfg(&self) -> Result<PendingBlockEnv<Self::Evm>, Self::Error> {
-        if let Some((block, receipts)) =
-            self.provider().pending_block_and_receipts().map_err(Self::Error::from_eth_err)?
+        self.pending_block_env_and_state().map(|(pending, _)| pending)
+    }
+
+    /// Configures the pending environment and retains the actual pending post-state for execution.
+    /// For a synthetic pending block, its canonical parent identifies the execution state.
+    #[expect(clippy::type_complexity)]
+    fn pending_block_env_and_state(
+        &self,
+    ) -> Result<(PendingBlockEnv<Self::Evm>, Option<StateProviderBox>), Self::Error> {
+        let provider = self.provider();
+        if let Some(PendingBlockSnapshot { block, receipts, open_state }) = provider
+            .pending_block_snapshot(|hash| provider.state_by_block_hash(hash))
+            .map_err(Self::Error::from_eth_err)?
         {
+            let state = open_state().map_err(Self::Error::from_eth_err)?;
             // Note: for the PENDING block we assume it is past the known merge block and
             // thus this will not fail when looking up the total
             // difficulty value for the blockenv.
             let evm_env = self
                 .evm_config()
-                .rpc_evm_env(block.header(), None, || {
-                    Ok(StateProviderDatabase::new(
-                        self.provider().state_by_block_hash(block.hash())?,
-                    ))
-                })
+                .rpc_evm_env(block.header(), None, || Ok(StateProviderDatabase::new(&state)))
                 .map_err(RethError::Other)
                 .map_err(Self::Error::from_eth_err)?;
 
-            return Ok(PendingBlockEnv::new(
-                evm_env,
-                PendingBlockEnvOrigin::ActualPending(Arc::new(block), Arc::new(receipts)),
+            return Ok((
+                PendingBlockEnv::new(
+                    evm_env,
+                    PendingBlockEnvOrigin::ActualPending(block, Arc::new(receipts)),
+                ),
+                Some(state),
             ));
         }
 
@@ -102,7 +113,7 @@ pub trait LoadPendingBlock:
             .map_err(RethError::Other)
             .map_err(Self::Error::from_eth_err)?;
 
-        Ok(PendingBlockEnv::new(evm_env, PendingBlockEnvOrigin::DerivedFromLatest(latest)))
+        Ok((PendingBlockEnv::new(evm_env, PendingBlockEnvOrigin::DerivedFromLatest(latest)), None))
     }
 
     /// Returns [`ConfigureEvm::NextBlockEnvCtx`] for building a local pending block.

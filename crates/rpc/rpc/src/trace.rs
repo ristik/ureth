@@ -126,10 +126,11 @@ where
         let tx = recover_raw_transaction::<PoolPooledTx<Eth::Pool>>(&tx)?
             .map(<Eth::Pool as TransactionPool>::Transaction::pooled_into_consensus);
 
-        let (evm_env, at) = self.eth_api().evm_env_at(block_id.unwrap_or_default()).await?;
+        let (evm_env, state) =
+            self.eth_api().evm_env_and_state_at(block_id.unwrap_or_default()).await?;
 
         self.eth_api()
-            .spawn_with_state_at_block(at, move |this, mut db| {
+            .spawn_with_state(state, move |this, mut db| {
                 let mut inspector =
                     TracingInspector::new(TracingInspectorConfig::from_parity_config(&trace_types));
                 let res = this.inspect(&mut db, evm_env, tx, &mut inspector)?;
@@ -152,11 +153,11 @@ where
         block_id: Option<BlockId>,
     ) -> Result<Vec<TraceResults>, Eth::Error> {
         let at = block_id.unwrap_or(BlockId::pending());
-        let (evm_env, at) = self.eth_api().evm_env_at(at).await?;
+        let (evm_env, state) = self.eth_api().evm_env_and_state_at(at).await?;
 
         // execute all transactions on top of each other and record the traces
         self.eth_api()
-            .spawn_with_state_at_block(at, move |eth_api, mut db| {
+            .spawn_with_state(state, move |eth_api, mut db| {
                 let mut results = Vec::with_capacity(calls.len());
                 let mut calls = calls.into_iter().peekable();
 
