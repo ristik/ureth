@@ -4,7 +4,7 @@ use super::{state::RpcStateSource, Call, LoadBlock, LoadState, LoadTransaction};
 use crate::{FromEthApiError, FromEvmError};
 use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_primitives::B256;
-use alloy_rpc_types_eth::{BlockId, TransactionInfo};
+use alloy_rpc_types_eth::{BlockId, BlockNumberOrTag, TransactionInfo};
 use futures::Future;
 use reth_errors::RethError;
 use reth_evm::{
@@ -13,7 +13,7 @@ use reth_evm::{
 };
 use reth_primitives_traits::{BlockBody, BlockTy, Recovered, RecoveredBlock};
 use reth_revm::database::StateProviderDatabase;
-use reth_rpc_eth_types::{cache::db::StateCacheDb, EthApiError, PendingBlockEnvOrigin};
+use reth_rpc_eth_types::{cache::db::StateCacheDb, EthApiError};
 use reth_storage_api::{ProviderBlock, ProviderTx, StateProviderBox, StateProviderFactory};
 use revm::{context::Block, context_interface::result::ResultAndState};
 use revm_inspectors::tracing::{TracingInspector, TracingInspectorConfig};
@@ -30,31 +30,27 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         Self: LoadBlock,
     {
         async move {
-            let (block, evm_env, pending_state) = if at.is_pending() {
+            let block_id = if at.is_pending() {
                 if self.pending_block_kind().is_none() {
                     return Err(EthApiError::HeaderNotFound(at).into())
                 }
 
-                let (pending, state) = self.pending_block_env_and_state()?;
-                match pending.origin {
-                    PendingBlockEnvOrigin::ActualPending(block, _) => {
-                        (block, Some(pending.evm_env), state)
-                    }
-                    PendingBlockEnvOrigin::DerivedFromLatest(parent) => {
-                        let pending = self
-                            .build_pool_pending_block(parent, pending.evm_env)
-                            .await?
-                            .ok_or(EthApiError::HeaderNotFound(at))?;
-                        (pending.into_block_and_receipts().block, None, None)
-                    }
+                if let Some((pending, evm_env, state)) =
+                    self.executed_pending_block_env_and_state()?
+                {
+                    return Ok(CallBlock { block: pending.block, pending: Some((evm_env, state)) })
                 }
+
+                // Replay needs a concrete block and its state. Resolve latest once; the recovered
+                // block's hash pins all subsequent environment and execution state reads.
+                BlockNumberOrTag::Latest.into()
             } else {
-                let block =
-                    self.recovered_block(at).await?.ok_or(EthApiError::HeaderNotFound(at))?;
-                (block, None, None)
+                at
             };
 
-            Ok(CallBlock { block, evm_env, pending_state, is_pending: at.is_pending() })
+            let block =
+                self.recovered_block(block_id).await?.ok_or(EthApiError::HeaderNotFound(at))?;
+            Ok(CallBlock { block, pending: None })
         }
     }
 
@@ -72,16 +68,15 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         R: Send + 'static,
     {
         async move {
-            let CallBlock { block, evm_env, mut pending_state, is_pending } = call_block;
-            let evm_env = match evm_env {
-                Some(env) => env,
-                None => self.evm_env_for_header(block.sealed_header())?,
+            let CallBlock { block, pending } = call_block;
+            let (evm_env, mut pending_state) = match pending {
+                Some((env, state)) => (env, Some(state)),
+                None => (self.evm_env_for_header(block.sealed_header())?, None),
             };
 
             let transaction_count = block.transaction_count();
             let num_txs = transaction_index.unwrap_or(transaction_count);
-            // Locally built pending blocks have no provider-backed post-state.
-            let replay = num_txs != transaction_count || (is_pending && pending_state.is_none());
+            let replay = num_txs != transaction_count;
             let state = if replay {
                 RpcStateSource::Block(block.parent_hash().into())
             } else {
@@ -518,7 +513,5 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
 pub struct CallBlock<Evm: ConfigureEvm> {
     /// The block whose environment and transactions the call uses.
     pub block: Arc<RecoveredBlock<BlockTy<Evm::Primitives>>>,
-    evm_env: Option<EvmEnvFor<Evm>>,
-    pending_state: Option<StateProviderBox>,
-    is_pending: bool,
+    pending: Option<(EvmEnvFor<Evm>, StateProviderBox)>,
 }

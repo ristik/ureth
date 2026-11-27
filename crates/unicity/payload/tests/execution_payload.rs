@@ -5619,6 +5619,58 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
     assert_eq!(replay.as_array().unwrap().len(), 1);
     assert_eq!(replay[0]["result"]["failed"], false);
     assert_eq!(replay[0]["result"]["gas"], 25_000);
+
+    // The override reads the queried block number and the fee payer's balance. The full
+    // call sees the paid transaction's fee debit, and replay at index zero sees its parent.
+    assert!(node.provider.pending_block()?.is_none());
+    let tip_number = traced.payload.block().header().number;
+    let payer = traced.payload.block().body().transactions[0]
+        .clone()
+        .try_into_recovered()
+        .expect("signed fixture transaction")
+        .signer();
+    let balance = |hash| {
+        node.provider
+            .state_by_block_hash(hash)?
+            .basic_account(&payer)
+            .map(|account| account.expect("funded fixture payer").balance)
+    };
+    let tip_balance = balance(traced_hash)?;
+    let parent_balance = balance(parent_hash)?;
+    assert!(tip_balance < parent_balance);
+    let expected = |balance| format!("0x{tip_number:064x}{balance:064x}");
+    let call = json!({ "to": to });
+    let bundles = json!([{ "transactions": [call.clone()] }]);
+    let code = format!("0x4360005273{}3160205260406000f3", alloy_primitives::hex::encode(payer));
+    let overrides = json!({ (format!("{to:#x}")): { "code": code } });
+    let full: Value = client
+        .request(
+            "eth_callMany",
+            rpc_params![bundles.clone(), json!({ "blockNumber": "pending" }), overrides.clone()],
+        )
+        .await?;
+    assert_eq!(full[0][0]["value"], expected(tip_balance));
+    let traces: Value = client
+        .request(
+            "debug_traceCallMany",
+            rpc_params![
+                bundles,
+                json!({ "blockNumber": "pending", "transactionIndex": 0 }),
+                json!({ "stateOverrides": overrides.clone() })
+            ],
+        )
+        .await?;
+    let indexed: Value = client
+        .request(
+            "debug_traceCall",
+            rpc_params![call, "pending", json!({ "stateOverrides": overrides, "txIndex": "0x0" })],
+        )
+        .await?;
+    for trace in [&traces[0][0], &indexed] {
+        assert_eq!(trace["failed"], false);
+        assert_eq!(trace["returnValue"], expected(parent_balance));
+    }
+
     for byte in 1..=registry.capacity() as u8 {
         let other = bound_input(&root_with_tree_root(&root, B256::repeat_byte(byte)), &genesis);
         registry.insert(other.root_input().input_commitment().unwrap(), other)?;

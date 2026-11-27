@@ -73,25 +73,13 @@ pub trait LoadPendingBlock:
     fn pending_block_env_and_state(
         &self,
     ) -> Result<(PendingBlockEnv<Self::Evm>, Option<StateProviderBox>), Self::Error> {
-        let provider = self.provider();
-        if let Some(PendingBlockSnapshot { block, receipts, open_state }) = provider
-            .pending_block_snapshot(|hash| provider.state_by_block_hash(hash))
-            .map_err(Self::Error::from_eth_err)?
+        if let Some((BlockAndReceipts { block, receipts }, evm_env, state)) =
+            self.executed_pending_block_env_and_state()?
         {
-            let state = open_state().map_err(Self::Error::from_eth_err)?;
-            // Note: for the PENDING block we assume it is past the known merge block and
-            // thus this will not fail when looking up the total
-            // difficulty value for the blockenv.
-            let evm_env = self
-                .evm_config()
-                .rpc_evm_env(block.header(), None, || Ok(StateProviderDatabase::new(&state)))
-                .map_err(RethError::Other)
-                .map_err(Self::Error::from_eth_err)?;
-
             return Ok((
                 PendingBlockEnv::new(
                     evm_env,
-                    PendingBlockEnvOrigin::ActualPending(block, Arc::new(receipts)),
+                    PendingBlockEnvOrigin::ActualPending(block, receipts),
                 ),
                 Some(state),
             ));
@@ -114,6 +102,31 @@ pub trait LoadPendingBlock:
             .map_err(Self::Error::from_eth_err)?;
 
         Ok((PendingBlockEnv::new(evm_env, PendingBlockEnvOrigin::DerivedFromLatest(latest)), None))
+    }
+
+    /// Captures an executed pending block, its environment, and its post-state together.
+    #[expect(clippy::type_complexity)]
+    fn executed_pending_block_env_and_state(
+        &self,
+    ) -> Result<
+        Option<(BlockAndReceipts<Self::Primitives>, EvmEnvFor<Self::Evm>, StateProviderBox)>,
+        Self::Error,
+    > {
+        let provider = self.provider();
+        let Some(PendingBlockSnapshot { block, receipts, open_state }) = provider
+            .pending_block_snapshot(|hash| provider.state_by_block_hash(hash))
+            .map_err(Self::Error::from_eth_err)?
+        else {
+            return Ok(None)
+        };
+        let state = open_state().map_err(Self::Error::from_eth_err)?;
+        let evm_env = self
+            .evm_config()
+            .rpc_evm_env(block.header(), None, || Ok(StateProviderDatabase::new(&state)))
+            .map_err(RethError::Other)
+            .map_err(Self::Error::from_eth_err)?;
+
+        Ok(Some((BlockAndReceipts { block, receipts: Arc::new(receipts) }, evm_env, state)))
     }
 
     /// Returns [`ConfigureEvm::NextBlockEnvCtx`] for building a local pending block.
