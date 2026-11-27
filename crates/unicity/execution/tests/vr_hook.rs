@@ -76,16 +76,16 @@ const FIXTURE_POS: &str = include_str!("../testdata/vr-hook-pos.json");
 /// `test/vr/fixtures/vr-hook.json` at `FIXTURE_SOURCE`, whose CI regenerates that file and compares
 /// it byte for byte. A changed copy here, or a regenerated file there, shows as a mismatch.
 const FIXTURE_SHA256_POA: B256 =
-    alloy_primitives::b256!("a4d62fc043df7e37331d4b0ca67163a824f6b7cf258612af9b3f6cfca7f62a15");
+    alloy_primitives::b256!("f14727d0acf130d050eb141f70cfadee3163d6a04a3dde2e1b7cc95715171d29");
 /// SHA-256 of `testdata/vr-hook-pos.json`, the copy of `test/vr/fixtures/vr-hook-pos.json` (the
 /// generator under `VR_BUILD=pos`: the PoS-capable VR build, H = 16).
 const FIXTURE_SHA256_POS: B256 =
-    alloy_primitives::b256!("e2273a50e21bb557289c46fbb84e3e555a3bab64f1f5cb53cf1dbf0a90058493");
+    alloy_primitives::b256!("a7b8d74e39eaefd20ee3076de567ab359ce018bb7287c1b068c154cfdf145759");
 /// The unicity-pos-contracts commit the fixture was copied from.
 const FIXTURE_SOURCE: &str =
-    "unicity-pos-contracts e2b995b with the origin of the bft-core#1297 registry genesis (VRHookState ORIGIN)";
+    "unicity-pos-contracts 85950b44 (bft-core#1319: record kind 9 PoPMissed; the origin of its registry genesis)";
 const FIXTURE_SOURCE_POS: &str =
-    "unicity-pos-contracts f0e569c2 (bft-core#1286 package pin; byte-identical since 7e64c0c: ElectionPolicy, PosElectionAdapter, the PoS-capable build, H = 16)";
+    "unicity-pos-contracts 85950b44 (bft-core#1319: record kind 9 PoPMissed; ElectionPolicy, PosElectionAdapter, the PoS-capable build, H = 16)";
 /// Every scenario the generator (`test/vr/VRHookState.t.sol`) dumps, exactly.
 const SCENARIOS: [&str; 36] = [
     "attach-revert",
@@ -285,12 +285,12 @@ const POA: Build = Build {
     cap_output: 1_000_000,
     cap_record: 1_500_000,
     elect_requirement: 7_981_487,
-    record_requirement: 17_977_731,
-    batch_requirement: 52_264_495,
+    record_requirement: 17_977_775,
+    batch_requirement: 52_265_192,
     retire_requirement: 0,
-    expected_hook_record_gas: 2_743_837,
+    expected_hook_record_gas: 2_743_866,
     expected_elect_gas: 9_976_859,
-    expected_envelope: 97_929_643,
+    expected_envelope: 97_930_571,
 };
 
 const POS: Build = Build {

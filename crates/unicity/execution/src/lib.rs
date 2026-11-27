@@ -122,7 +122,7 @@ pub const VALIDATOR_REGISTRY: Address =
 /// Keccak-256 of the pinned `SealRegistry` runtime artifact: B1 plus the authenticated root-record
 /// log, permanent layout (contracts `registry/permanent-layout`).
 pub const SEAL_REGISTRY_CODE_HASH: B256 =
-    b256!("8b3105bfc06dae2a5755e78a66e9675172da8cd9d532dc4e8f44b01afd6f0e6c");
+    b256!("93dae8b0e730c861e66468a0ff109395190b7f5292da4a19a6f9515fd15c1841");
 const GENESIS_SHARD_CONF_HASH_SLOT: B256 =
     b256!("4d19b7530faa2fa3495319b01857830cdc6ca35a5b20c4084d10119118d44afe");
 const ASSIGNMENT_EPOCH_SLOT: B256 =
