@@ -16,7 +16,7 @@
 //! 2. `G_R_scan = 2000 + 16*C_R` is reserved from the system budget before the structural scan;
 //! 3. the allocation-free scan enforces the six-field envelope, eight-field entries, `N <= 32`,
 //!    exact scalar and payload widths, canonical payload words and the cross-field rules of kinds 6
-//!    to 8 ([`check_payload`]), definite shortest encodings, depth and token bounds, with no tags,
+//!    to 9 ([`check_payload`]), definite shortest encodings, depth and token bounds, with no tags,
 //!    maps, nulls or trailing bytes, and reports `N`;
 //! 4. `G_R_entries = 1000*N` is reserved before any entry is allocated or decoded;
 //! 5. the bytes must hash to the committed value.
@@ -51,7 +51,7 @@ pub const ENTRY_GAS: u64 = 1_000;
 pub const MAX_ADMISSION_GAS: u64 =
     SCAN_BASE_GAS + SCAN_BYTE_GAS * MAX_IMPORT_BYTES as u64 + ENTRY_GAS * MAX_IMPORT_ENTRIES as u64;
 
-/// Record kinds (bft-core `rootrecords`; kinds 6 to 8 are validator-registry schema v1 section 7).
+/// Record kinds (bft-core `rootrecords`; kinds 6 to 9 are validator-registry schema v1 section 7).
 pub mod kind {
     /// The closing of an election result.
     pub const SESSION_CLOSED: u8 = 1;
@@ -69,6 +69,9 @@ pub mod kind {
     pub const OUTPUT_REJECTED: u8 = 7;
     /// A holder-scoped retirement authorization.
     pub const HOLDER_RETIREMENT: u8 = 8;
+    /// The roster members of a result whose handoff-PoP miss a root quorum certified
+    /// (bft-core#1319); between the result's Expired `OutputRejected` and its `SessionClosed`.
+    pub const POP_MISSED: u8 = 9;
 }
 
 /// `MAX_HOLDERS`: a `HolderRetirement` names a holder below it.
@@ -79,7 +82,7 @@ pub const MAX_HOLDERS: u64 = 8;
 /// expensive legal import (32 nine-word records, every word fresh and nonzero) on the pinned
 /// runtime (11,169,634 gross) and requires it to stay within two thirds of this figure, the 3/2
 /// safety factor the registry's own `G_rest` uses. It is a price, not a proof; bft-core's
-/// `b1state.ImportExecutionGas` is the same figure. Kinds 6 to 8 are at most seven words (a
+/// `b1state.ImportExecutionGas` is the same figure. Kinds 6 to 9 are at most seven words (a
 /// `HolderRetirement` writes four words and its dedup key), so they stay inside the nine-word
 /// measurement:
 /// `b1_tests::import::maximal_imports_of_the_registry_kinds_stay_below_the_recovery_ack`.
@@ -130,7 +133,7 @@ pub struct RecordEntry {
     pub record_id: B256,
     /// Previous record identifier.
     pub predecessor: B256,
-    /// Record kind, 1 to 8.
+    /// Record kind, 1 to 9.
     pub kind: u8,
     /// Canonical progress anchor.
     pub progress: u64,
@@ -184,7 +187,7 @@ pub enum ImportError {
     Domain,
     /// More than 32 entries.
     TooManyEntries(usize),
-    /// A kind outside 1 to 8.
+    /// A kind outside 1 to 9.
     UnknownKind(u64),
     /// A payload of the exact width whose words are not the kind's canonical words.
     Payload {
@@ -226,14 +229,14 @@ impl std::fmt::Display for ImportError {
 
 impl std::error::Error for ImportError {}
 
-/// The exact payload width of a record kind, or `None` for a kind outside 1 to 8.
+/// The exact payload width of a record kind, or `None` for a kind outside 1 to 9.
 pub const fn payload_width(kind: u64) -> Option<usize> {
     match kind {
         1 => Some(32),
         2 | 7 | 8 => Some(128),
         3 => Some(288),
         4 => Some(192),
-        5 => Some(96),
+        5 | 9 => Some(96),
         6 => Some(224),
         _ => None,
     }
@@ -254,7 +257,7 @@ pub enum WordType {
     Bool,
 }
 
-/// The frozen word types of a record kind, or `None` for a kind outside 1 to 8.
+/// The frozen word types of a record kind, or `None` for a kind outside 1 to 9.
 pub const fn word_types(kind: u64) -> Option<&'static [WordType]> {
     use WordType::{Bool, Bytes32 as B, Uint16, Uint64 as U, Uint8};
     match kind {
@@ -266,6 +269,7 @@ pub const fn word_types(kind: u64) -> Option<&'static [WordType]> {
         6 => Some(&[B, U, U, U, U, Bool, Uint16]),
         7 => Some(&[B, Uint8, U, Uint16]),
         8 => Some(&[Uint8, U, U, B]),
+        9 => Some(&[B, U, Uint16]),
         _ => None,
     }
 }
@@ -295,6 +299,8 @@ pub enum PayloadError {
     BitmapOutsideExpired,
     /// A `HolderRetirement` holder at or above [`MAX_HOLDERS`].
     Holder,
+    /// A `PoPMissed` with an empty missed bitmap.
+    EmptyMissed,
 }
 
 /// The value of a narrow word, or `None` when one of its high 24 bytes is nonzero.
@@ -306,7 +312,7 @@ fn narrow(word: &[u8]) -> Option<u64> {
 }
 
 /// Checks a payload of exactly the kind's width: every narrow word canonical (zero high bytes,
-/// within its type's bits; a bool 0 or 1), and the cross-field rules of kinds 6 to 8 (schema v1
+/// within its type's bits; a bool 0 or 1), and the cross-field rules of kinds 6 to 9 (schema v1
 /// section 7, `vrschema.Decode*`). Allocation-free. The width itself is the caller's check.
 pub fn check_payload(kind: u8, data: &[u8]) -> Result<(), PayloadError> {
     let Some(types) = word_types(u64::from(kind)) else { return Ok(()) };
@@ -357,6 +363,14 @@ pub fn check_payload(kind: u8, data: &[u8]) -> Result<(), PayloadError> {
             }
         }
         kind::HOLDER_RETIREMENT if value(0) >= MAX_HOLDERS => return Err(PayloadError::Holder),
+        kind::POP_MISSED => {
+            if zero(0) {
+                return Err(PayloadError::ZeroResult);
+            }
+            if value(2) == 0 {
+                return Err(PayloadError::EmptyMissed);
+            }
+        }
         _ => {}
     }
     Ok(())
@@ -407,6 +421,17 @@ pub struct HolderRetirement {
     pub ref_digest: B256,
 }
 
+/// Record kind 9, decoded.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PoPMissed {
+    /// The rejected result.
+    pub result_id: B256,
+    /// The handoff-PoP request's cutoff in root progress.
+    pub deadline: u64,
+    /// Bit i: the i-th roster member (ascending staking id) was certified missing; nonzero.
+    pub missed_bitmap: u16,
+}
+
 /// A decoded payload of one of the registry kinds.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RegistryRecord {
@@ -416,23 +441,25 @@ pub enum RegistryRecord {
     OutputRejected(OutputRejected),
     /// Kind 8.
     HolderRetirement(HolderRetirement),
+    /// Kind 9.
+    PoPMissed(PoPMissed),
 }
 
 impl RecordEntry {
-    /// The strict decoding of a kind 6 to 8 payload; `None` for kinds 1 to 5. An admitted entry
+    /// The strict decoding of a kind 6 to 9 payload; `None` for kinds 1 to 5. An admitted entry
     /// always decodes: the scan ran the same [`check_payload`].
     pub fn registry_record(&self) -> Option<Result<RegistryRecord, ImportError>> {
         decode_registry_record(self.kind, &self.data)
     }
 }
 
-/// The strict decoding of a kind 6 to 8 payload (width and [`check_payload`]); `None` for any
+/// The strict decoding of a kind 6 to 9 payload (width and [`check_payload`]); `None` for any
 /// other kind.
 pub fn decode_registry_record(
     kind: u8,
     data: &[u8],
 ) -> Option<Result<RegistryRecord, ImportError>> {
-    if !(kind::BOUNDARY..=kind::HOLDER_RETIREMENT).contains(&kind) {
+    if !(kind::BOUNDARY..=kind::POP_MISSED).contains(&kind) {
         return None;
     }
     let width = payload_width(u64::from(kind)).unwrap_or(0);
@@ -459,6 +486,11 @@ pub fn decode_registry_record(
             reason: v(1) as u8,
             member_id: v(2),
             ready_bitmap: v(3) as u16,
+        }),
+        kind::POP_MISSED => RegistryRecord::PoPMissed(PoPMissed {
+            result_id: b(0),
+            deadline: v(1),
+            missed_bitmap: v(2) as u16,
         }),
         _ => RegistryRecord::HolderRetirement(HolderRetirement {
             holder: v(0) as u8,
@@ -1027,13 +1059,13 @@ mod tests {
                 ImportError::UnknownKind(0),
             ),
             (
-                "kind nine",
+                "kind ten",
                 {
                     let mut s = base.clone();
-                    s.entries[1].kind = 9;
+                    s.entries[1].kind = 10;
                     s
                 },
-                ImportError::UnknownKind(9),
+                ImportError::UnknownKind(10),
             ),
             (
                 "an ack word with a high byte",
@@ -1199,7 +1231,7 @@ mod tests {
         }
     }
 
-    // ---- the registry kinds 6 to 8 ----
+    // ---- the registry kinds 6 to 9 ----
 
     fn word(v: u64) -> [u8; 32] {
         let mut w = [0u8; 32];
@@ -1274,14 +1306,33 @@ mod tests {
             })))
         );
         refuse(8, &h(8), PayloadError::Holder);
+
+        // kind 9 (bft-core#1319): a nonzero result and a nonzero 16-bit bitmap
+        let m = |deadline: u64, missed: u64| [rid, word(deadline), word(missed)];
+        let ok = with_payload(9, &m(4_106, 0x10)).unwrap();
+        assert_eq!(
+            ok.import.entries[0].registry_record(),
+            Some(Ok(RegistryRecord::PoPMissed(PoPMissed {
+                result_id: B256::from(rid),
+                deadline: 4_106,
+                missed_bitmap: 0x10,
+            })))
+        );
+        assert!(with_payload(9, &m(u64::MAX, 0xffff)).is_ok());
+        refuse(9, &m(4_106, 0), PayloadError::EmptyMissed);
+        refuse(9, &m(4_106, 0x1_0000), PayloadError::NonCanonicalWord { word: 2 });
+        refuse(9, &[[0; 32], word(1), word(1)], PayloadError::ZeroResult);
+        let mut high = m(1, 1);
+        high[1][0] = 1;
+        refuse(9, &high, PayloadError::NonCanonicalWord { word: 1 });
         // kinds 1 to 5 have no registry decoding
         assert_eq!(decode_registry_record(2, &payload(0, 2)), None);
     }
 
     #[test]
     fn the_widest_registry_kind_is_narrower_than_the_measured_record() {
-        // IMPORT_EXECUTION_GAS was measured on nine-word records; kinds 6 to 8 are at most seven
-        let widest = (6..=8).map(|k| payload_width(k).unwrap()).max().unwrap();
+        // IMPORT_EXECUTION_GAS was measured on nine-word records; kinds 6 to 9 are at most seven
+        let widest = (6..=9).map(|k| payload_width(k).unwrap()).max().unwrap();
         assert_eq!(widest, 7 * 32);
         assert!(widest < payload_width(3).unwrap());
     }

@@ -4,9 +4,9 @@
 //! `testdata/vr-schema-v1/` with their `MANIFEST.sha256`. Every vector is
 //! `{name, op, input, expect}`; this module consumes the record and fee ops that ureth owns:
 //!
-//! - `record.width`: kinds 1 to 8 against [`payload_width`] and [`word_types`];
+//! - `record.width`: kinds 1 to 9 against [`payload_width`] and [`word_types`];
 //! - `record.decode`: the production payload check of the import scan ([`payload_width`] and
-//!   [`check_payload`]), and for kinds 6 to 8 the strict decoder ([`decode_registry_record`]);
+//!   [`check_payload`]), and for kinds 6 to 9 the strict decoder ([`decode_registry_record`]);
 //! - `record.gas`: the import's pricing constants;
 //! - `fee.validate`: [`BlockProfile::validate`];
 //! - `fee.nextBaseFee`: [`ParentExecutionOutcome::reconcile`] and [`next_base_fee_for_child`];
@@ -135,8 +135,8 @@ fn vr_schema_record_widths() {
         assert_eq!(ours, types, "{}", v.name);
         kinds |= 1 << kind;
     }
-    assert_eq!(kinds, 0b1_1111_1110, "kinds 1 to 8");
-    assert_eq!(payload_width(9), None);
+    assert_eq!(kinds, 0b11_1111_1110, "kinds 1 to 9");
+    assert_eq!(payload_width(10), None);
 }
 
 /// The error category of a production refusal, in the reference's words.
@@ -159,7 +159,7 @@ fn vr_schema_record_decode() {
             Some(width) if width != data.len() => Err("wrong length"),
             Some(_) => check_payload(kind as u8, &data).map_err(category),
         };
-        if (6..=8).contains(&kind) {
+        if (6..=9).contains(&kind) {
             let strict = decode_registry_record(kind as u8, &data).unwrap();
             assert_eq!(strict.is_ok(), got.is_ok(), "{}: the strict decoder agrees", v.name);
         }
@@ -177,7 +177,7 @@ fn vr_schema_record_decode() {
             }
         }
     }
-    assert_eq!((accepted, refused), (8, 17));
+    assert_eq!((accepted, refused), (10, 22));
 }
 
 #[test]
@@ -191,7 +191,7 @@ fn vr_schema_record_gas() {
     assert_eq!(int(&input["maxBytes"]) as usize, MAX_IMPORT_BYTES);
     assert_eq!(int(&input["maxEntries"]) as usize, MAX_IMPORT_ENTRIES);
     assert_eq!(int(&expect["maxAdmission"]), crate::records::MAX_ADMISSION_GAS);
-    let widest = (6..=8).map(|k| word_types(k).unwrap().len()).max().unwrap();
+    let widest = (6..=9).map(|k| word_types(k).unwrap().len()).max().unwrap();
     assert_eq!(widest as u64, int(&expect["widestNewKindWords"]));
     let measured = word_types(3).unwrap().len();
     assert_eq!(measured as u64, int(&expect["executionBoundWords"]));
