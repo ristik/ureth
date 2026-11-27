@@ -3,7 +3,10 @@
 
 use core::fmt;
 
-use super::{LoadBlock, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking, Trace};
+use super::{
+    state::RpcStateSource, LoadBlock, LoadPendingBlock, LoadState, LoadTransaction, SpawnBlocking,
+    Trace,
+};
 use crate::{
     helpers::estimate::EstimateCall, FromEvmError, FullEthApiTypes, RpcBlock, RpcNodeCore,
 };
@@ -437,10 +440,10 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
     {
         async move {
             let block_id = block_number.unwrap_or_default();
-            let (evm_env, at) = self.evm_env_at(block_id).await?;
+            let (evm_env, state) = self.evm_env_and_state_at(block_id).await?;
 
             self.spawn_blocking_io_fut(async move |this| {
-                this.create_access_list_with(evm_env, at, request, state_override).await
+                this.create_access_list_with_state(evm_env, state, request, state_override).await
             })
             .await
         }
@@ -458,7 +461,26 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
     where
         Self: Trace,
     {
-        self.spawn_with_state_at_block(at, |this, mut db| {
+        self.create_access_list_with_state(
+            evm_env,
+            RpcStateSource::Block(at),
+            request,
+            state_override,
+        )
+    }
+
+    /// Creates an access list using the state selected with the EVM environment.
+    fn create_access_list_with_state(
+        &self,
+        evm_env: EvmEnvFor<Self::Evm>,
+        state: RpcStateSource,
+        request: RpcTxReq<<Self::RpcConvert as RpcConvert>::Network>,
+        state_override: Option<StateOverride>,
+    ) -> impl Future<Output = Result<AccessListResult, Self::Error>> + Send
+    where
+        Self: Trace,
+    {
+        self.spawn_with_state(state, |this, mut db| {
             let initial = request.as_ref().access_list().cloned().unwrap_or_default();
             let (evm_env, mut tx_env) = this.prepare_call_env(
                 evm_env,
@@ -609,9 +631,21 @@ pub trait Call:
         F: FnOnce(Self, StateCacheDb) -> Result<R, Self::Error> + Send + 'static,
         R: Send + 'static,
     {
-        let at = at.into();
+        self.spawn_with_state(RpcStateSource::Block(at.into()), f)
+    }
+
+    /// Executes the closure with the selected state on a new task.
+    fn spawn_with_state<F, R>(
+        &self,
+        state: RpcStateSource,
+        f: F,
+    ) -> impl Future<Output = Result<R, Self::Error>> + Send
+    where
+        F: FnOnce(Self, StateCacheDb) -> Result<R, Self::Error> + Send + 'static,
+        R: Send + 'static,
+    {
         self.spawn_blocking_io_fut(async move |this| {
-            let state = this.state_at_block_id(at).await?;
+            let state = this.state_for_execution(state).await?;
             let db = State::builder()
                 .with_database(StateProviderDatabase::new(StateProviderTraitObjWrapper(state)))
                 .build();
@@ -653,8 +687,8 @@ pub trait Call:
         R: Send + 'static,
     {
         async move {
-            let (evm_env, at) = self.evm_env_at(at).await?;
-            self.spawn_with_state_at_block(at, move |this, mut db| {
+            let (evm_env, state) = self.evm_env_and_state_at(at).await?;
+            self.spawn_with_state(state, move |this, mut db| {
                 let (evm_env, tx_env) =
                     this.prepare_call_env(evm_env, request, &mut db, overrides)?;
 

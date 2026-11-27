@@ -1,8 +1,8 @@
 use crate::{
     BlockBodyIndicesProvider, BlockNumReader, HeaderProvider, ReceiptProvider,
-    ReceiptProviderIdExt, TransactionVariant, TransactionsProvider,
+    ReceiptProviderIdExt, StateProviderBox, TransactionVariant, TransactionsProvider,
 };
-use alloc::{sync::Arc, vec::Vec};
+use alloc::{boxed::Box, sync::Arc, vec::Vec};
 use alloy_eips::{BlockHashOrNumber, BlockId, BlockNumberOrTag};
 use alloy_primitives::{BlockNumber, TxNumber, B256};
 use core::ops::RangeInclusive;
@@ -42,6 +42,17 @@ impl BlockSource {
 
 /// A helper type alias to access [`BlockReader::Block`].
 pub type ProviderBlock<P> = <P as BlockReader>::Block;
+
+/// An executed pending block, its receipts, and a handle to open its post-state.
+#[expect(missing_debug_implementations)]
+pub struct PendingBlockSnapshot<'a, B: reth_primitives_traits::Block, R> {
+    /// The recovered pending block.
+    pub block: Arc<RecoveredBlock<B>>,
+    /// The receipts from the same execution as the block.
+    pub receipts: Vec<R>,
+    /// Opens the post-state of the captured block.
+    pub open_state: Box<dyn FnOnce() -> ProviderResult<StateProviderBox> + 'a>,
+}
 
 /// Api trait for fetching `Block` related data.
 ///
@@ -106,6 +117,26 @@ pub trait BlockReader:
     fn pending_block_and_receipts(
         &self,
     ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>>;
+
+    /// Captures the pending block and receipts with a handle to its post-state. The default uses
+    /// the supplied hash lookup. Providers with mutable pending overlays can retain the executed
+    /// state instead, so clearing pending does not invalidate an in-flight read.
+    fn pending_block_snapshot<'a>(
+        &'a self,
+        state_by_hash: impl FnOnce(B256) -> ProviderResult<StateProviderBox> + 'a,
+    ) -> ProviderResult<Option<PendingBlockSnapshot<'a, Self::Block, Self::Receipt>>>
+    where
+        Self: Sized,
+    {
+        Ok(self.pending_block_and_receipts()?.map(|(block, receipts)| {
+            let hash = block.hash();
+            PendingBlockSnapshot {
+                block: Arc::new(block),
+                receipts,
+                open_state: Box::new(move || state_by_hash(hash)),
+            }
+        }))
+    }
 
     /// Returns the block with matching hash from the database.
     ///
@@ -194,6 +225,12 @@ impl<T: BlockReader + Send + Sync> BlockReader for Arc<T> {
     ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
         T::pending_block_and_receipts(self)
     }
+    fn pending_block_snapshot<'a>(
+        &'a self,
+        state_by_hash: impl FnOnce(B256) -> ProviderResult<StateProviderBox> + 'a,
+    ) -> ProviderResult<Option<PendingBlockSnapshot<'a, Self::Block, Self::Receipt>>> {
+        T::pending_block_snapshot(self, state_by_hash)
+    }
     fn block_by_hash(&self, hash: B256) -> ProviderResult<Option<Self::Block>> {
         T::block_by_hash(self, hash)
     }
@@ -261,6 +298,12 @@ impl<T: BlockReader + Send + Sync> BlockReader for &T {
         &self,
     ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
         T::pending_block_and_receipts(self)
+    }
+    fn pending_block_snapshot<'a>(
+        &'a self,
+        state_by_hash: impl FnOnce(B256) -> ProviderResult<StateProviderBox> + 'a,
+    ) -> ProviderResult<Option<PendingBlockSnapshot<'a, Self::Block, Self::Receipt>>> {
+        T::pending_block_snapshot(self, state_by_hash)
     }
     fn block_by_hash(&self, hash: B256) -> ProviderResult<Option<Self::Block>> {
         T::block_by_hash(self, hash)

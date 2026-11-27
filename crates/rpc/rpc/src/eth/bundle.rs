@@ -94,7 +94,7 @@ where
 
         let block_id: alloy_rpc_types_eth::BlockId = state_block_number.into();
         // Note: the block number is considered the `parent` block: <https://github.com/flashbots/mev-geth/blob/fddf97beec5877483f879a77b7dea2e58a58d653/internal/ethapi/api.go#L2104>
-        let (mut evm_env, at) = self.eth_api().evm_env_at(block_id).await?;
+        let (mut evm_env, state) = self.eth_api().evm_env_and_state_at(block_id).await?;
 
         if let Some(coinbase) = coinbase {
             evm_env.block_env.inner_mut().beneficiary = coinbase;
@@ -142,7 +142,7 @@ where
         evm_env.block_env.inner_mut().number = U256::from(block_number);
 
         self.eth_api()
-            .spawn_with_state_at_block(at, move |eth_api, db| {
+            .spawn_with_state(state, move |eth_api, db| {
                 let coinbase = evm_env.block_env.beneficiary();
                 let basefee = evm_env.block_env.basefee();
 

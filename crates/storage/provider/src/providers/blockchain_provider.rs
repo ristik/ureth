@@ -31,9 +31,9 @@ use reth_prune_types::{PruneCheckpoint, PruneSegment};
 use reth_stages_types::{StageCheckpoint, StageId};
 use reth_static_file_types::StaticFileSegment;
 use reth_storage_api::{
-    BlockBodyIndicesProvider, NodePrimitivesProvider, RangeEnd, RangeResponse, RangeResult,
-    StateRangeProvider, StateRangeProviderFactory, StateRangeView, StorageChangeSetReader,
-    StorageRangeResult, TryIntoHistoricalStateProvider,
+    BlockBodyIndicesProvider, NodePrimitivesProvider, PendingBlockSnapshot, RangeEnd,
+    RangeResponse, RangeResult, StateRangeProvider, StateRangeProviderFactory, StateRangeView,
+    StorageChangeSetReader, StorageRangeResult, TryIntoHistoricalStateProvider,
 };
 use reth_storage_errors::provider::ProviderResult;
 use reth_storage_overlay::{
@@ -542,6 +542,17 @@ impl<N: ProviderNodeTypes> BlockReader for BlockchainProvider<N> {
         &self,
     ) -> ProviderResult<Option<(RecoveredBlock<Self::Block>, Vec<Self::Receipt>)>> {
         Ok(self.canonical_in_memory_state.pending_block_and_receipts())
+    }
+
+    fn pending_block_snapshot<'a>(
+        &'a self,
+        _state_by_hash: impl FnOnce(B256) -> ProviderResult<StateProviderBox> + 'a,
+    ) -> ProviderResult<Option<PendingBlockSnapshot<'a, Self::Block, Self::Receipt>>> {
+        Ok(self.canonical_in_memory_state.pending_state().map(|pending| PendingBlockSnapshot {
+            block: Arc::clone(&pending.block_ref().recovered_block),
+            receipts: pending.executed_block_receipts(),
+            open_state: Box::new(move || Ok(Box::new(self.block_state_provider(&pending)?))),
+        }))
     }
 
     /// Returns the block with senders with matching number or hash from database.

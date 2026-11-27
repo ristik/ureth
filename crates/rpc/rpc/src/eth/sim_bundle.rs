@@ -290,15 +290,15 @@ where
         let flattened_bundle = self.parse_and_flatten_bundle(&request)?;
 
         let block_id = parent_block.unwrap_or(BlockId::Number(BlockNumberOrTag::Latest));
-        let (current_block, mut evm_env, current_block_id) =
-            self.eth_api().evm_env_and_recovered_block_at(block_id).await?;
+        let (current_block, mut evm_env, state) =
+            self.eth_api().evm_env_recovered_block_and_state_at(block_id).await?;
 
         let eth_api = self.inner.eth_api.clone();
 
         let sim_response = self
             .inner
             .eth_api
-            .spawn_with_state_at_block(current_block_id, move |_, mut db| {
+            .spawn_with_state(state, move |_, mut db| {
                 // Setup environment
                 let current_block_number = current_block.number();
                 let coinbase = evm_env.block_env.beneficiary();
