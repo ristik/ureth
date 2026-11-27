@@ -72,8 +72,12 @@ pub trait LoadPendingBlock:
             // difficulty value for the blockenv.
             let evm_env = self
                 .evm_config()
-                .evm_env(block.header())
-                .map_err(RethError::other)
+                .rpc_evm_env(block.header(), None, || {
+                    Ok(StateProviderDatabase::new(
+                        self.provider().state_by_block_hash(block.hash())?,
+                    ))
+                })
+                .map_err(RethError::Other)
                 .map_err(Self::Error::from_eth_err)?;
 
             return Ok(PendingBlockEnv::new(
@@ -92,8 +96,10 @@ pub trait LoadPendingBlock:
 
         let evm_env = self
             .evm_config()
-            .next_evm_env(&latest, &self.next_env_attributes(&latest)?)
-            .map_err(RethError::other)
+            .rpc_evm_env(&latest, Some(&self.next_env_attributes(&latest)?), || {
+                Ok(StateProviderDatabase::new(self.provider().state_by_block_hash(latest.hash())?))
+            })
+            .map_err(RethError::Other)
             .map_err(Self::Error::from_eth_err)?;
 
         Ok(PendingBlockEnv::new(evm_env, PendingBlockEnvOrigin::DerivedFromLatest(latest)))

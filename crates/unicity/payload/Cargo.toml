@@ -80,6 +80,7 @@ sha2.workspace = true
 reth-unicity-execution = { workspace = true, features = ["test-utils", "test-prague-rule"] }
 alloy-genesis.workspace = true
 alloy-trie = { workspace = true, features = ["std"] }
+reth-chain-state.workspace = true
 reth-db-api.workspace = true
 reth-node-builder = { workspace = true, features = ["test-utils"] }
 reth-eth-wire-types.workspace = true

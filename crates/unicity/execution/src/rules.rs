@@ -253,6 +253,21 @@ pub struct Resolution {
     pub refusal: Option<UpgradeRequired>,
 }
 
+/// Reads the root epoch assigned by the queried block. Until an authenticated epoch
+/// acknowledgement is applied, the next transaction-bearing block uses the same assignment.
+pub fn assigned_root_epoch<DB: Database>(db: &mut DB) -> Result<u64, RuleError> {
+    let slot = U256::from_be_bytes(crate::ASSIGNMENT_ROOT_EPOCH_SLOT.0);
+    let word = load(db, crate::SEAL_REGISTRY, slot)?;
+    u64::try_from(U256::from_be_bytes(word))
+        .map_err(|_| RuleError::Schedule("assigned root epoch exceeds u64"))
+}
+
+/// Resolves the EVM spec for RPC and admission under the queried state's assignment.
+pub fn assigned_spec<DB: Database>(db: &mut DB, rules: &UnicityRules) -> Result<SpecId, RuleError> {
+    let epoch = assigned_root_epoch(db)?;
+    rules.resolve(db, crate::VALIDATOR_REGISTRY, epoch).map(|(spec, _)| spec)
+}
+
 /// Decodes the schedule from the registry's storage at `vr`, by the frozen layout.
 pub fn read_schedule<DB: Database>(
     db: &mut DB,

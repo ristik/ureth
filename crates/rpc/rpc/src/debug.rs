@@ -115,14 +115,27 @@ where
     async fn trace_block(
         &self,
         block: Arc<RecoveredBlock<ProviderBlock<Eth::Provider>>>,
-        evm_env: EvmEnvFor<Eth::Evm>,
+        supplied_env: Option<EvmEnvFor<Eth::Evm>>,
         opts: GethDebugTracingOptions,
     ) -> Result<Vec<TraceResult>, Eth::Error> {
         self.eth_api()
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
                 let mut results = Vec::with_capacity(block.body().transactions().len());
 
-                eth_api.apply_pre_execution_changes(&block, &mut db)?;
+                let evm_env = if let Some(env) = supplied_env {
+                    // Raw or rejected blocks can be replayed without a stored post-state.
+                    eth_api
+                        .evm_config()
+                        .executor_for_block(&mut db, block.sealed_block())
+                        .map_err(RethError::other)
+                        .map_err(Eth::Error::from_eth_err)?
+                        .apply_pre_execution_changes()
+                        .map_err(Eth::Error::from_eth_err)?;
+                    env
+                } else {
+                    eth_api.apply_pre_execution_changes(&block, &mut db)?;
+                    eth_api.evm_env_for_header(block.sealed_block().sealed_header())?
+                };
 
                 let block_env = evm_env.block_env.clone();
 
@@ -178,12 +191,24 @@ where
             .map_err(BlockError::RlpDecodeRawBlock)
             .map_err(Eth::Error::from_eth_err)?;
 
-        let evm_env = self
-            .eth_api()
-            .evm_config()
-            .evm_env(block.header())
-            .map_err(RethError::other)
-            .map_err(Eth::Error::from_eth_err)?;
+        let sealed = block.seal_slow();
+        let supplied_env = if self
+            .provider()
+            .sealed_header_by_hash(sealed.hash())
+            .map_err(Eth::Error::from_eth_err)?
+            .is_some()
+        {
+            None
+        } else {
+            Some(
+                self.eth_api()
+                    .evm_config()
+                    .evm_env(sealed.header())
+                    .map_err(RethError::other)
+                    .map_err(Eth::Error::from_eth_err)?,
+            )
+        };
+        let block = sealed.into_block();
 
         // Depending on EIP-2 we need to recover the transactions differently
         let senders =
@@ -194,7 +219,8 @@ where
             }
             .map_err(Eth::Error::from_eth_err)?;
 
-        self.trace_block(Arc::new(block.into_recovered_with_signers(senders)), evm_env, opts).await
+        self.trace_block(Arc::new(block.into_recovered_with_signers(senders)), supplied_env, opts)
+            .await
     }
 
     /// Replays a block and returns the trace of each transaction.
@@ -212,9 +238,7 @@ where
         if block.number() == 0 {
             return Err(EthApiError::GenesisNotTraceable.into())
         }
-        let evm_env = self.eth_api().evm_env_for_header(block.sealed_block().sealed_header())?;
-
-        self.trace_block(block, evm_env, opts).await
+        self.trace_block(block, None, opts).await
     }
 
     /// Trace the transaction according to the provided options.
@@ -595,11 +619,7 @@ where
 
         self.eth_api()
             .spawn_with_state_at_block(block.parent_hash(), move |eth_api, mut db| {
-                let mut executor = eth_api
-                    .evm_config()
-                    .executor_for_block(&mut db, block.sealed_block())
-                    .map_err(RethError::other)
-                    .map_err(Eth::Error::from_eth_err)?;
+                let mut executor = eth_api.rpc_executor_for_block(&mut db, block.sealed_block())?;
                 executor.apply_pre_execution_changes().map_err(Eth::Error::from_eth_err)?;
 
                 for tx in block.transactions_recovered().take(tx_index + 1) {
@@ -1186,7 +1206,7 @@ where
             .to_rpc_result()?;
 
         let opts = opts.map(|o| o.tracing_options).unwrap_or_default();
-        self.trace_block(entry.block.clone(), evm_env, opts).await.map_err(Into::into)
+        self.trace_block(entry.block.clone(), Some(evm_env), opts).await.map_err(Into::into)
     }
 }
 

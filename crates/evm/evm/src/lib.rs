@@ -221,6 +221,21 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     /// Creates a new [`EvmEnv`] for the given header.
     fn evm_env(&self, header: &HeaderTy<Self::Primitives>) -> Result<EvmEnvFor<Self>, Self::Error>;
 
+    /// Builds an RPC environment, optionally using the queried block's post-state.
+    /// Synthetic pending calls pass the parent header and next-block attributes.
+    fn rpc_evm_env<DB: Database>(
+        &self,
+        header: &HeaderTy<Self::Primitives>,
+        attributes: Option<&Self::NextBlockEnvCtx>,
+        _post_state: impl FnOnce() -> Result<DB, alloc::boxed::Box<dyn Error + Send + Sync>>,
+    ) -> Result<EvmEnvFor<Self>, alloc::boxed::Box<dyn Error + Send + Sync>> {
+        match attributes {
+            Some(attributes) => self.next_evm_env(header, attributes),
+            None => self.evm_env(header),
+        }
+        .map_err(Into::into)
+    }
+
     /// Returns the configured [`EvmEnv`] for `parent + 1` block.
     ///
     /// This is intended for usage in block building after the merge and requires additional
@@ -372,6 +387,17 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
         let evm = self.evm_for_block(db, block.header())?;
         let ctx = self.context_for_block(block)?;
         Ok(self.create_executor(evm, ctx))
+    }
+
+    /// Creates an executor for read-only RPC replay. The state callback is lazy for chains that
+    /// can derive their replay environment from the header.
+    fn rpc_executor_for_block<'a, DB: Database, PostState: Database>(
+        &'a self,
+        db: &'a mut State<DB>,
+        block: &'a SealedBlock<BlockTy<Self::Primitives>>,
+        _post_state: impl FnOnce() -> Result<PostState, alloc::boxed::Box<dyn Error + Send + Sync>>,
+    ) -> Result<BlockExecutorForEvm<'a, Self, DB>, alloc::boxed::Box<dyn Error + Send + Sync>> {
+        self.executor_for_block(db, block).map_err(Into::into)
     }
 
     /// Creates a [`BlockBuilder`]. Should be used when building a new block.

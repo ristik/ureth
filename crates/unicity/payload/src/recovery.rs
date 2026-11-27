@@ -191,6 +191,63 @@ where
     Ok(RetainedBlock { hash, companion, root, header, parent })
 }
 
+/// Rebinds a retained canonical block for read-only RPC replay, without touching either live
+/// execution inputs or accounting admission. The historical executor still verifies the bound
+/// input against the parent state before applying any changes.
+pub(crate) fn retained_rpc_input<P>(
+    provider: &P,
+    store: &CompanionStore,
+    seal: UnicitySealConfig,
+    block: &reth_primitives_traits::SealedBlock<Block>,
+) -> eyre::Result<BoundExecutionInput>
+where
+    P: ChainSpecProvider<ChainSpec = ChainSpec>
+        + StateProviderFactory
+        + HeaderProvider<Header = Header>,
+{
+    let number = block.header().number;
+    eyre::ensure!(number > 0, "genesis cannot be replayed");
+    let chain = provider.chain_spec();
+    let genesis = chain.genesis_hash();
+    let RetainedBlock { hash, root, parent, companion, .. } =
+        check_retained(provider, store, seal, genesis, number)?;
+    eyre::ensure!(hash == block.hash(), "RPC replay block is no longer canonical");
+    let b1 = B1Job { context: seal.b1, update: companion.b1_update, records: companion.records };
+    let fees = fee_state(provider, &chain, parent.hash(), seal)?;
+    let child = fees.for_block(number);
+    let bound = if number == 1 {
+        bind_validated_genesis(root, b1, child.profile, &parent, genesis, child.collector)
+    } else {
+        let record = store.get_accounting(parent.hash())?.ok_or_else(|| {
+            eyre::eyre!("no retained accounting for replay parent {}", parent.hash())
+        })?;
+        eyre::ensure!(
+            record.chain_id == chain.chain().id() &&
+                record.genesis_hash == genesis &&
+                record.block_number == parent.number,
+            "RPC replay parent accounting has a different chain identity"
+        );
+        let parent_profile = fees.for_block(parent.number).profile;
+        let token = reth_unicity_execution::block_executor::CompletedParent::from_local_storage(
+            record.accounting,
+            &parent,
+            parent_profile,
+        )
+        .map_err(|error| eyre::eyre!("RPC replay parent accounting refused: {error:?}"))?;
+        BoundExecutionInput::from_completed_parent_with_fees(
+            Arc::new(root),
+            b1,
+            parent_profile,
+            child.profile,
+            &parent,
+            token,
+            child.collector,
+        )
+    }
+    .map_err(|error| eyre::eyre!("RPC replay input refused: {error:?}"))?;
+    Ok(crate::rules_head::with_parent_spec(provider, parent.hash(), bound)?)
+}
+
 /// Recovery admission of the canonical head, the only way a token read back from the sidecar
 /// becomes usable.
 ///

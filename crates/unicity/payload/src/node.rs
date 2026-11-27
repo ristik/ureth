@@ -25,7 +25,7 @@ use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_node_builder::{
     components::{
         BasicPayloadServiceBuilder, ComponentsBuilder, ConsensusBuilder, ExecutorBuilder,
-        PayloadBuilderBuilder,
+        PayloadBuilderBuilder, PoolBuilder,
     },
     rpc::{BasicEngineValidatorBuilder, Identity, PayloadValidatorBuilder, RpcAddOns, RpcContext},
     AddOnsContext, BuilderContext, FullNodeComponents, FullNodeTypes, Node, NodeAdapter, NodeTypes,
@@ -39,12 +39,13 @@ use reth_payload_primitives::{
 use reth_payload_validator::{cancun, prague, shanghai};
 use reth_primitives_traits::{Block as _, SealedBlock};
 use reth_provider::{CanonStateSubscriptions, EthStorage};
-use reth_rpc_eth_api::helpers::config::{EthConfigApiServer, EthConfigHandler};
 use reth_rpc_server_types::RethRpcModule;
 use reth_storage_api::{
     BlockIdReader, BlockNumReader, BlockReader, HeaderProvider, StateProviderFactory,
 };
-use reth_transaction_pool::{PoolTransaction, TransactionPool};
+use reth_transaction_pool::{
+    blobstore::DiskFileBlobStore, EthTransactionPool, PoolTransaction, TransactionPool,
+};
 use reth_unicity_execution::{
     block::BlockProfile,
     evm_factory::unicity_eth_config,
@@ -239,7 +240,7 @@ where
 {
     type ComponentsBuilder = ComponentsBuilder<
         N,
-        EthereumPoolBuilder,
+        UnicityPoolBuilder,
         BasicPayloadServiceBuilder<UnicityPayloadBuilderBuilder>,
         UnicityNetworkBuilder,
         UnicityExecutorBuilder,
@@ -250,7 +251,7 @@ where
     fn components_builder(&self) -> Self::ComponentsBuilder {
         ComponentsBuilder::default()
             .node_types::<N>()
-            .pool(EthereumPoolBuilder::default())
+            .pool(UnicityPoolBuilder)
             .executor(UnicityExecutorBuilder::new(self.execution_inputs.clone(), self.seal.b1))
             .payload(BasicPayloadServiceBuilder::new(UnicityPayloadBuilderBuilder::new(
                 self.registry.clone(),
@@ -278,6 +279,7 @@ where
         // read surface, and pruning task reuse the same cell.
         let store = self.companion_store.clone();
         let depth = self.retention.depth();
+        let seal = self.seal;
         let repair_limit = self.repair_limit;
         RpcAddOns::new(
             EthereumEthApiBuilder::default(),
@@ -308,19 +310,24 @@ where
                 ctx.modules
                     .merge_configured(unicity_rpc_module(provider.clone(), store.clone()))?;
 
-                // eth_config (EIP-7910), which the stock node registers in EthereumNode's
-                // launch_add_ons (crates/ethereum/node/src/node.rs) and this node otherwise loses
-                // by assembling its own add-ons. It is not optional here: a
-                // consensus client reads it to refuse an execution client whose
-                // loaded chain spec is not the one it expects, so a Unicity node
-                // without it is a node nothing will pair with. Same handler, same
-                // module guard, and the value is derived from this node's own provider and EVM
-                // config rather than restated, because the point of the check is to report the real
-                // loaded fork schedule.
+                let replay_provider = provider.clone();
+                let replay_store = store.clone();
+                ctx.node().evm_config().set_rpc_input_reader(Arc::new(move |block| {
+                    crate::recovery::retained_rpc_input(
+                        &replay_provider,
+                        &replay_store,
+                        seal,
+                        block,
+                    )
+                    .map_err(Into::into)
+                }));
+
                 ctx.modules.merge_if_module_configured(
                     RethRpcModule::Eth,
-                    EthConfigHandler::new(provider.clone(), ctx.node().evm_config().clone())
-                        .into_rpc(),
+                    crate::schedule_config::module(
+                        provider.clone(),
+                        ctx.node().evm_config().clone(),
+                    )?,
                 )?;
                 // The same stock function also registers the Flashbots `ValidationApi` and the
                 // hidden `TestingApi`, and this node deliberately keeps neither. Both are
@@ -334,11 +341,6 @@ where
                 // The stream fires on every canonical change, including reorgs, so the block
                 // cadence is the rate limit and no timer is needed. A failed pass is logged inside
                 // the task and never takes the node down.
-                // The activation-schedule operator view follows the canonical head the same way.
-                ctx.node().task_executor().spawn_task(crate::rules_head::run_rules_head_observer(
-                    provider.clone(),
-                    reth_unicity_execution::rules::UnicityRules::global(),
-                ));
                 ctx.node().task_executor().spawn_task(run_companion_pruner(
                     provider,
                     store,
@@ -348,6 +350,44 @@ where
                 Ok(())
             },
         )
+    }
+}
+
+/// Builds the Ethereum pool and refreshes its Prague admission rules from the canonical schedule.
+#[derive(Debug, Clone, Copy)]
+pub struct UnicityPoolBuilder;
+
+impl<N> PoolBuilder<N, UnicityNodeEvmConfig> for UnicityPoolBuilder
+where
+    N: FullNodeTypes<Types = UnicityNode>,
+    N::Provider: CanonStateSubscriptions,
+{
+    type Pool = EthTransactionPool<N::Provider, DiskFileBlobStore, UnicityNodeEvmConfig>;
+
+    async fn build_pool(
+        self,
+        ctx: &BuilderContext<N>,
+        evm_config: UnicityNodeEvmConfig,
+    ) -> eyre::Result<Self::Pool> {
+        let pool = EthereumPoolBuilder::default().build_pool(ctx, evm_config).await?;
+        let provider = ctx.provider().clone();
+        let rules = reth_unicity_execution::rules::UnicityRules::global();
+        let validation = pool.validator().clone();
+        let set_prague = move |active| {
+            validation
+                .validator()
+                .fork_tracker()
+                .prague
+                .store(active, std::sync::atomic::Ordering::Relaxed);
+        };
+        // Set admission before returning the pool to its callers. The observer subscribes and
+        // refreshes again once it starts, closing the gap between initialization and subscription.
+        if let Err(error) = crate::rules_head::update_pool(&provider, &rules, None, &set_prague) {
+            tracing::error!(target: "unicity::rules", %error, "could not initialize the pool activation spec");
+        }
+        ctx.task_executor()
+            .spawn_task(crate::rules_head::run_rules_head_observer(provider, rules, set_prague));
+        Ok(pool)
     }
 }
 

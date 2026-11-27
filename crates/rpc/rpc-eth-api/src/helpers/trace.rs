@@ -6,7 +6,6 @@ use alloy_consensus::{transaction::TxHashRef, BlockHeader};
 use alloy_primitives::B256;
 use alloy_rpc_types_eth::{BlockId, TransactionInfo};
 use futures::Future;
-use reth_errors::RethError;
 use reth_evm::{
     block::BlockExecutor, evm::EvmFactoryExt, tracing::TracingCtx, ConfigureEvm, Evm, EvmEnvFor,
     EvmFor, HaltReasonFor, InspectorFor, IntoTxEnv, TxEnvFor,
@@ -395,10 +394,7 @@ pub trait Trace: LoadState<Error: FromEvmError<Self::Evm>> + Call {
         block: &RecoveredBlock<ProviderBlock<Self::Provider>>,
         db: &mut StateCacheDb,
     ) -> Result<(), Self::Error> {
-        self.evm_config()
-            .executor_for_block(db, block.sealed_block())
-            .map_err(RethError::other)
-            .map_err(Self::Error::from_eth_err)?
+        self.rpc_executor_for_block(db, block.sealed_block())?
             .apply_pre_execution_changes()
             .map_err(Self::Error::from_eth_err)?;
         Ok(())

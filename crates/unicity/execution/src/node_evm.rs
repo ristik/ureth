@@ -17,7 +17,7 @@ use std::{
     convert::Infallible,
     error::Error,
     fmt,
-    sync::{Arc, Mutex, MutexGuard},
+    sync::{Arc, Mutex, MutexGuard, OnceLock},
 };
 
 use alloy_consensus::{Header, Transaction, TransactionEnvelope, TxReceipt};
@@ -35,8 +35,8 @@ use alloy_rpc_types_engine::ExecutionData;
 use reth_chainspec::ChainSpec;
 use reth_ethereum_primitives::{Block, EthPrimitives};
 use reth_evm::{
-    ConfigureEngineEvm, ConfigureEvm, EvmEnv, EvmEnvFor, ExecutableTxIterator, ExecutionCtxFor,
-    NextBlockEnvAttributes,
+    BlockExecutorForEvm, ConfigureEngineEvm, ConfigureEvm, EvmEnv, EvmEnvFor, ExecutableTxIterator,
+    ExecutionCtxFor, NextBlockEnvAttributes,
 };
 use reth_evm_ethereum::{EthBlockAssembler, RethReceiptBuilder};
 use reth_primitives_traits::{SealedBlock, SealedHeader};
@@ -308,6 +308,19 @@ fn commitment_from_extra_data(extra_data: &[u8]) -> Option<B256> {
     (extra_data.len() == 32).then(|| B256::from_slice(extra_data))
 }
 
+type RpcError = Box<dyn Error + Send + Sync>;
+type RetainedInputReader =
+    dyn Fn(&SealedBlock<Block>) -> Result<BoundExecutionInput, RpcError> + Send + Sync;
+
+#[derive(Clone)]
+struct RpcInputReader(Arc<RetainedInputReader>);
+
+impl fmt::Debug for RpcInputReader {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.debug_struct("RpcInputReader").finish_non_exhaustive()
+    }
+}
+
 /// Node-level EVM configuration that dispatches each seal block to its bound execution input.
 ///
 /// The build path uses a per-job `UnicityEvmConfig` supplied by the job resolver. This type is the
@@ -319,6 +332,7 @@ fn commitment_from_extra_data(extra_data: &[u8]) -> Option<B256> {
 #[derive(Clone, Debug)]
 pub struct UnicityNodeEvmConfig {
     inner: UnicityInnerEvmConfig,
+    rpc_input_reader: Arc<OnceLock<RpcInputReader>>,
     registry: UnicityBlockExecutionRegistry,
     executor_factory:
         UnicityNodeBlockExecutorFactory<RethReceiptBuilder, Arc<ChainSpec>, UnicityEvmFactory>,
@@ -329,12 +343,39 @@ impl UnicityNodeEvmConfig {
     pub fn new(inner: UnicityInnerEvmConfig, registry: UnicityBlockExecutionRegistry) -> Self {
         let executor_factory =
             UnicityNodeBlockExecutorFactory::new(inner.executor_factory.clone(), registry.clone());
-        Self { inner, registry, executor_factory }
+        Self { inner, registry, executor_factory, rpc_input_reader: Arc::default() }
     }
 
     /// Returns the execution-input registry shared with the import path.
     pub const fn registry(&self) -> &UnicityBlockExecutionRegistry {
         &self.registry
+    }
+
+    /// Installs the retained-input reader used only for RPC replays of evicted blocks.
+    pub fn set_rpc_input_reader(&self, reader: Arc<RetainedInputReader>) {
+        let _ = self.rpc_input_reader.set(RpcInputReader(reader));
+    }
+
+    /// The fixed chain-spec configuration, including the deployment's native precompiles.
+    pub const fn chain_evm_config(&self) -> &UnicityInnerEvmConfig {
+        &self.inner
+    }
+
+    /// Builds a read-only EVM environment for an explicitly resolved schedule spec.
+    pub fn rpc_env_with_spec(
+        &self,
+        header: &Header,
+        attributes: Option<&NextBlockEnvAttributes>,
+        spec: revm::primitives::hardfork::SpecId,
+    ) -> Result<EvmEnv, crate::rules::RuleError> {
+        let mut env = match attributes {
+            Some(attributes) => self.inner.next_evm_env(header, attributes),
+            None => self.inner.evm_env(header),
+        }
+        .map_err(|never: Infallible| match never {})?;
+        crate::rules::UnicityRules::check_chain_spec(env.cfg_env.spec)?;
+        crate::block_executor::apply_spec(&mut env, spec);
+        Ok(env)
     }
 
     fn bound_from_bytes(
@@ -390,6 +431,17 @@ impl ConfigureEvm for UnicityNodeEvmConfig {
         Ok(env)
     }
 
+    fn rpc_evm_env<DB: alloy_evm::Database>(
+        &self,
+        header: &Header,
+        attributes: Option<&Self::NextBlockEnvCtx>,
+        post_state: impl FnOnce() -> Result<DB, Box<dyn Error + Send + Sync>>,
+    ) -> Result<EvmEnv, Box<dyn Error + Send + Sync>> {
+        let spec =
+            crate::rules::assigned_spec(&mut post_state()?, &crate::rules::UnicityRules::global())?;
+        Ok(self.rpc_env_with_spec(header, attributes, spec)?)
+    }
+
     fn next_evm_env(
         &self,
         parent: &Header,
@@ -399,6 +451,30 @@ impl ConfigureEvm for UnicityNodeEvmConfig {
         // the attributes' commitment so a node-configured build cannot silently diverge.
         let bound = self.bound_from_bytes(&attributes.extra_data)?;
         self.per_block(bound).next_evm_env(parent, attributes).map_err(UnicityNodeEvmError::Binding)
+    }
+
+    fn rpc_executor_for_block<'a, DB: alloy_evm::Database, PostState: alloy_evm::Database>(
+        &'a self,
+        db: &'a mut revm::database::State<DB>,
+        block: &'a SealedBlock<Block>,
+        post_state: impl FnOnce() -> Result<PostState, RpcError>,
+    ) -> Result<BlockExecutorForEvm<'a, Self, DB>, RpcError> {
+        let env = self.rpc_evm_env(block.header(), None, post_state)?;
+        let bound = match self.bound_from_bytes(&block.header().extra_data) {
+            Ok(bound) => bound,
+            Err(UnicityNodeEvmError::MissingInput(_))
+                if let Some(reader) = self.rpc_input_reader.get() =>
+            {
+                Arc::new((reader.0)(block)?)
+            }
+            Err(error) => return Err(error.into()),
+        };
+        let context = self.per_block(bound.clone()).context_for_block(block)?;
+        let evm = self.evm_with_env(db, env);
+        Ok(UnicityBlockExecutor::new(
+            self.executor_factory.inner.create_executor(evm, context),
+            Some(bound),
+        ))
     }
 
     fn context_for_block<'a>(

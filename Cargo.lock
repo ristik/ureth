@@ -10845,6 +10845,7 @@ dependencies = [
  "futures-util",
  "jsonrpsee",
  "reth-basic-payload-builder",
+ "reth-chain-state",
  "reth-chainspec",
  "reth-consensus",
  "reth-consensus-common",

@@ -88,15 +88,19 @@ where
     }
 
     fn config(&self) -> Result<EthConfig, RethError> {
-        let chain_spec = self.provider.chain_spec();
         let latest = self
             .provider
             .latest_header()?
             .ok_or_else(|| ProviderError::BestBlockNotFound)?
             .into_header();
+        self.config_for_header(&latest)
+    }
 
+    /// Reads the chain configuration at the supplied head.
+    pub fn config_for_header(&self, latest: &Provider::Header) -> Result<EthConfig, RethError> {
+        let chain_spec = self.provider.chain_spec();
         let current_precompiles = evm_to_precompiles_map(
-            self.evm_config.evm_for_block(EmptyDB::default(), &latest).map_err(RethError::other)?,
+            self.evm_config.evm_for_block(EmptyDB::default(), latest).map_err(RethError::other)?,
         );
 
         let mut fork_timestamps =
@@ -141,7 +145,7 @@ where
 
         let last_fork_timestamp = fork_timestamps.last().copied().unwrap();
         let fake_header = {
-            let mut header = latest;
+            let mut header = latest.clone();
             header.set_timestamp(last_fork_timestamp);
             header
         };
@@ -169,7 +173,8 @@ where
     }
 }
 
-fn evm_to_precompiles_map(
+/// Reports the precompiles actually installed in the supplied EVM.
+pub fn evm_to_precompiles_map(
     evm: impl Evm<Precompiles = PrecompilesMap>,
 ) -> BTreeMap<String, Address> {
     let precompiles = evm.precompiles();

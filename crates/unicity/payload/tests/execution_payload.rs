@@ -1554,6 +1554,7 @@ struct CapturedRouteBlock {
     import_companion: SealCompanion,
     beacon_root: B256,
     completed: CompletedParent,
+    execution: reth_provider::BlockExecutionOutput<Receipt>,
     /// The EVM spec the build job's environment ran the block under.
     spec: revm::primitives::hardfork::SpecId,
 }
@@ -1747,6 +1748,7 @@ async fn capture_route_history_with(
             import_companion,
             beacon_root,
             completed,
+            execution: replay.output,
             spec,
         });
     }
@@ -5238,4 +5240,294 @@ async fn the_production_bind_sites_resolve_a_prague_rule_across_e() {
         let token = restored.get(&hash).expect("repair replayed the block");
         assert_eq!(token.for_local_storage(), captured.completed.for_local_storage(), "{hash}");
     }
+}
+
+#[tokio::test]
+async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyre::Result<()> {
+    use alloy_consensus::TxEip7702;
+    use alloy_eips::{eip2718::Encodable2718, eip7702::Authorization};
+    use jsonrpsee::{core::client::ClientT, rpc_params};
+    use reth_chain_state::{ExecutedBlock, NewCanonicalChain};
+    use reth_node_builder::{NodeBuilder, NodeHandle};
+    use reth_node_core::{
+        args::{NetworkArgs, RpcServerArgs},
+        node_config::NodeConfig,
+    };
+    use reth_rpc_server_types::RpcModuleSelection;
+    use reth_tasks::Runtime;
+    use reth_transaction_pool::error::InvalidPoolTransactionError;
+    use reth_unicity_execution::{
+        rules::{rule_id, schedule_storage, EntryState, ScheduleEntry, PRAGUE_TEST_RULE_NAME},
+        testing::NOTHING,
+        VALIDATOR_REGISTRY,
+    };
+    use reth_unicity_store::StoredAccounting;
+    use revm::{
+        database::BundleState,
+        state::{AccountInfo, Bytecode},
+    };
+    use serde_json::{json, Value};
+
+    let storage = schedule_storage(&[ScheduleEntry {
+        rule_id: rule_id(PRAGUE_TEST_RULE_NAME),
+        release_digest: B256::repeat_byte(0xd1),
+        root_epoch: 2,
+        not_before_uc_time: 0,
+        state: EntryState::Active,
+        change_id: 1,
+    }]);
+    let history =
+        capture_route_history_with(&[(1, 1, false), (2, 1, false), (3, 2, false)], |state| {
+            state.insert_contract(
+                VALIDATOR_REGISTRY,
+                alloy_primitives::Bytes::from_static(NOTHING),
+                &storage,
+            )
+        })
+        .await;
+    let (_, genesis, root, _, context, validator) = seal_fixture();
+    let unicity = UnicityNode::new(SealJobRegistry::new(), context.seal);
+    let companion_store = unicity.companion_store().clone();
+    let mut network = NetworkArgs::default().with_unused_ports();
+    network.discovery.disable_discovery = true;
+    network.discovery.disable_dns_discovery = true;
+    let config = NodeConfig::test()
+        .with_chain(history.chain_spec.clone())
+        .with_network(network)
+        .with_unused_ports()
+        .with_rpc(
+            RpcServerArgs::default()
+                .with_unused_ports()
+                .with_http()
+                .with_http_api(RpcModuleSelection::All),
+        );
+    let NodeHandle { node, node_exit_future: _ } =
+        NodeBuilder::new(config).testing_node(Runtime::test()).node(unicity).launch().await?;
+    let client = node.add_ons_handle.rpc_server_handles.rpc.http_client().unwrap();
+    let store = companion_store.get().unwrap();
+    let canonical = node.provider.canonical_in_memory_state();
+    let execute_fixture = |captured: &CapturedRouteBlock, output| {
+        let block = captured.payload.block();
+        let recovered =
+            RecoveredBlock::try_new(block.clone().into_block(), vec![], block.hash()).unwrap();
+        ExecutedBlock::new(Arc::new(recovered), Arc::new(output), Default::default())
+    };
+    let install = |captured: &CapturedRouteBlock, output| {
+        let block = captured.payload.block();
+        let update = NewCanonicalChain::Commit { new: vec![execute_fixture(captured, output)] };
+        let notification = update.to_chain_notification();
+        canonical.update_chain(update);
+        canonical.set_canonical_head(block.clone().into_sealed_header());
+        canonical.notify_canon_state(notification);
+        store.put(block.hash(), block.header().number, &captured.companion).unwrap();
+        store
+            .put_accounting(StoredAccounting {
+                chain_id: history.chain_spec.chain.id(),
+                genesis_hash: genesis_hash(),
+                block_number: block.header().number,
+                accounting: captured.completed.for_local_storage(),
+            })
+            .unwrap();
+    };
+
+    // The signed fixture genesis is pinned. Materialize the injected schedule in the test node's
+    // first state overlay before advancing the real RPC provider over the captured blocks.
+    let code = Bytecode::new_raw(alloy_primitives::Bytes::from_static(NOTHING));
+    let mut first = history.blocks[0].execution.clone();
+    first.state.extend(BundleState::new(
+        [(
+            VALIDATOR_REGISTRY,
+            None,
+            Some(AccountInfo {
+                code_hash: code.hash_slow(),
+                code: Some(code.clone()),
+                ..Default::default()
+            }),
+            storage.iter().map(|(slot, word)| (*slot, (U256::ZERO, *word))).collect(),
+        )],
+        [[(VALIDATOR_REGISTRY, Some(None), [])]],
+        [(code.hash_slow(), code)],
+    ));
+    install(&history.blocks[0], first);
+    install(&history.blocks[1], history.blocks[1].execution.clone());
+
+    let gas_price = 10_000_000_000;
+    let authorization =
+        Authorization { chain_id: U256::from(1337), address: Address::repeat_byte(0xde), nonce: 0 };
+    let auth_signature =
+        sign_message(B256::with_last_byte(2), authorization.signature_hash()).unwrap();
+    let to = Address::repeat_byte(0x42);
+    let tx7702 = Transaction::Eip7702(TxEip7702 {
+        chain_id: 1337,
+        nonce: 0,
+        gas_limit: 100_000,
+        max_fee_per_gas: gas_price,
+        max_priority_fee_per_gas: 1,
+        to,
+        value: U256::ZERO,
+        access_list: Default::default(),
+        authorization_list: vec![authorization.into_signed(auth_signature)],
+        input: Default::default(),
+    });
+    let data = alloy_primitives::Bytes::from(vec![1; 100]);
+    let below_floor = Transaction::Legacy(TxLegacy {
+        chain_id: Some(1337),
+        nonce: 0,
+        gas_price,
+        gas_limit: 23_000,
+        to: TxKind::Call(to),
+        value: U256::ZERO,
+        input: data.clone(),
+    });
+    let signed = |tx: Transaction| {
+        let signature = sign_message(B256::with_last_byte(1), tx.signature_hash()).unwrap();
+        TransactionSigned::new_unhashed(tx, signature)
+    };
+    let raw = alloy_primitives::Bytes::from(signed(tx7702).encoded_2718());
+    let floor_tx =
+        EthPooledTransaction::new(signed(below_floor).try_into_recovered().unwrap(), 200);
+    let pool_validator = node.pool.validator().validator();
+    let validate_floor =
+        || pool_validator.validate_one(TransactionOrigin::External, floor_tx.clone());
+
+    let request = json!({ "to": to, "data": data, "gas": "0x59d8" });
+    let estimate = json!({ "to": to, "data": data });
+    let e_minus_one = json!({ "blockHash": history.blocks[1].payload.block().hash() });
+    let cancun_estimate: U256 = client
+        .request("eth_estimateGas", rpc_params![estimate.clone(), e_minus_one.clone()])
+        .await?;
+    // The estimator permits a 1.5% overestimate. The explicit 23,000-gas call pins acceptance
+    // below the Prague floor independently of that tolerance.
+    assert!(cancun_estimate >= U256::from(22_600) && cancun_estimate < U256::from(23_000));
+    for at in [e_minus_one.clone(), json!("latest"), json!("pending")] {
+        assert_eq!(
+            client
+                .request::<String, _>("eth_call", rpc_params![request.clone(), at.clone()])
+                .await?,
+            "0x"
+        );
+        let gas: U256 =
+            client.request("eth_estimateGas", rpc_params![estimate.clone(), at]).await?;
+        assert_eq!(gas, cancun_estimate);
+    }
+
+    let before: Value = client.request("eth_config", rpc_params![]).await?;
+    assert_eq!(before["current"]["activationTime"], 0);
+    assert!(before["current"]["precompiles"].get("BLS12_G1ADD").is_none());
+    assert_eq!(before["next"], before["last"]);
+    assert_eq!(before["next"]["activationRootEpoch"], 2);
+    assert_eq!(
+        before["next"]["precompiles"]["BLS12_G1ADD"],
+        format!("{:#x}", Address::with_last_byte(11))
+    );
+    let refusal = client
+        .request::<B256, _>("eth_sendRawTransaction", rpc_params![raw.clone()])
+        .await
+        .unwrap_err();
+    assert!(refusal.to_string().contains("transaction type not supported"), "{refusal}");
+    assert!(validate_floor().is_valid());
+
+    let ack = &history.blocks[2];
+    let e = json!({ "blockHash": ack.payload.block().hash() });
+
+    // Register the exact production-bound input before publishing the block, then evict it after
+    // the first RPC queries. Use a fake engine because the test only installs already replayed
+    // state.
+    let mut import = context.clone();
+    import.state.parent_accounting = UnicityParentAccountings::default();
+    for parent in &history.blocks[..2] {
+        import.parent_accounting.insert_for_chain(
+            parent.payload.block().hash(),
+            parent.completed,
+            1337,
+            genesis_hash(),
+        );
+    }
+    import.state.execution_inputs = node.evm_config.registry().clone();
+    let (engine, _) = fake_engine(PayloadStatus::from_status(PayloadStatusEnum::Valid)).await;
+    let handler = seal_import_handler(ack.client.clone(), import, validator, engine);
+    let status = handler
+        .new_payload_with_seal(
+            ack.execution_payload.clone(),
+            vec![],
+            ack.beacon_root,
+            &ack.import_companion,
+        )
+        .await?;
+    assert!(status.is_valid(), "{status:?}");
+    let commitment = ack.root.input_commitment().unwrap();
+
+    canonical.set_pending_block(execute_fixture(ack, ack.execution.clone()));
+    let prague_estimate: U256 =
+        client.request("eth_estimateGas", rpc_params![estimate.clone(), "pending"]).await?;
+    assert!(prague_estimate >= U256::from(25_000) && prague_estimate < U256::from(25_400));
+    for at in ["latest", "pending"] {
+        let gas: U256 =
+            client.request("eth_estimateGas", rpc_params![estimate.clone(), at]).await?;
+        assert_eq!(gas, prague_estimate);
+    }
+    let gas: U256 = client
+        .request("eth_estimateGas", rpc_params![estimate.clone(), e_minus_one.clone()])
+        .await?;
+    assert_eq!(gas, cancun_estimate);
+
+    install(ack, ack.execution.clone());
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        while !pool_validator.fork_tracker().is_prague_activated() {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+    assert!(matches!(
+        validate_floor().as_invalid(),
+        Some(InvalidPoolTransactionError::IntrinsicGasTooLow)
+    ));
+    client.request::<B256, _>("eth_sendRawTransaction", rpc_params![raw]).await?;
+
+    for at in [e.clone(), json!("latest"), json!("pending")] {
+        assert!(client
+            .request::<String, _>("eth_call", rpc_params![request.clone(), at.clone()])
+            .await
+            .is_err());
+        let gas: U256 =
+            client.request("eth_estimateGas", rpc_params![estimate.clone(), at]).await?;
+        assert_eq!(gas, prague_estimate);
+    }
+    let at_floor = json!({ "to": to, "data": data, "gas": "0x61a8" });
+    assert_eq!(
+        client.request::<String, _>("eth_call", rpc_params![at_floor, e.clone()]).await?,
+        "0x"
+    );
+
+    let after: Value = client.request("eth_config", rpc_params![]).await?;
+    assert_eq!(after["current"], before["current"]);
+    assert_eq!(after["next"], Value::Null);
+    assert_eq!(after["last"], Value::Null);
+    assert_eq!(after["unicityActive"], before["next"]);
+
+    let registry = node.evm_config.registry();
+    assert!(registry.get(&commitment).is_some());
+    let replay: Value =
+        client.request("debug_traceBlockByHash", rpc_params![ack.payload.block().hash()]).await?;
+    for byte in 1..=registry.capacity() as u8 {
+        let other = bound_input(&root_with_tree_root(&root, B256::repeat_byte(byte)), &genesis);
+        registry.insert(other.root_input().input_commitment().unwrap(), other)?;
+    }
+    assert!(registry.get(&commitment).is_none());
+    assert!(client
+        .request::<String, _>("eth_call", rpc_params![request.clone(), e.clone()])
+        .await
+        .is_err());
+    let gas: U256 = client.request("eth_estimateGas", rpc_params![estimate.clone(), e]).await?;
+    assert_eq!(gas, prague_estimate);
+    let retained: Value =
+        client.request("debug_traceBlockByHash", rpc_params![ack.payload.block().hash()]).await?;
+    assert_eq!(retained, replay);
+    assert_eq!(
+        client.request::<String, _>("eth_call", rpc_params![request, e_minus_one.clone()]).await?,
+        "0x"
+    );
+    let gas: U256 = client.request("eth_estimateGas", rpc_params![estimate, e_minus_one]).await?;
+    assert_eq!(gas, cancun_estimate);
+    Ok(())
 }
