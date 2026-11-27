@@ -16,8 +16,8 @@
 use std::sync::{Arc, OnceLock};
 
 use alloy_primitives::Address;
-use alloy_rpc_types_engine::ExecutionData;
-use reth_chainspec::{ChainSpec, ChainSpecProvider};
+use alloy_rpc_types_engine::{ExecutionData, PayloadError};
+use reth_chainspec::{ChainSpec, ChainSpecProvider, EthereumHardforks};
 use reth_engine_primitives::{EngineApiValidator, PayloadValidator};
 use reth_ethereum_payload_builder::{EthereumBuilderConfig, EthereumExecutionPayloadValidator};
 use reth_ethereum_primitives::{Block, EthPrimitives, TransactionSigned};
@@ -36,7 +36,8 @@ use reth_payload_primitives::{
     validate_execution_requests, validate_version_specific_fields, EngineApiMessageVersion,
     EngineObjectValidationError, NewPayloadError, PayloadOrAttributes,
 };
-use reth_primitives_traits::SealedBlock;
+use reth_payload_validator::{cancun, prague, shanghai};
+use reth_primitives_traits::{Block as _, SealedBlock};
 use reth_provider::{CanonStateSubscriptions, EthStorage};
 use reth_rpc_eth_api::helpers::config::{EthConfigApiServer, EthConfigHandler};
 use reth_rpc_server_types::RethRpcModule;
@@ -583,8 +584,48 @@ impl PayloadValidator<UnicityEngineTypes> for UnicityEngineValidator {
         &self,
         payload: ExecutionData,
     ) -> Result<SealedBlock<Self::Block>, NewPayloadError> {
-        self.inner.ensure_well_formed_payload(payload).map_err(Into::into)
+        ensure_well_formed_seal_payload(self.chain_spec(), payload).map_err(Into::into)
     }
+}
+
+/// reth's `ensure_well_formed_payload` with one check left to execution: EIP-7702 (type-4)
+/// transactions.
+///
+/// The stock check refuses a type-4 transaction unless the chain spec schedules Prague. A Unicity
+/// chain spec never moves past Cancun; the EVM spec, and with it which transaction types are valid,
+/// comes from the activation schedule in the parent state (bft-core#1230), which this stateless
+/// layer cannot read. The executor runs every block under that spec, and revm refuses a type-4
+/// transaction under a pre-Prague spec, so the block is still refused before the rule's epoch, on
+/// build, import and replay alike. Every other check stays: the hash, the Shanghai and Cancun
+/// fields, and no Prague sidecar (requests) while the chain spec has no Prague.
+pub fn ensure_well_formed_seal_payload(
+    chain_spec: &ChainSpec,
+    payload: ExecutionData,
+) -> Result<SealedBlock<Block>, PayloadError> {
+    let ExecutionData { payload, sidecar } = payload;
+    let expected_hash = payload.block_hash();
+    let sealed_block = payload.try_into_block_with_sidecar(&sidecar)?.seal_slow();
+    if expected_hash != sealed_block.hash() {
+        return Err(PayloadError::BlockHash {
+            execution: sealed_block.hash(),
+            consensus: expected_hash,
+        });
+    }
+    let timestamp = sealed_block.timestamp;
+    shanghai::ensure_well_formed_fields(
+        sealed_block.body(),
+        chain_spec.is_shanghai_active_at_timestamp(timestamp),
+    )?;
+    cancun::ensure_well_formed_fields(
+        &sealed_block,
+        sidecar.cancun(),
+        chain_spec.is_cancun_active_at_timestamp(timestamp),
+    )?;
+    prague::ensure_well_formed_sidecar_fields(
+        sidecar.prague(),
+        chain_spec.is_prague_active_at_timestamp(timestamp),
+    )?;
+    Ok(sealed_block)
 }
 
 impl EngineApiValidator<UnicityEngineTypes> for UnicityEngineValidator {

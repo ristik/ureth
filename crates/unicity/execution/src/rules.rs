@@ -10,7 +10,10 @@
 //!   Latched entry with `E <= E_b` that this binary does not know refuses the block with
 //!   [`UpgradeRequired`], at every site that executes, validates or builds a block.
 //! - Chain-spec timestamp forks stay at the genesis spec ([`GENESIS_SPEC`], Cancun). Nothing in the
-//!   chain spec, and no unknown rule, ever selects another spec.
+//!   chain spec, and no unknown rule, ever selects another spec. A known active rule may: the
+//!   highest spec of the known rules in force is the spec the whole block runs under, ordinary
+//!   transactions included (bft-core#1230), within [`SUPPORTED_SPECS`]. The block profile (header
+//!   shape, the chain-spec system contracts, the V3 Engine API) stays Cancun's.
 //! - Entries that the binary lacks but that are not yet in force warn ahead of `E`: a log line and
 //!   the gauge `unicity_upgrade_required{rule,epoch}`.
 //!
@@ -31,6 +34,10 @@ pub const RULE_PREFIX: &str = "unicity.rule/";
 pub const MAX_ACTIVATIONS: u32 = 64;
 /// The spec every Unicity block runs under unless a known active rule says otherwise.
 pub const GENESIS_SPEC: SpecId = SpecId::CANCUN;
+/// The EVM specs a rule may select. Osaka and later are out: Osaka's P256VERIFY precompile sits at
+/// `0x0100`, the B1 certificate batch's address, and its header and transaction caps are not part
+/// of the fixed block profile.
+pub const SUPPORTED_SPECS: [SpecId; 2] = [SpecId::CANCUN, SpecId::PRAGUE];
 
 /// Name of the harmless test rule. It changes nothing in execution; it exists so an activation can
 /// be scheduled, observed and refused end to end (see `briefs/vt07-test-rule.md`).
@@ -183,7 +190,8 @@ impl fmt::Display for UpgradeRequired {
 pub enum RuleError {
     /// An effective or latched rule at or before the block's epoch is unknown.
     UpgradeRequired(UpgradeRequired),
-    /// The EVM environment is not the genesis spec (a chain-spec fork tried to move it).
+    /// The chain-spec environment is not the genesis spec (a chain-spec fork tried to move it), or
+    /// the known rules select a spec outside [`SUPPORTED_SPECS`].
     UnsupportedSpec(String),
     /// The registry's schedule is malformed.
     Schedule(&'static str),
@@ -195,9 +203,11 @@ impl fmt::Display for RuleError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::UpgradeRequired(u) => u.fmt(f),
-            Self::UnsupportedSpec(s) => {
-                write!(f, "only the fixed Cancun profile is supported, found {s}")
-            }
+            Self::UnsupportedSpec(s) => write!(
+                f,
+                "unsupported EVM spec {s}: the chain spec stays at the Cancun genesis profile and \
+                 a rule selects only Cancun or Prague"
+            ),
             Self::Schedule(why) => write!(f, "malformed activation schedule: {why}"),
             Self::Database(e) => write!(f, "activation schedule read failed: {e}"),
         }
@@ -555,10 +565,19 @@ impl UnicityRules {
 }
 
 fn finish(resolution: Resolution) -> Result<Resolution, RuleError> {
-    match resolution.refusal {
-        Some(u) => Err(RuleError::UpgradeRequired(u)),
-        None => Ok(resolution),
+    if let Some(u) = resolution.refusal {
+        return Err(RuleError::UpgradeRequired(u));
     }
+    check_supported_spec(resolution.spec)?;
+    Ok(resolution)
+}
+
+/// Refuses a resolved spec outside [`SUPPORTED_SPECS`].
+pub fn check_supported_spec(spec: SpecId) -> Result<(), RuleError> {
+    if !SUPPORTED_SPECS.contains(&spec) {
+        return Err(RuleError::UnsupportedSpec(format!("{spec:?}")));
+    }
+    Ok(())
 }
 
 /// The storage words of a registry holding `entries`, by the frozen layout (test support).
@@ -831,6 +850,25 @@ mod tests {
         let entries = [entry("a", 1, EntryState::Active, 1), entry("b", 5, EntryState::Active, 2)];
         assert_eq!(evaluate(&entries, &known, 4).spec, SpecId::CANCUN);
         assert_eq!(evaluate(&entries, &known, 5).spec, SpecId::PRAGUE);
+    }
+
+    /// A known rule may move the spec to Prague and no further: Osaka's precompile set collides
+    /// with the B1 addresses, so a binary that knew such a rule still refuses the block.
+    #[test]
+    fn a_known_rule_selects_prague_but_not_osaka() {
+        let known = vec![
+            KnownRule { name: "p", id: rule_id("p"), spec: SpecId::PRAGUE },
+            KnownRule { name: "o", id: rule_id("o"), spec: SpecId::OSAKA },
+        ];
+        let rules = UnicityRules::with_known(known);
+        let mut db =
+            seed(&[entry("p", 5, EntryState::Active, 1), entry("o", 9, EntryState::Active, 2)]);
+        assert_eq!(rules.resolve(&mut db, VR, 4).unwrap().0, SpecId::CANCUN);
+        assert_eq!(rules.resolve(&mut db, VR, 5).unwrap().0, SpecId::PRAGUE, "E is inclusive");
+        assert_eq!(rules.resolve(&mut db, VR, 8).unwrap().0, SpecId::PRAGUE);
+        assert!(matches!(rules.resolve(&mut db, VR, 9), Err(RuleError::UnsupportedSpec(_))));
+        assert!(check_supported_spec(SpecId::CANCUN).is_ok());
+        assert!(check_supported_spec(SpecId::SHANGHAI).is_err());
     }
 
     #[cfg(not(feature = "no-test-rule"))]

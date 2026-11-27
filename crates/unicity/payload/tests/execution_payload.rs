@@ -5046,3 +5046,86 @@ async fn vr_recovery_admits_retained_head_with_pruned_older_fee_state() {
     assert!(!restored.is_admitted(&first_hash));
     assert!(!provider.state_reads.lock().unwrap().contains(&first_hash));
 }
+
+/// bft-core#1230: the engine validator leaves type-4 (EIP-7702) transactions to execution. A
+/// Unicity chain spec never schedules Prague, so the stock structural check would refuse every
+/// type-4 transaction even after the activation schedule moves the EVM to Prague; the executor
+/// refuses one under a pre-Prague spec instead. A Prague sidecar (execution requests) stays
+/// refused.
+#[test]
+fn the_engine_validator_leaves_type_4_transactions_to_the_resolved_spec() {
+    use alloy_consensus::{proofs::calculate_transaction_root, TxEip7702};
+    use alloy_eips::eip7702::Authorization;
+    use alloy_rpc_types_engine::{
+        CancunPayloadFields, ExecutionPayload, ExecutionPayloadSidecar, PraguePayloadFields,
+    };
+    use reth_engine_primitives::PayloadValidator;
+    use reth_ethereum_payload_builder::EthereumExecutionPayloadValidator;
+
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let chain_id = client.chain_spec().chain.id();
+    let authorization = Authorization {
+        chain_id: U256::from(chain_id),
+        address: Address::repeat_byte(0xde),
+        nonce: 0,
+    };
+    let auth_signature =
+        sign_message(B256::with_last_byte(2), authorization.signature_hash()).unwrap();
+    let transaction = Transaction::Eip7702(TxEip7702 {
+        chain_id,
+        nonce: 0,
+        gas_limit: 100_000,
+        max_fee_per_gas: 10_000_000_000,
+        max_priority_fee_per_gas: 1,
+        to: Address::repeat_byte(0x42),
+        value: U256::ZERO,
+        access_list: Default::default(),
+        authorization_list: vec![authorization.into_signed(auth_signature)],
+        input: Default::default(),
+    });
+    let signature = sign_message(B256::with_last_byte(1), transaction.signature_hash()).unwrap();
+    let mut block = payload.block().clone().into_block();
+    block.body.transactions = vec![TransactionSigned::new_unhashed(transaction, signature)];
+    block.header.transactions_root = calculate_transaction_root(&block.body.transactions);
+    let hash = block.header.hash_slow();
+    let beacon_root = block.header.parent_beacon_block_root.unwrap();
+    let data = |prague: bool| {
+        let cancun =
+            CancunPayloadFields { parent_beacon_block_root: beacon_root, versioned_hashes: vec![] };
+        // with a Prague sidecar the block carries its requests hash, so the payload's own hash
+        // check passes and the sidecar check is the one that answers
+        let mut block = block.clone();
+        if prague {
+            block.header.requests_hash = Some(alloy_eips::eip7685::EMPTY_REQUESTS_HASH);
+        }
+        let hash = block.header.hash_slow();
+        ExecutionData {
+            payload: ExecutionPayload::V3(ExecutionPayloadV3::from_block_unchecked(hash, &block)),
+            sidecar: if prague {
+                ExecutionPayloadSidecar::v4(
+                    cancun,
+                    PraguePayloadFields::new(Vec::<alloy_primitives::Bytes>::new()),
+                )
+            } else {
+                ExecutionPayloadSidecar::v3(cancun)
+            },
+        }
+    };
+
+    let stock = EthereumExecutionPayloadValidator::new(client.chain_spec())
+        .ensure_well_formed_payload::<TransactionSigned>(data(false))
+        .unwrap_err();
+    assert!(
+        matches!(
+            stock,
+            alloy_rpc_types_engine::PayloadError::PrePragueBlockWithEip7702Transactions
+        ),
+        "{stock:?}"
+    );
+    let converted = validator.convert_payload_to_block(data(false)).unwrap();
+    assert_eq!(converted.hash(), hash);
+    assert!(converted.body().transactions[0].is_eip7702());
+    let refused = validator.convert_payload_to_block(data(true)).unwrap_err();
+    assert!(refused.to_string().to_lowercase().contains("requests"), "{refused}");
+}
