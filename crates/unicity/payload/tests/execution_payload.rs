@@ -1554,6 +1554,8 @@ struct CapturedRouteBlock {
     import_companion: SealCompanion,
     beacon_root: B256,
     completed: CompletedParent,
+    /// The EVM spec the build job's environment ran the block under.
+    spec: revm::primitives::hardfork::SpecId,
 }
 
 struct CapturedRouteHistory {
@@ -1573,7 +1575,17 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
 
 /// The same capture for an arbitrary schedule of `(round, root epoch, paid)` blocks.
 async fn capture_route_history(schedule: &[(u64, u64, bool)]) -> CapturedRouteHistory {
-    let (genesis_client, mut parent, _, _, mut context, validator) = seal_fixture();
+    capture_route_history_with(schedule, |_| {}).await
+}
+
+/// [`capture_route_history`] over a genesis state that `setup` adjusts first (for example a VR
+/// activation schedule).
+async fn capture_route_history_with(
+    schedule: &[(u64, u64, bool)],
+    setup: impl FnOnce(&mut FixtureProvider),
+) -> CapturedRouteHistory {
+    let (mut genesis_client, mut parent, _, _, mut context, validator) = seal_fixture();
+    setup(&mut genesis_client.state);
     let chain_spec = genesis_client.chain_spec.clone();
     let genesis_state = genesis_client.state.clone();
     let (dir, store) = temp_store();
@@ -1678,6 +1690,7 @@ async fn capture_route_history(schedule: &[(u64, u64, bool)]) -> CapturedRouteHi
         };
 
         let evm = context.registry.resolve(&config).unwrap();
+        let spec = evm.evm_env(payload.block().header()).unwrap().cfg_env.spec;
         let parent_state = state.clone();
         let recovered = RecoveredBlock::try_new(
             payload.block().clone().into_block(),
@@ -1734,6 +1747,7 @@ async fn capture_route_history(schedule: &[(u64, u64, bool)]) -> CapturedRouteHi
             import_companion,
             beacon_root,
             completed,
+            spec,
         });
     }
 
@@ -5128,4 +5142,100 @@ fn the_engine_validator_leaves_type_4_transactions_to_the_resolved_spec() {
     assert!(converted.body().transactions[0].is_eip7702());
     let refused = validator.convert_payload_to_block(data(true)).unwrap_err();
     assert!(refused.to_string().to_lowercase().contains("requests"), "{refused}");
+}
+
+/// bft-core#1230: the three production sites that bind a job resolve its spec from the parent
+/// state through the process-wide resolver. A test-only build (`test-prague-rule`) knows a rule
+/// that selects Prague, scheduled here from root epoch 2. The captured chain crosses it: two
+/// Cancun blocks in epoch 1, then the acknowledgement into epoch 2, the first Prague block.
+/// - build (`prepare_seal_build`): the job's environment is Prague at the acknowledgement;
+/// - import (`new_payload_with_seal`): the follower replays every block, and registers the
+///   acknowledgement's input with the Prague spec for the engine;
+/// - restart repair (`admit_recovered_head` and its `repair_accounting`): replays the whole chain
+///   across the boundary.
+/// Without the resolution at any one of these sites the executor's guard refuses the Prague block
+/// ("resolves spec PRAGUE but the block environment is CANCUN"), and this test fails.
+#[tokio::test]
+async fn the_production_bind_sites_resolve_a_prague_rule_across_e() {
+    use reth_unicity_execution::{
+        rules::{rule_id, schedule_storage, EntryState, ScheduleEntry, PRAGUE_TEST_RULE_NAME},
+        testing::NOTHING,
+        VALIDATOR_REGISTRY,
+    };
+    use revm::primitives::hardfork::SpecId;
+    let entry = ScheduleEntry {
+        rule_id: rule_id(PRAGUE_TEST_RULE_NAME),
+        release_digest: B256::repeat_byte(0xd1),
+        root_epoch: 2,
+        not_before_uc_time: 0,
+        state: EntryState::Active,
+        change_id: 1,
+    };
+    let history =
+        capture_route_history_with(&[(1, 1, true), (2, 1, false), (3, 2, false)], |state| {
+            state.insert_contract(
+                VALIDATOR_REGISTRY,
+                alloy_primitives::Bytes::from_static(NOTHING),
+                &schedule_storage(&[entry]),
+            )
+        })
+        .await;
+    // build
+    let specs: Vec<_> = history.blocks.iter().map(|block| block.spec).collect();
+    assert_eq!(specs, vec![SpecId::CANCUN, SpecId::CANCUN, SpecId::PRAGUE]);
+    assert_eq!(history.blocks[2].root.origin.root_epoch, 2);
+
+    // import
+    let (_, _, _, _, mut follower_context, validator) = seal_fixture();
+    let (_follower_dir, follower_store) = temp_store();
+    follower_context.store = follower_store;
+    for (captured, spec) in history.blocks.iter().zip(&specs) {
+        let (engine, _seen) = fake_engine(PayloadStatus::new(
+            PayloadStatusEnum::Valid,
+            Some(declared_block_hash(&captured.execution_payload)),
+        ))
+        .await;
+        let handler = seal_import_handler(
+            captured.client.clone(),
+            follower_context.clone(),
+            validator.clone(),
+            engine,
+        );
+        let status = handler
+            .new_payload_with_seal(
+                captured.execution_payload.clone(),
+                vec![],
+                captured.beacon_root,
+                &captured.import_companion,
+            )
+            .await
+            .unwrap();
+        assert!(status.is_valid(), "round {}: {status:?}", captured.root.authorized_round);
+        let commitment = captured.root.input_commitment().unwrap();
+        let registered = follower_context.execution_inputs.get(&commitment).unwrap();
+        assert_eq!(registered.env_spec(), *spec, "the engine executes the import's spec");
+    }
+
+    // restart repair
+    let provider = history.recovery_provider(history.blocks.len());
+    let restored = UnicityParentAccountings::default();
+    reth_unicity_payload::recovery::admit_recovered_head(
+        &provider,
+        &history.store,
+        &restored,
+        UnicitySealConfig {
+            profile: profile(),
+            fee_collector: FEE_COLLECTOR,
+            pins: pair_pins(),
+            b1: b1::context(),
+        },
+        &history.blocks[2].import_companion.pair_binding,
+        3,
+    )
+    .unwrap();
+    for captured in &history.blocks {
+        let hash = captured.payload.block().hash();
+        let token = restored.get(&hash).expect("repair replayed the block");
+        assert_eq!(token.for_local_storage(), captured.completed.for_local_storage(), "{hash}");
+    }
 }

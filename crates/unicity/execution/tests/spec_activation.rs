@@ -92,6 +92,11 @@ struct Companion {
 
 impl Pair {
     fn genesis(rules: UnicityRules) -> Self {
+        Self::genesis_at(rules, E)
+    }
+
+    /// A pair whose genesis schedules the Prague rule from root epoch `e`.
+    fn genesis_at(rules: UnicityRules, e: u64) -> Self {
         let genesis: Genesis =
             serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
         let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
@@ -101,7 +106,7 @@ impl Pair {
         let schedule = [ScheduleEntry {
             rule_id: rule_id(RULE),
             release_digest: B256::repeat_byte(0xd1),
-            root_epoch: E,
+            root_epoch: e,
             not_before_uc_time: 0,
             state: EntryState::Active,
             change_id: 1,
@@ -456,4 +461,72 @@ fn a_binary_without_the_rule_refuses_from_e() {
         .unwrap_err()
         .to_string();
     assert!(err.contains("UpgradeRequired"), "{err}");
+}
+
+/// A peer's block that carries a type-4 transaction before `E` is refused by an honest follower,
+/// on import replay and on the engine's node-level executor, before the state-root comparison. The
+/// block comes from a dishonest builder whose state schedules Prague from epoch 1; the honest
+/// follower's schedule says `E`. This pins the safety argument for leaving type-4 transactions to
+/// execution in the engine validator.
+#[test]
+fn a_peer_type4_block_before_e_is_refused_by_replay_and_engine() {
+    let mut dishonest = Pair::genesis_at(knowing(), 1);
+    let bad = dishonest.build(1, E - 1, vec![dishonest.delegation()]);
+    assert_eq!(bad.block.body().transactions.len(), 1);
+    assert!(bad.block.body().transactions[0].is_eip7702());
+
+    let honest = Pair::genesis(knowing());
+    let config = honest.config(&bad.input, &bad.job);
+    assert_eq!(config.evm_env(bad.block.header()).unwrap().cfg_env.spec, SpecId::CANCUN);
+    let err = replay_complete(&config, honest.state.clone(), &honest.state, &bad.block)
+        .unwrap_err()
+        .to_string();
+    assert!(err.to_lowercase().contains("7702"), "{err}");
+    assert!(!err.contains("state root"), "refused before the state-root comparison: {err}");
+
+    let registry = UnicityBlockExecutionRegistry::default();
+    let bound = Arc::new(honest.bound(&bad.input, &bad.job));
+    registry.insert(bad.input.input_commitment().unwrap(), bound).unwrap();
+    let node = UnicityNodeEvmConfig::new(honest.inner_config(), registry);
+    let block = bad.block.clone().into_sealed_block();
+    let (payload, sidecar) =
+        ExecutionPayload::from_block_unchecked(block.hash(), &block.into_block());
+    let env = node.evm_env_for_payload(&ExecutionData { payload, sidecar }).unwrap();
+    assert_eq!(env.cfg_env.spec, SpecId::CANCUN);
+    let err = node.executor(honest.state).execute(&bad.block).unwrap_err().to_string();
+    assert!(err.to_lowercase().contains("7702"), "{err}");
+}
+
+/// A reorg across `E`: two siblings on one parent in `E - 1`. One stays in `E - 1` and runs
+/// Cancun; the other acknowledges `E` and runs Prague. Each branch resolves its own spec from the
+/// same parent and epoch alone: the Cancun branch still refuses the type-4 transaction, the Prague
+/// branch executes it, and each follower agrees with its builder.
+#[test]
+fn sibling_blocks_across_e_resolve_per_branch() {
+    let mut a = Pair::genesis(knowing());
+    let one = a.build(1, E - 1, vec![a.transfer()]);
+    let mut b = a.clone();
+    let stay = a.build(2, E - 1, vec![a.transfer()]);
+    let ack = b.build(2, E, vec![]);
+    let mut follower = Pair::genesis(knowing());
+    follower.follow(&one);
+    let mut on_a = follower.clone();
+    let mut on_b = follower.clone();
+    assert_eq!(on_a.env_spec(&stay), SpecId::CANCUN);
+    assert_eq!(on_b.env_spec(&ack), SpecId::PRAGUE);
+    on_a.follow(&stay);
+    on_b.follow(&ack);
+    assert_same(&a, &on_a);
+    assert_same(&b, &on_b);
+    // a follower that switches from branch A to branch B rewinds to the common parent first
+    let mut reorged = follower.clone();
+    reorged.follow(&ack);
+    assert_same(&b, &reorged);
+
+    assert!(on_a.try_build(3, E - 1, vec![on_a.delegation()]).is_err());
+    let three = b.build(3, E, vec![b.delegation()]);
+    on_b.follow(&three);
+    reorged.follow(&three);
+    assert_same(&b, &on_b);
+    assert_same(&b, &reorged);
 }

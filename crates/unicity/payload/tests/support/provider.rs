@@ -91,6 +91,25 @@ impl FixtureProvider {
         self.storage.get(&address).cloned().unwrap_or_default()
     }
 
+    /// Adds a contract account with the given code and storage (a test stand-in for a deployment
+    /// the genesis does not carry).
+    #[allow(dead_code)]
+    pub(crate) fn insert_contract(
+        &mut self,
+        address: Address,
+        code: Bytes,
+        storage: &[(U256, U256)],
+    ) {
+        let code = Bytecode::new_raw(code);
+        let code_hash = code.hash_slow();
+        self.code.insert(code_hash, code.clone());
+        self.accounts
+            .insert(address, AccountInfo { code_hash, code: Some(code), ..Default::default() });
+        for (key, value) in storage {
+            self.storage.entry(address).or_default().insert(*key, *value);
+        }
+    }
+
     /// Overwrites one storage word, for tests that start from corrupt imported state.
     #[allow(dead_code)]
     pub(crate) fn set_storage(&mut self, address: Address, key: U256, value: U256) {

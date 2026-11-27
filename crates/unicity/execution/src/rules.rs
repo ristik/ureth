@@ -115,21 +115,32 @@ impl RuleSet {
     }
 }
 
-/// The rules the binary implements.
-#[cfg(not(feature = "no-test-rule"))]
+/// Name of the test-only rule that selects Prague, known only to a `test-prague-rule` build. It
+/// lets the dependents' tests drive the process-wide resolver (the one every production bind site
+/// uses) through a real spec change; a release build never knows it.
+#[cfg(feature = "test-prague-rule")]
+pub const PRAGUE_TEST_RULE_NAME: &str = "prague-test-v1";
+
+/// The rules the binary implements: the harmless test rule unless the build is `no-test-rule`,
+/// plus the Prague test rule in a `test-prague-rule` (test-only) build.
+#[allow(clippy::vec_init_then_push)]
 pub fn builtin_rules() -> Vec<KnownRule> {
-    vec![KnownRule {
+    #[allow(unused_mut)]
+    let mut rules = Vec::new();
+    #[cfg(not(feature = "no-test-rule"))]
+    rules.push(KnownRule {
         name: NOOP_TEST_RULE_NAME,
         id: noop_test_rule_id(),
         // changes nothing in execution
         spec: GENESIS_SPEC,
-    }]
-}
-
-/// The rules the binary implements: none, in a `no-test-rule` build.
-#[cfg(feature = "no-test-rule")]
-pub const fn builtin_rules() -> Vec<KnownRule> {
-    Vec::new()
+    });
+    #[cfg(feature = "test-prague-rule")]
+    rules.push(KnownRule {
+        name: PRAGUE_TEST_RULE_NAME,
+        id: rule_id(PRAGUE_TEST_RULE_NAME),
+        spec: SpecId::PRAGUE,
+    });
+    rules
 }
 
 /// The state of an `activations[i]` entry.
@@ -877,10 +888,21 @@ mod tests {
         assert!(RuleSet::builtin().contains(&noop_test_rule_id()));
     }
 
+    #[cfg(feature = "test-prague-rule")]
+    #[test]
+    fn the_test_prague_build_knows_a_rule_that_selects_prague() {
+        let id = rule_id(PRAGUE_TEST_RULE_NAME);
+        assert!(RuleSet::builtin().contains(&id));
+        let mut db = seed(&[ScheduleEntry { rule_id: id, ..entry("p", 3, EntryState::Active, 1) }]);
+        let rules = UnicityRules::with_known(builtin_rules());
+        assert_eq!(rules.resolve(&mut db, VR, 2).unwrap().0, SpecId::CANCUN);
+        assert_eq!(rules.resolve(&mut db, VR, 3).unwrap().0, SpecId::PRAGUE);
+    }
+
     #[cfg(feature = "no-test-rule")]
     #[test]
     fn the_no_test_rule_build_lacks_it() {
-        assert!(RuleSet::builtin().is_empty());
+        assert!(!RuleSet::builtin().contains(&noop_test_rule_id()));
         let rules = UnicityRules::with_known(builtin_rules());
         let mut db = seed(&[ScheduleEntry {
             rule_id: noop_test_rule_id(),

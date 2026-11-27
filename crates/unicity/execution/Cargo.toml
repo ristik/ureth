@@ -43,6 +43,10 @@ sha2.workspace = true
 # Builds a binary that does NOT know the harmless test rule (unicity.rule/noop-test-v1), so a
 # scheduled activation of it is refused with UpgradeRequired. Never part of a release build.
 no-test-rule = []
+# Test-only: the binary also knows `unicity.rule/prague-test-v1`, which selects Prague, so the
+# dependents' tests can drive the process-wide resolver (build, import, restart repair) through a
+# real spec change. Never part of a node or release build.
+test-prague-rule = []
 # Shared B1 world fixtures for dependents' tests; never part of a node build.
 test-utils = [
     "dep:serde_json",
