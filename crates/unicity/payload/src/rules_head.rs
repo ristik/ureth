@@ -18,7 +18,7 @@ use reth_unicity_execution::{rules::UnicityRules, VALIDATOR_REGISTRY};
 
 /// Observes the schedule at the canonical tip now and at every canonical change until the stream
 /// ends. A failed read is logged and leaves the previous view in place.
-pub async fn run_rules_head_observer<P>(provider: P, rules: UnicityRules)
+pub(crate) async fn run_rules_head_observer<P>(provider: P, rules: UnicityRules)
 where
     P: StateProviderFactory + CanonStateSubscriptions + Send + 'static,
 {

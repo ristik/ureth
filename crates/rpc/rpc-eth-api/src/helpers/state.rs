@@ -4,18 +4,19 @@
 use super::{EthApiSpec, LoadBlock, LoadPendingBlock, SpawnBlocking};
 use crate::{EthApiTypes, FromEthApiError, RpcNodeCore, RpcNodeCoreExt};
 use alloy_consensus::constants::KECCAK_EMPTY;
-use alloy_eips::BlockId;
+use alloy_eips::{BlockId, BlockNumberOrTag};
 use alloy_primitives::{keccak256, Address, Bytes, B256, U256};
 use alloy_rpc_types_eth::{Account, AccountInfo, EIP1186AccountProofResponse};
 use alloy_serde::JsonStorageKey;
 use futures::Future;
 use reth_errors::RethError;
-use reth_evm::{ConfigureEvm, EvmEnvFor};
-use reth_primitives_traits::{BlockTy, RecoveredBlock, SealedHeaderFor};
+use reth_evm::{BlockExecutorForEvm, ConfigureEvm, EvmEnvFor};
+use reth_primitives_traits::{BlockTy, RecoveredBlock, SealedBlock, SealedHeaderFor};
+use reth_revm::database::StateProviderDatabase;
 use reth_rpc_convert::{RpcConvert, RpcTxReq};
 use reth_rpc_eth_types::{
     error::{FromEvmError, IntoEthApiError},
-    EthApiError, PendingBlockEnv, RpcInvalidTransactionError, SignError,
+    EthApiError, PendingBlockEnv, RpcInvalidTransactionError, SignError, StateCacheDb,
 };
 use reth_rpc_server_types::constants::DEFAULT_MAX_STORAGE_VALUES_SLOTS;
 use reth_storage_api::{
@@ -369,9 +370,48 @@ pub trait LoadState:
         &self,
         header: &SealedHeaderFor<Self::Primitives>,
     ) -> Result<EvmEnvFor<Self::Evm>, Self::Error> {
+        self.evm_env_for_query(header, false)
+    }
+
+    /// Resolves the RPC environment, using the authenticated pending successor's state for the
+    /// spec of a latest-tag call if one is available. The call itself still reads latest state.
+    fn evm_env_for_query(
+        &self,
+        header: &SealedHeaderFor<Self::Primitives>,
+        latest: bool,
+    ) -> Result<EvmEnvFor<Self::Evm>, Self::Error> {
+        let provider = self.provider();
         self.evm_config()
-            .evm_env(header)
-            .map_err(RethError::other)
+            .rpc_evm_env(header, None, || {
+                let state = if latest {
+                    provider.state_for_next_block(header.hash())?
+                } else {
+                    provider.state_by_block_hash(header.hash())?
+                };
+                Ok(StateProviderDatabase::new(state))
+            })
+            .map_err(RethError::Other)
+            .map_err(Self::Error::from_eth_err)
+    }
+
+    /// Creates the executor for replaying an existing block in a read-only RPC.
+    fn rpc_executor_for_block<'a>(
+        &'a self,
+        db: &'a mut StateCacheDb,
+        block: &'a SealedBlock<BlockTy<Self::Primitives>>,
+    ) -> Result<
+        BlockExecutorForEvm<
+            'a,
+            Self::Evm,
+            StateProviderDatabase<reth_rpc_eth_types::cache::db::StateProviderTraitObjWrapper>,
+        >,
+        Self::Error,
+    > {
+        self.evm_config()
+            .rpc_executor_for_block(db, block, || {
+                Ok(StateProviderDatabase::new(self.provider().state_by_block_hash(block.hash())?))
+            })
+            .map_err(RethError::Other)
             .map_err(Self::Error::from_eth_err)
     }
 
@@ -400,7 +440,8 @@ pub trait LoadState:
                     .sealed_header_by_id(at)
                     .map_err(Self::Error::from_eth_err)?
                     .ok_or_else(|| EthApiError::HeaderNotFound(at))?;
-                let evm_env = self.evm_env_for_header(&header)?;
+                let evm_env = self
+                    .evm_env_for_query(&header, at == BlockId::Number(BlockNumberOrTag::Latest))?;
 
                 Ok((evm_env, header.hash().into()))
             }

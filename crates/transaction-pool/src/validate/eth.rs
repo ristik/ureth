@@ -408,7 +408,11 @@ where
         P: AccountInfoReader,
         F: FnOnce() -> Result<P, ProviderError>,
     {
-        match self.validate_stateless(origin, &transaction) {
+        let prague = match self.prague_for_admission() {
+            Ok(prague) => prague,
+            Err(err) => return TransactionValidationOutcome::Error(*transaction.hash(), err),
+        };
+        match self.validate_stateless_with_prague(origin, &transaction, prague) {
             Ok(()) => {
                 // stateless checks passed, pass transaction down stateful validation pipeline
                 // If we don't have a state provider yet, fetch the latest state
@@ -428,7 +432,7 @@ where
 
                 let state = maybe_state.as_ref().expect("provider is set");
 
-                self.validate_stateful(origin, transaction, state)
+                self.validate_stateful_with_prague(origin, transaction, state, prague)
             }
             Err(err) => TransactionValidationOutcome::Invalid(transaction, err),
         }
@@ -442,10 +446,21 @@ where
         transaction: Tx,
         state: impl AccountInfoReader,
     ) -> TransactionValidationOutcome<Tx> {
-        if let Err(err) = self.validate_stateless(origin, &transaction) {
+        let prague = match self.prague_for_admission() {
+            Ok(prague) => prague,
+            Err(err) => return TransactionValidationOutcome::Error(*transaction.hash(), err),
+        };
+        if let Err(err) = self.validate_stateless_with_prague(origin, &transaction, prague) {
             return TransactionValidationOutcome::Invalid(transaction, err);
         }
-        self.validate_stateful(origin, transaction, state)
+        self.validate_stateful_with_prague(origin, transaction, state, prague)
+    }
+
+    fn prague_for_admission(&self) -> Result<bool, Box<dyn core::error::Error + Send + Sync>> {
+        Ok(self
+            .evm_config
+            .tx_pool_prague(&self.client)?
+            .unwrap_or_else(|| self.fork_tracker.is_prague_activated()))
     }
 
     /// Validates a single transaction without requiring any state access (stateless checks only).
@@ -456,6 +471,18 @@ where
         &self,
         origin: TransactionOrigin,
         transaction: &Tx,
+    ) -> Result<(), InvalidPoolTransactionError> {
+        let prague = self
+            .prague_for_admission()
+            .map_err(InvalidPoolTransactionError::AdmissionRulesUnavailable)?;
+        self.validate_stateless_with_prague(origin, transaction, prague)
+    }
+
+    fn validate_stateless_with_prague(
+        &self,
+        origin: TransactionOrigin,
+        transaction: &Tx,
+        prague: bool,
     ) -> Result<(), InvalidPoolTransactionError> {
         // Checks for tx_type
         match transaction.ty() {
@@ -595,7 +622,7 @@ where
 
         if transaction.is_eip7702() {
             // Prague fork is required for 7702 txs
-            if !self.fork_tracker.is_prague_activated() {
+            if !prague {
                 return Err(InvalidTransactionError::TxTypeNotSupported.into())
             }
 
@@ -604,7 +631,7 @@ where
             }
         }
 
-        ensure_intrinsic_gas(transaction, &self.fork_tracker)?;
+        ensure_intrinsic_gas_with_prague(transaction, &self.fork_tracker, prague)?;
 
         // light blob tx pre-checks
         if transaction.is_eip4844() {
@@ -654,8 +681,25 @@ where
     pub fn validate_stateful<P>(
         &self,
         origin: TransactionOrigin,
+        transaction: Tx,
+        state: P,
+    ) -> TransactionValidationOutcome<Tx>
+    where
+        P: AccountInfoReader,
+    {
+        let prague = match self.prague_for_admission() {
+            Ok(prague) => prague,
+            Err(err) => return TransactionValidationOutcome::Error(*transaction.hash(), err),
+        };
+        self.validate_stateful_with_prague(origin, transaction, state, prague)
+    }
+
+    fn validate_stateful_with_prague<P>(
+        &self,
+        origin: TransactionOrigin,
         mut transaction: Tx,
         state: P,
+        prague: bool,
     ) -> TransactionValidationOutcome<Tx>
     where
         P: AccountInfoReader,
@@ -669,7 +713,7 @@ where
         };
 
         // check for bytecode
-        match self.validate_sender_bytecode(&transaction, &account, &state) {
+        match Self::validate_sender_bytecode_with_prague(&transaction, &account, &state, prague) {
             Err(outcome) => return outcome,
             Ok(Err(err)) => return TransactionValidationOutcome::Invalid(transaction, err),
             _ => {}
@@ -726,6 +770,18 @@ where
         sender: &Account,
         state: impl BytecodeReader,
     ) -> Result<Result<(), InvalidPoolTransactionError>, TransactionValidationOutcome<Tx>> {
+        let prague = self
+            .prague_for_admission()
+            .map_err(|err| TransactionValidationOutcome::Error(*transaction.hash(), err))?;
+        Self::validate_sender_bytecode_with_prague(transaction, sender, state, prague)
+    }
+
+    fn validate_sender_bytecode_with_prague(
+        transaction: &Tx,
+        sender: &Account,
+        state: impl BytecodeReader,
+        prague: bool,
+    ) -> Result<Result<(), InvalidPoolTransactionError>, TransactionValidationOutcome<Tx>> {
         // Unless Prague is active, the signer account shouldn't have bytecode.
         //
         // If Prague is active, only EIP-7702 bytecode is allowed for the sender.
@@ -735,7 +791,7 @@ where
         if let Some(code_hash) = &sender.bytecode_hash &&
             *code_hash != KECCAK_EMPTY
         {
-            let is_eip7702 = if self.fork_tracker.is_prague_activated() {
+            let is_eip7702 = if prague {
                 match state.bytecode_by_hash(code_hash) {
                     Ok(bytecode) => bytecode.unwrap_or_default().is_eip7702(),
                     Err(err) => {
@@ -1500,10 +1556,18 @@ pub fn ensure_intrinsic_gas<T: EthPoolTransaction>(
     transaction: &T,
     fork_tracker: &ForkTracker,
 ) -> Result<(), InvalidPoolTransactionError> {
+    ensure_intrinsic_gas_with_prague(transaction, fork_tracker, fork_tracker.is_prague_activated())
+}
+
+fn ensure_intrinsic_gas_with_prague<T: EthPoolTransaction>(
+    transaction: &T,
+    fork_tracker: &ForkTracker,
+    prague: bool,
+) -> Result<(), InvalidPoolTransactionError> {
     use revm::primitives::hardfork::SpecId;
     let spec_id = if fork_tracker.is_amsterdam_activated() {
         SpecId::AMSTERDAM
-    } else if fork_tracker.is_prague_activated() {
+    } else if prague {
         SpecId::PRAGUE
     } else if fork_tracker.is_shanghai_activated() {
         SpecId::SHANGHAI

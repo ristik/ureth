@@ -43,6 +43,7 @@ pub mod recovery;
 pub mod registry;
 pub mod rpc;
 pub mod rules_head;
+mod schedule_config;
 
 pub use consensus::UnicityConsensus;
 pub use engine::UnicityEngineTypes;

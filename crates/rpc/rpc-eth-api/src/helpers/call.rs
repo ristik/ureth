@@ -703,10 +703,7 @@ pub trait Call:
             self.spawn_with_state_at_block(parent_block, move |this, mut db| {
                 let block_txs = block.transactions_recovered();
 
-                let mut executor = RpcNodeCore::evm_config(&this)
-                    .executor_for_block(&mut db, block.sealed_block())
-                    .map_err(RethError::other)
-                    .map_err(Self::Error::from_eth_err)?;
+                let mut executor = this.rpc_executor_for_block(&mut db, block.sealed_block())?;
                 executor.apply_pre_execution_changes().map_err(Self::Error::from_eth_err)?;
 
                 // replay all transactions prior to the targeted transaction

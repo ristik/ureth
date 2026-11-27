@@ -149,6 +149,12 @@ pub trait StateProviderFactory: BlockIdReader + Send {
     /// Storage provider for latest block.
     fn latest(&self) -> ProviderResult<StateProviderBox>;
 
+    /// State used to resolve the next block's rules. A provider with an executed pending
+    /// successor may return its post-state if it extends the given canonical parent.
+    fn state_for_next_block(&self, parent: B256) -> ProviderResult<StateProviderBox> {
+        self.state_by_block_hash(parent)
+    }
+
     /// Returns a [`StateProvider`] indexed by the given [`BlockId`].
     ///
     /// Note: if a number or hash is provided this will __only__ look at historical(canonical)
