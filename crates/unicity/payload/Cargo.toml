@@ -39,6 +39,7 @@ reth-node-ethereum.workspace = true
 reth-payload-builder.workspace = true
 reth-payload-builder-primitives.workspace = true
 reth-payload-primitives.workspace = true
+reth-payload-validator.workspace = true
 reth-primitives-traits.workspace = true
 reth-provider.workspace = true
 reth-prune-types.workspace = true
@@ -76,7 +77,7 @@ tracing.workspace = true
 reth-unicity-b1.workspace = true
 secp256k1.workspace = true
 sha2.workspace = true
-reth-unicity-execution = { workspace = true, features = ["test-utils"] }
+reth-unicity-execution = { workspace = true, features = ["test-utils", "test-prague-rule"] }
 alloy-genesis.workspace = true
 alloy-trie = { workspace = true, features = ["std"] }
 reth-db-api.workspace = true

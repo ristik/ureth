@@ -349,6 +349,18 @@ impl UnicityNodeEvmConfig {
     fn per_block(&self, bound: Arc<BoundExecutionInput>) -> UnicityEvmConfig {
         UnicityEvmConfig::new(self.inner.clone(), bound)
     }
+
+    /// Moves a chain-spec environment to the spec the block's bound input resolved from its parent
+    /// state (bft-core#1230), so the engine executes an imported block exactly as the import's own
+    /// replay and the builder did. A block without a registered input keeps the chain-spec
+    /// environment; its executor then fails closed with the missing-input error.
+    fn apply_bound_spec(&self, env: &mut EvmEnv, extra_data: &[u8]) {
+        if let Some(bound) = commitment_from_extra_data(extra_data)
+            .and_then(|commitment| self.registry.get(&commitment))
+        {
+            crate::block_executor::apply_spec(env, bound.env_spec());
+        }
+    }
 }
 
 impl ConfigureEvm for UnicityNodeEvmConfig {
@@ -368,12 +380,13 @@ impl ConfigureEvm for UnicityNodeEvmConfig {
     }
 
     fn evm_env(&self, header: &Header) -> Result<EvmEnv, Self::Error> {
-        let env = self.inner.evm_env(header).map_err(|never: Infallible| match never {})?;
+        let mut env = self.inner.evm_env(header).map_err(|never: Infallible| match never {})?;
         // The header carries no root epoch and there is no state here, so only the structural
         // half applies; the epoch-dependent, typed refusal runs in the executor, where the bound
         // input and the parent state are.
         crate::rules::UnicityRules::check_chain_spec(env.cfg_env.spec)
             .map_err(|_| UnicityNodeEvmError::UnsupportedSpec)?;
+        self.apply_bound_spec(&mut env, &header.extra_data);
         Ok(env)
     }
 
@@ -415,7 +428,12 @@ impl ConfigureEvm for UnicityNodeEvmConfig {
 
 impl ConfigureEngineEvm<ExecutionData> for UnicityNodeEvmConfig {
     fn evm_env_for_payload(&self, payload: &ExecutionData) -> Result<EvmEnvFor<Self>, Self::Error> {
-        self.inner.evm_env_for_payload(payload).map_err(|never: Infallible| match never {})
+        let mut env =
+            self.inner.evm_env_for_payload(payload).map_err(|never: Infallible| match never {})?;
+        crate::rules::UnicityRules::check_chain_spec(env.cfg_env.spec)
+            .map_err(|_| UnicityNodeEvmError::UnsupportedSpec)?;
+        self.apply_bound_spec(&mut env, payload.payload.as_v1().extra_data.as_ref());
+        Ok(env)
     }
 
     fn context_for_payload<'a>(

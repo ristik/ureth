@@ -341,6 +341,7 @@ where
             )
         }
         .map_err(|error| eyre::eyre!("parent accounting binding failed at {number}: {error:?}"))?;
+        let bound = crate::rules_head::with_parent_spec(provider, parent_hash, bound)?;
         let state = provider.state_by_block_hash(parent_hash)?;
         let config =
             UnicityEvmConfig::new(unicity_eth_config(chain.clone(), &pin_context), Arc::new(bound));

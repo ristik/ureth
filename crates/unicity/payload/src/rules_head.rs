@@ -72,6 +72,20 @@ pub(crate) fn observe_tip<P: StateProviderFactory>(
     rules.observe_head(&mut db, VALIDATOR_REGISTRY).map_err(|e| e.to_string())
 }
 
+/// Resolves a freshly bound job's EVM spec from the state of its parent `parent_hash`
+/// (bft-core#1230), so the job's `evm_env`, `next_evm_env` and the engine's `evm_env_for_payload`
+/// run ordinary transactions under the spec the activation schedule selects. Build, import and
+/// restart repair all bind through here. A resolution that fails leaves the job unresolved and its
+/// executor refuses with the typed error; only a missing parent state is an error here.
+pub(crate) fn with_parent_spec<P: StateProviderFactory>(
+    provider: &P,
+    parent_hash: B256,
+    bound: reth_unicity_execution::block_executor::BoundExecutionInput,
+) -> reth_provider::ProviderResult<reth_unicity_execution::block_executor::BoundExecutionInput> {
+    let state = provider.state_by_block_hash(parent_hash)?;
+    Ok(bound.with_parent_spec(&mut StateProviderDatabase::new(state)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -1554,6 +1554,8 @@ struct CapturedRouteBlock {
     import_companion: SealCompanion,
     beacon_root: B256,
     completed: CompletedParent,
+    /// The EVM spec the build job's environment ran the block under.
+    spec: revm::primitives::hardfork::SpecId,
 }
 
 struct CapturedRouteHistory {
@@ -1573,7 +1575,17 @@ async fn capture_paid_idle_transition_fixture() -> CapturedRouteHistory {
 
 /// The same capture for an arbitrary schedule of `(round, root epoch, paid)` blocks.
 async fn capture_route_history(schedule: &[(u64, u64, bool)]) -> CapturedRouteHistory {
-    let (genesis_client, mut parent, _, _, mut context, validator) = seal_fixture();
+    capture_route_history_with(schedule, |_| {}).await
+}
+
+/// [`capture_route_history`] over a genesis state that `setup` adjusts first (for example a VR
+/// activation schedule).
+async fn capture_route_history_with(
+    schedule: &[(u64, u64, bool)],
+    setup: impl FnOnce(&mut FixtureProvider),
+) -> CapturedRouteHistory {
+    let (mut genesis_client, mut parent, _, _, mut context, validator) = seal_fixture();
+    setup(&mut genesis_client.state);
     let chain_spec = genesis_client.chain_spec.clone();
     let genesis_state = genesis_client.state.clone();
     let (dir, store) = temp_store();
@@ -1678,6 +1690,7 @@ async fn capture_route_history(schedule: &[(u64, u64, bool)]) -> CapturedRouteHi
         };
 
         let evm = context.registry.resolve(&config).unwrap();
+        let spec = evm.evm_env(payload.block().header()).unwrap().cfg_env.spec;
         let parent_state = state.clone();
         let recovered = RecoveredBlock::try_new(
             payload.block().clone().into_block(),
@@ -1734,6 +1747,7 @@ async fn capture_route_history(schedule: &[(u64, u64, bool)]) -> CapturedRouteHi
             import_companion,
             beacon_root,
             completed,
+            spec,
         });
     }
 
@@ -5045,4 +5059,183 @@ async fn vr_recovery_admits_retained_head_with_pruned_older_fee_state() {
     assert!(restored.is_admitted(&head_hash));
     assert!(!restored.is_admitted(&first_hash));
     assert!(!provider.state_reads.lock().unwrap().contains(&first_hash));
+}
+
+/// bft-core#1230: the engine validator leaves type-4 (EIP-7702) transactions to execution. A
+/// Unicity chain spec never schedules Prague, so the stock structural check would refuse every
+/// type-4 transaction even after the activation schedule moves the EVM to Prague; the executor
+/// refuses one under a pre-Prague spec instead. A Prague sidecar (execution requests) stays
+/// refused.
+#[test]
+fn the_engine_validator_leaves_type_4_transactions_to_the_resolved_spec() {
+    use alloy_consensus::{proofs::calculate_transaction_root, TxEip7702};
+    use alloy_eips::eip7702::Authorization;
+    use alloy_rpc_types_engine::{
+        CancunPayloadFields, ExecutionPayload, ExecutionPayloadSidecar, PraguePayloadFields,
+    };
+    use reth_engine_primitives::PayloadValidator;
+    use reth_ethereum_payload_builder::EthereumExecutionPayloadValidator;
+
+    let (client, parent, root, attrs, context, validator) = seal_fixture();
+    let payload = build_genesis_seal_payload(&client, &parent, &root, &attrs, &context, &validator);
+    let chain_id = client.chain_spec().chain.id();
+    let authorization = Authorization {
+        chain_id: U256::from(chain_id),
+        address: Address::repeat_byte(0xde),
+        nonce: 0,
+    };
+    let auth_signature =
+        sign_message(B256::with_last_byte(2), authorization.signature_hash()).unwrap();
+    let transaction = Transaction::Eip7702(TxEip7702 {
+        chain_id,
+        nonce: 0,
+        gas_limit: 100_000,
+        max_fee_per_gas: 10_000_000_000,
+        max_priority_fee_per_gas: 1,
+        to: Address::repeat_byte(0x42),
+        value: U256::ZERO,
+        access_list: Default::default(),
+        authorization_list: vec![authorization.into_signed(auth_signature)],
+        input: Default::default(),
+    });
+    let signature = sign_message(B256::with_last_byte(1), transaction.signature_hash()).unwrap();
+    let mut block = payload.block().clone().into_block();
+    block.body.transactions = vec![TransactionSigned::new_unhashed(transaction, signature)];
+    block.header.transactions_root = calculate_transaction_root(&block.body.transactions);
+    let hash = block.header.hash_slow();
+    let beacon_root = block.header.parent_beacon_block_root.unwrap();
+    let data = |prague: bool| {
+        let cancun =
+            CancunPayloadFields { parent_beacon_block_root: beacon_root, versioned_hashes: vec![] };
+        // with a Prague sidecar the block carries its requests hash, so the payload's own hash
+        // check passes and the sidecar check is the one that answers
+        let mut block = block.clone();
+        if prague {
+            block.header.requests_hash = Some(alloy_eips::eip7685::EMPTY_REQUESTS_HASH);
+        }
+        let hash = block.header.hash_slow();
+        ExecutionData {
+            payload: ExecutionPayload::V3(ExecutionPayloadV3::from_block_unchecked(hash, &block)),
+            sidecar: if prague {
+                ExecutionPayloadSidecar::v4(
+                    cancun,
+                    PraguePayloadFields::new(Vec::<alloy_primitives::Bytes>::new()),
+                )
+            } else {
+                ExecutionPayloadSidecar::v3(cancun)
+            },
+        }
+    };
+
+    let stock = EthereumExecutionPayloadValidator::new(client.chain_spec())
+        .ensure_well_formed_payload::<TransactionSigned>(data(false))
+        .unwrap_err();
+    assert!(
+        matches!(
+            stock,
+            alloy_rpc_types_engine::PayloadError::PrePragueBlockWithEip7702Transactions
+        ),
+        "{stock:?}"
+    );
+    let converted = validator.convert_payload_to_block(data(false)).unwrap();
+    assert_eq!(converted.hash(), hash);
+    assert!(converted.body().transactions[0].is_eip7702());
+    let refused = validator.convert_payload_to_block(data(true)).unwrap_err();
+    assert!(refused.to_string().to_lowercase().contains("requests"), "{refused}");
+}
+
+/// bft-core#1230: the three production sites that bind a job resolve its spec from the parent
+/// state through the process-wide resolver. A test-only build (`test-prague-rule`) knows a rule
+/// that selects Prague, scheduled here from root epoch 2. The captured chain crosses it: two
+/// Cancun blocks in epoch 1, then the acknowledgement into epoch 2, the first Prague block.
+/// - build (`prepare_seal_build`): the job's environment is Prague at the acknowledgement;
+/// - import (`new_payload_with_seal`): the follower replays every block, and registers the
+///   acknowledgement's input with the Prague spec for the engine;
+/// - restart repair (`admit_recovered_head` and its `repair_accounting`): replays the whole chain
+///   across the boundary.
+/// Without the resolution at any one of these sites the executor's guard refuses the Prague block
+/// ("resolves spec PRAGUE but the block environment is CANCUN"), and this test fails.
+#[tokio::test]
+async fn the_production_bind_sites_resolve_a_prague_rule_across_e() {
+    use reth_unicity_execution::{
+        rules::{rule_id, schedule_storage, EntryState, ScheduleEntry, PRAGUE_TEST_RULE_NAME},
+        testing::NOTHING,
+        VALIDATOR_REGISTRY,
+    };
+    use revm::primitives::hardfork::SpecId;
+    let entry = ScheduleEntry {
+        rule_id: rule_id(PRAGUE_TEST_RULE_NAME),
+        release_digest: B256::repeat_byte(0xd1),
+        root_epoch: 2,
+        not_before_uc_time: 0,
+        state: EntryState::Active,
+        change_id: 1,
+    };
+    let history =
+        capture_route_history_with(&[(1, 1, true), (2, 1, false), (3, 2, false)], |state| {
+            state.insert_contract(
+                VALIDATOR_REGISTRY,
+                alloy_primitives::Bytes::from_static(NOTHING),
+                &schedule_storage(&[entry]),
+            )
+        })
+        .await;
+    // build
+    let specs: Vec<_> = history.blocks.iter().map(|block| block.spec).collect();
+    assert_eq!(specs, vec![SpecId::CANCUN, SpecId::CANCUN, SpecId::PRAGUE]);
+    assert_eq!(history.blocks[2].root.origin.root_epoch, 2);
+
+    // import
+    let (_, _, _, _, mut follower_context, validator) = seal_fixture();
+    let (_follower_dir, follower_store) = temp_store();
+    follower_context.store = follower_store;
+    for (captured, spec) in history.blocks.iter().zip(&specs) {
+        let (engine, _seen) = fake_engine(PayloadStatus::new(
+            PayloadStatusEnum::Valid,
+            Some(declared_block_hash(&captured.execution_payload)),
+        ))
+        .await;
+        let handler = seal_import_handler(
+            captured.client.clone(),
+            follower_context.clone(),
+            validator.clone(),
+            engine,
+        );
+        let status = handler
+            .new_payload_with_seal(
+                captured.execution_payload.clone(),
+                vec![],
+                captured.beacon_root,
+                &captured.import_companion,
+            )
+            .await
+            .unwrap();
+        assert!(status.is_valid(), "round {}: {status:?}", captured.root.authorized_round);
+        let commitment = captured.root.input_commitment().unwrap();
+        let registered = follower_context.execution_inputs.get(&commitment).unwrap();
+        assert_eq!(registered.env_spec(), *spec, "the engine executes the import's spec");
+    }
+
+    // restart repair
+    let provider = history.recovery_provider(history.blocks.len());
+    let restored = UnicityParentAccountings::default();
+    reth_unicity_payload::recovery::admit_recovered_head(
+        &provider,
+        &history.store,
+        &restored,
+        UnicitySealConfig {
+            profile: profile(),
+            fee_collector: FEE_COLLECTOR,
+            pins: pair_pins(),
+            b1: b1::context(),
+        },
+        &history.blocks[2].import_companion.pair_binding,
+        3,
+    )
+    .unwrap();
+    for captured in &history.blocks {
+        let hash = captured.payload.block().hash();
+        let token = restored.get(&hash).expect("repair replayed the block");
+        assert_eq!(token.for_local_storage(), captured.completed.for_local_storage(), "{hash}");
+    }
 }

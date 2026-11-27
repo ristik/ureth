@@ -466,6 +466,8 @@ where
         )
         .map_err(SealBuildError::Binding)?
     };
+    let bound = crate::rules_head::with_parent_spec(provider, parent.hash(), bound)
+        .map_err(|error| SealBuildError::Provider(error.to_string()))?;
 
     let builder_config =
         context.builder_config.get().ok_or(SealBuildError::BuilderConfigUnavailable)?;
@@ -984,6 +986,8 @@ where
             .map(|bound| (bound, Some(lease)))
             .map_err(SealImportError::Binding)?
         };
+        let bound = crate::rules_head::with_parent_spec(&self.provider, parent_hash, bound)
+            .map_err(|error| SealImportError::Provider(error.to_string()))?;
         let input = Arc::new(bound);
         let config = UnicityEvmConfig::new(
             unicity_eth_config(chain_spec.clone(), &self.context.seal.b1),

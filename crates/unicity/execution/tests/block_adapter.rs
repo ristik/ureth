@@ -927,6 +927,12 @@ impl HookWorld {
     }
 
     fn config(&self, hook: RecordsHook) -> UnicityEvmConfig {
+        self.config_with(hook, true)
+    }
+
+    /// The job, with its EVM spec resolved from the parent state as every production bind site
+    /// does (`resolve`), or left at the genesis spec.
+    fn config_with(&self, hook: RecordsHook, resolve: bool) -> UnicityEvmConfig {
         let mut job = B1Job {
             context: context(),
             update: self.update.clone(),
@@ -945,6 +951,11 @@ impl HookWorld {
             .unwrap()
             .with_rules(self.rules.clone()),
         );
+        let bound = if resolve {
+            Arc::new(Arc::unwrap_or_clone(bound).with_parent_spec(&mut self.provider.clone()))
+        } else {
+            bound
+        };
         UnicityEvmConfig::new(
             unicity_eth_config(
                 self.chain_spec.clone(),
@@ -1505,29 +1516,69 @@ mod rules_sites {
         assert_eq!(built_error(&postponed), "");
     }
 
-    /// The resolved spec is threaded: a supported rule that selects another spec cannot be half
-    /// applied (system VMs on the new spec, transactions on Cancun). Until the environment is
-    /// rule-aware the block fails with the spec named, for the builder and for replay. The shipped
-    /// no-op rule is fork-neutral (spec Cancun), which the earlier test shows builds identically.
+    /// A supported rule that selects Prague moves the whole block, ordinary transactions included
+    /// (bft-core#1230): `next_evm_env` for the builder, `evm_env` for replay, the system VMs, and
+    /// replay reproduces the build. A job bound without its parent's spec is refused rather than
+    /// half applied (system VMs on Prague, transactions on Cancun).
     #[test]
-    fn a_rule_that_selects_another_spec_is_not_half_applied() {
+    fn a_rule_that_selects_prague_runs_the_whole_block_under_it() {
         use reth_unicity_execution::rules::{KnownRule, UnicityRules};
-        let (plain, _) = world_with_schedule(&[]).build(hook());
+        use revm::primitives::hardfork::SpecId;
         let fork = rule_id("fork-rule");
-        let mut world = world_with_schedule(&[entry(fork, 1, EntryState::Active)]);
-        world.rules = UnicityRules::with_known(vec![KnownRule {
-            name: "fork-rule",
-            id: fork,
-            spec: revm::primitives::hardfork::SpecId::PRAGUE,
-        }]);
-        let err = built_error(&world);
-        assert!(err.contains("resolves spec"), "{err}");
-        let replay = replay_complete(
-            &world.config(hook()),
-            world.provider.clone(),
-            &world.provider,
-            &plain.outcome.block,
-        );
-        assert!(replay.unwrap_err().to_string().contains("resolves spec"));
+        let known = vec![KnownRule { name: "fork-rule", id: fork, spec: SpecId::PRAGUE }];
+        for (epoch, spec) in [(1, SpecId::PRAGUE), (2, SpecId::CANCUN)] {
+            let mut world = world_with_schedule(&[entry(fork, epoch, EntryState::Active)]);
+            world.rules = UnicityRules::with_known(known.clone());
+            let config = world.config(hook());
+            let next = config.next_evm_env(world.parent.header(), &world.attributes()).unwrap();
+            assert_eq!(next.cfg_env.spec, spec, "rule at {epoch}, block at 1");
+            let (built, _) = world.build(hook());
+            let env = config.evm_env(built.outcome.block.header()).unwrap();
+            assert_eq!(env.cfg_env.spec, spec);
+            assert_eq!(
+                env.cfg_env.gas_params,
+                revm::context::CfgEnv::new_with_spec(spec).gas_params
+            );
+            let replay = replay_complete(
+                &world.config(hook()),
+                world.provider.clone(),
+                &world.provider,
+                &built.outcome.block,
+            )
+            .unwrap();
+            assert_eq!(replay.output.result, built.outcome.execution_result);
+            if spec == SpecId::PRAGUE {
+                // without the bind-time resolution the environment stays Cancun: refused
+                let unresolved = world.config_with(hook(), false);
+                assert_eq!(
+                    unresolved.evm_env(built.outcome.block.header()).unwrap().cfg_env.spec,
+                    SpecId::CANCUN
+                );
+                let err = replay_complete(
+                    &unresolved,
+                    world.provider.clone(),
+                    &world.provider,
+                    &built.outcome.block,
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(err.contains("resolves spec PRAGUE"), "{err}");
+                let mut state = State::builder()
+                    .with_database(world.provider.clone())
+                    .with_bundle_update()
+                    .build();
+                let err = build_complete(
+                    &unresolved,
+                    &world.parent,
+                    world.attributes(),
+                    &mut state,
+                    world.provider.clone(),
+                    vec![],
+                )
+                .unwrap_err()
+                .to_string();
+                assert!(err.contains("resolves spec PRAGUE"), "{err}");
+            }
+        }
     }
 }

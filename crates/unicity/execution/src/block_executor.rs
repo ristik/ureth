@@ -71,13 +71,41 @@ pub struct BoundExecutionInput {
     b1: B1Job,
     /// The rule resolver every site of this job asks (the process-wide one by default).
     rules: crate::rules::UnicityRules,
+    /// The EVM spec the job's environment runs under, resolved from the parent state by
+    /// [`Self::with_parent_spec`]; `None` until then, which means the genesis spec. The executor
+    /// resolves again from the state it executes on and refuses the block unless the two agree,
+    /// so this is only a precomputed copy of the same pure function, never a decision.
+    spec: Option<SpecId>,
 }
 
 impl BoundExecutionInput {
     /// The same job resolved by `rules` instead of the process-wide resolver (tests, embedders).
+    /// A spec resolved under the previous resolver is dropped; resolve it again with
+    /// [`Self::with_parent_spec`].
     pub fn with_rules(mut self, rules: crate::rules::UnicityRules) -> Self {
         self.rules = rules;
+        self.spec = None;
         self
+    }
+
+    /// The same job with its EVM spec resolved from the authenticated parent state `parent`, the
+    /// state the block will execute on (bft-core#1230). Every site that binds a job and holds the
+    /// parent state calls this before handing the job to an EVM configuration, so `evm_env`,
+    /// `next_evm_env` and the engine's `evm_env_for_payload` (which hold no state) build the
+    /// environment, precompiles and gas schedule of the resolved spec.
+    ///
+    /// A resolution that fails (an unknown rule in force, a malformed schedule, a read error)
+    /// leaves the spec unresolved. The executor repeats the resolution on the state it executes
+    /// on, and that refuses the block with the typed error, at the same place as before.
+    pub fn with_parent_spec<DB: revm::Database>(mut self, parent: &mut DB) -> Self {
+        self.spec = self.resolve_parent(parent).ok().map(|(spec, _)| spec);
+        self
+    }
+
+    /// The spec this job's EVM environment runs under: the resolved one, or the genesis spec
+    /// before [`Self::with_parent_spec`].
+    pub fn env_spec(&self) -> SpecId {
+        self.spec.unwrap_or(crate::rules::GENESIS_SPEC)
     }
 
     /// The structural check for the sites that hold no state (`evm_env`, `next_evm_env`): the
@@ -135,6 +163,7 @@ impl BoundExecutionInput {
             fee_collector,
             b1,
             rules: crate::rules::UnicityRules::global(),
+            spec: None,
         })
     }
 
@@ -187,6 +216,7 @@ impl BoundExecutionInput {
             fee_collector,
             b1,
             rules: crate::rules::UnicityRules::global(),
+            spec: None,
         })
     }
 
@@ -477,6 +507,17 @@ fn validate_fixed_block(
         .map_err(BlockExecutionError::other)
 }
 
+/// Moves a chain-spec (Cancun) environment to the job's resolved `spec`: the spec, and with it the
+/// mainnet gas parameters of that spec. The EVM factory derives the precompile set from the spec
+/// when it builds the EVM, so opcodes, gas schedule, precompiles and transaction-type validity all
+/// follow. Everything else stays the fixed profile's (block fields, blob parameters, no
+/// transaction gas cap).
+pub(crate) fn apply_spec(env: &mut EvmEnv, spec: SpecId) {
+    if env.cfg_env.spec != spec {
+        env.cfg_env.set_spec_and_mainnet_gas_params(spec);
+    }
+}
+
 /// Structural binding failure for one immutable build or replay job.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BindingError(&'static str);
@@ -754,16 +795,17 @@ where
         let (spec, _active) =
             bound.resolve_parent(self.inner.evm.db_mut()).map_err(BlockExecutionError::other)?;
         // The resolved spec must be the one this block's EVM, and so every ordinary transaction,
-        // runs under. `evm_env` is built before any state is read, so a known rule that selects a
-        // different spec cannot be applied yet: ordinary transactions under a newly selected spec
-        // are refused explicitly here rather than half applied (system VMs on the new spec,
-        // transactions on the old). Real fork support, a rule-aware environment, is
-        // ristik/bft-core#1230. The shipped no-op rule is fork-neutral and never hits this.
+        // runs under (bft-core#1230). `evm_env` holds no state, so it builds the environment from
+        // the job's spec, resolved where the job was bound (`with_parent_spec`). Both come from
+        // the same pure function of the parent state and the root epoch; if they still differ (a
+        // job bound without its parent, or on another parent) the block is refused here rather
+        // than half applied (system VMs on one spec, transactions on another).
         let env_spec = self.inner.evm.cfg_env().spec;
-        if format!("{env_spec:?}") != format!("{spec:?}") {
+        if format!("{env_spec:?}") != format!("{spec:?}") || bound.env_spec() != spec {
             return Err(BlockExecutionError::msg(format!(
                 "the activation schedule resolves spec {spec:?} but the block environment is \
-                 {env_spec:?}"
+                 {env_spec:?} (job spec {:?})",
+                bound.env_spec()
             )));
         }
         bound.profile.validate().map_err(|e| BlockExecutionError::msg(format!("{e:?}")))?;
@@ -912,10 +954,11 @@ impl ConfigureEvm for UnicityEvmConfig {
     }
 
     fn evm_env(&self, header: &Header) -> Result<EvmEnv, Self::Error> {
-        let env = self.inner.evm_env(header).map_err(|never: Infallible| match never {})?;
+        let mut env = self.inner.evm_env(header).map_err(|never: Infallible| match never {})?;
         self.bound
             .check_chain_spec(env.cfg_env.spec)
             .map_err(|_| BindingError("only the fixed Cancun profile is supported"))?;
+        apply_spec(&mut env, self.bound.env_spec());
         Ok(env)
     }
 
@@ -934,6 +977,7 @@ impl ConfigureEvm for UnicityEvmConfig {
         self.bound
             .check_chain_spec(env.cfg_env.spec)
             .map_err(|_| BindingError("only the fixed Cancun profile is supported"))?;
+        apply_spec(&mut env, self.bound.env_spec());
         env.block_env.basefee =
             next_base_fee_for_child(self.bound.parent_execution, self.bound.profile)
                 .map_err(|_| BindingError("next base fee derivation failed"))?;
