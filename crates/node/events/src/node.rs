@@ -666,7 +666,7 @@ impl Display for Eta {
                 return write!(
                     f,
                     "{}",
-                    humantime::format_duration(Duration::from_secs(remaining.as_secs()))
+                    reth_time::format_duration(Duration::from_secs(remaining.as_secs()))
                         .to_string()
                         .replace(' ', "")
                 )

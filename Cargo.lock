@@ -4676,22 +4676,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "91f255a4535024abf7640cb288260811fc14794f62b063652ed349f9a6c2348e"
 
 [[package]]
-name = "humantime"
-version = "2.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "15cdd26707701c53297e2fa6afb323d55fbc1d0810c3aec078ae3ef0424c3c15"
-
-[[package]]
-name = "humantime-serde"
-version = "1.1.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57a3db5ea5923d99402c94e9feb261dc5ee9b4efa158b0315f788cf549cc200c"
-dependencies = [
- "humantime",
- "serde",
-]
-
-[[package]]
 name = "hybrid-array"
 version = "0.4.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5220,6 +5204,58 @@ dependencies = [
  "tikv-jemalloc-ctl",
  "tokio",
  "tracing",
+]
+
+[[package]]
+name = "jiff"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "107f2e89536b6818514025f6787b0d94d819e54fe3b40365275fc753de485b3f"
+dependencies = [
+ "jiff-core",
+ "jiff-static",
+ "jiff-tzdb-platform",
+ "log",
+ "portable-atomic",
+ "portable-atomic-util",
+ "serde_core",
+ "windows-link",
+]
+
+[[package]]
+name = "jiff-core"
+version = "1.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d44c923edf2bf456a982253f1a9ee1f6e89e421dffd0065d9b9a581da0def58f"
+dependencies = [
+ "log",
+]
+
+[[package]]
+name = "jiff-static"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4996f71e569e3a3e32b925c28ef8f0027dc30bb1d594b33eeda409eea185f5c8"
+dependencies = [
+ "jiff-core",
+ "proc-macro2",
+ "quote",
+ "syn 3.0.3",
+]
+
+[[package]]
+name = "jiff-tzdb"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "12e71a1b68a875a44a33bb7a1dd84392cb77145a3367a552a3cfe6a4f5cf3afc"
+
+[[package]]
+name = "jiff-tzdb-platform"
+version = "1.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dc65b284afcfa8f6cf189c7274c805505314a7ab975c60e1f548bff56525420e"
+dependencies = [
+ "jiff-tzdb",
 ]
 
 [[package]]
@@ -6913,6 +6949,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c33a9471896f1c69cecef8d20cbe2f7accd12527ce60845ff44c153bb2a21b49"
 
 [[package]]
+name = "portable-atomic-util"
+version = "0.2.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "10ab3eb7f3becc3a1cbc4f2c6f20267996cfc1a6467a873763411b136a122715"
+dependencies = [
+ "portable-atomic",
+]
+
+[[package]]
 name = "postcard"
 version = "1.1.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7082,8 +7127,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "25485360a54d6861439d60facef26de713b1e126bf015ec8f98239467a2b82f7"
 dependencies = [
  "bitflags 2.13.0",
- "chrono",
- "flate2",
  "procfs-core",
  "rustix",
 ]
@@ -7095,7 +7138,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6401bf7b6af22f78b563665d15a22e9aef27775b79b149a66ca022468a4e405"
 dependencies = [
  "bitflags 2.13.0",
- "chrono",
  "hex",
 ]
 
@@ -7850,7 +7892,6 @@ dependencies = [
  "fdlimit",
  "futures",
  "human_bytes",
- "humantime",
  "itertools 0.14.0",
  "lz4",
  "metrics",
@@ -7904,6 +7945,7 @@ dependencies = [
  "reth-static-file-types",
  "reth-storage-api",
  "reth-tasks",
+ "reth-time",
  "reth-trie",
  "reth-trie-common",
  "reth-trie-db",
@@ -7990,12 +8032,12 @@ version = "2.5.0"
 dependencies = [
  "alloy-primitives",
  "eyre",
- "humantime-serde",
  "reth-network-peers",
  "reth-network-types",
  "reth-prune-types",
  "reth-stages-types",
  "reth-static-file-types",
+ "reth-time",
  "serde",
  "tempfile",
  "toml",
@@ -9284,9 +9326,9 @@ name = "reth-network-types"
 version = "2.5.0"
 dependencies = [
  "alloy-eip2124",
- "humantime-serde",
  "reth-net-banlist",
  "reth-network-peers",
+ "reth-time",
  "serde",
  "serde_json",
  "tracing",
@@ -9417,7 +9459,6 @@ dependencies = [
  "dirs-next",
  "eyre",
  "futures",
- "humantime",
  "ipnet",
  "proptest",
  "rand 0.9.4",
@@ -9445,6 +9486,7 @@ dependencies = [
  "reth-storage-api",
  "reth-storage-errors",
  "reth-tasks",
+ "reth-time",
  "reth-tracing",
  "reth-tracing-otlp",
  "reth-transaction-pool",
@@ -9535,8 +9577,8 @@ version = "2.5.0"
 dependencies = [
  "alloy-consensus",
  "alloy-primitives",
- "chrono",
  "futures-util",
+ "jiff",
  "reth-chain-state",
  "reth-network-api",
  "reth-primitives-traits",
@@ -9562,7 +9604,6 @@ dependencies = [
  "alloy-rpc-types-engine",
  "derive_more",
  "futures",
- "humantime",
  "pin-project",
  "reth-engine-primitives",
  "reth-network-api",
@@ -9571,6 +9612,7 @@ dependencies = [
  "reth-stages",
  "reth-static-file-types",
  "reth-storage-api",
+ "reth-time",
  "tokio",
  "tracing",
 ]
@@ -10522,6 +10564,13 @@ dependencies = [
  "reth-ethereum-primitives",
  "reth-primitives-traits",
  "secp256k1 0.30.0",
+]
+
+[[package]]
+name = "reth-time"
+version = "2.5.0"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

@@ -407,7 +407,7 @@ fn output_progress(last_account: Nibbles, start_time: Instant, inconsistent_node
 
     info!(
         progress_percent = progress_percent_str,
-        eta = %humantime::format_duration(eta_duration),
+        eta = %reth_time::format_duration(eta_duration),
         inconsistent_nodes,
         "Repairing trie tables",
     );

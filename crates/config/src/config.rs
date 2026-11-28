@@ -281,7 +281,7 @@ pub struct ExecutionConfig {
     #[cfg_attr(
         feature = "serde",
         serde(
-            serialize_with = "humantime_serde::serialize",
+            serialize_with = "reth_time::duration_serde::option::serialize",
             deserialize_with = "deserialize_duration"
         )
     )]
@@ -631,7 +631,7 @@ where
     #[derive(serde::Deserialize)]
     #[serde(untagged)]
     enum AnyDuration {
-        #[serde(deserialize_with = "humantime_serde::deserialize")]
+        #[serde(deserialize_with = "reth_time::duration_serde::option::deserialize")]
         Human(Option<Duration>),
         Duration(Option<Duration>),
     }
@@ -1098,6 +1098,33 @@ secs = 120
 nanos = 0
 #";
         let _conf: Config = toml::from_str(alpha_0_0_19).unwrap();
+    }
+
+    #[test]
+    fn legacy_operator_durations() {
+        let config: Config = toml::from_str(
+            r#"
+[stages.execution]
+max_duration = "1M 4.2s"
+
+[peers]
+ban_duration = "1hour2m3s"
+incoming_ip_throttle_duration = "1.25ms 10µs"
+peer_rotation_interval = "1h30m"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            config.stages.execution.max_duration,
+            Some(Duration::new(2_630_020, 200_000_000))
+        );
+        assert_eq!(config.peers.ban_duration, Duration::from_secs(3_723));
+        assert_eq!(config.peers.incoming_ip_throttle_duration, Duration::from_micros(1_260));
+        assert_eq!(config.peers.peer_rotation_interval, Some(Duration::from_secs(5_400)));
+        let encoded = toml::to_string(&config).unwrap();
+        assert!(encoded.contains("max_duration = \"1month 4s 200ms\""));
+        assert!(encoded.contains("peer_rotation_interval = \"1h 30m\""));
+        assert_eq!(toml::from_str::<Config>(&encoded).unwrap(), config);
     }
 
     // ensures prune config deserialization is backwards compatible
