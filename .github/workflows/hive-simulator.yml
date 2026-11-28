@@ -1,0 +1,98 @@
+name: Run Hive simulator
+
+on:
+  workflow_call:
+    inputs:
+      sim:
+        required: true
+        type: string
+      limit:
+        type: string
+        default: '/'
+      fixture:
+        type: string
+        default: osaka
+      cases:
+        type: string
+        default: ''
+      suite:
+        type: string
+        default: ''
+      profile:
+        type: string
+        default: compatibility
+      artifact:
+        required: true
+        type: string
+      timeout:
+        type: number
+        default: 120
+
+permissions:
+  contents: read
+
+jobs:
+  simulator:
+    runs-on: ${{ github.repository == 'paradigmxyz/reth' && (contains(inputs.sim, 'eels') && 'depot-ubuntu-latest-8' || 'depot-ubuntu-latest-4') || 'ubuntu-latest' }}
+    timeout-minutes: ${{ inputs.timeout }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: ethereum/hive
+          ref: 9a8517a3a0d97123806bfed57890d81d658145d8
+          path: hivetests
+          persist-credentials: false
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: hivetests/go.mod
+          cache-dependency-path: hivetests/go.sum
+      - name: Build Hive with simulator exit validation
+        run: |
+          git -C hivetests apply ../.github/scripts/hive/require_simulator_completion.diff
+          cd hivetests
+          go build -o "$RUNNER_TEMP/hive" .
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+      - name: Add the scoped Cancun V3 case
+        if: inputs.profile == 'gate' && inputs.suite == 'engine-cancun'
+        run: git -C hivetests apply ../.github/scripts/hive/cancun_reorg_profile.diff
+      - name: Download reth image
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: reth
+          path: /tmp
+      - name: Load reth image
+        run: |
+          docker load -i /tmp/reth_image.tar
+          rm /tmp/reth_image.tar
+      - name: Run and validate simulator
+        env:
+          SIM: ${{ inputs.sim }}
+          LIMIT: ${{ inputs.limit }}
+          FIXTURE: ${{ inputs.fixture }}
+          CASES: ${{ inputs.cases }}
+          SUITE: ${{ inputs.suite }}
+          PROFILE: ${{ inputs.profile }}
+        run: .github/scripts/hive/run_simulator.sh "$SIM" "$LIMIT" "$FIXTURE" "$CASES" "$SUITE" "$PROFILE"
+      - name: Print simulator output
+        if: failure()
+        run: |
+          for log in hive-results/attempt-*/*-simulator-*.log; do
+            if [[ -f "$log" ]]; then
+              echo "::group::$log"
+              tail -n 300 "$log"
+              echo '::endgroup::'
+            fi
+          done
+      - name: Print reth client logs
+        if: failure()
+        run: .github/scripts/hive/print_client_logs.sh
+      - name: Upload completion records and case reports
+        if: '!cancelled()'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact }}
+          path: hive-results/attempt-*/*.json
+          if-no-files-found: ignore

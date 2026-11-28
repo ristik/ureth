@@ -7,7 +7,7 @@ truncate_lines() {
     cut -c 1-2000
 }
 
-for log in hivetests/workspace/logs/reth/client-*.log; do
+for log in "${HIVE_RESULTS_ROOT:-hive-results}"/attempt-*/reth/client-*.log; do
     lines="$(wc -l < "$log")"
     bytes="$(wc -c < "$log")"
 

@@ -1,0 +1,104 @@
+diff --git a/simulators/ethereum/engine/suites/cancun/tests.go b/simulators/ethereum/engine/suites/cancun/tests.go
+index 3ef39b3..2723532 100644
+--- a/simulators/ethereum/engine/suites/cancun/tests.go
++++ b/simulators/ethereum/engine/suites/cancun/tests.go
+@@ -1835,6 +1835,18 @@ func init() {
+ 	baseSpec := test.BaseSpec{
+ 		MainFork: config.Cancun,
+ 	}
++	Tests = append(Tests, suite_engine.InvalidMissingAncestorReOrgTest{
++		BaseSpec: test.BaseSpec{
++			MainFork:         config.Cancun,
++			SlotsToSafe:      big.NewInt(32),
++			SlotsToFinalized: big.NewInt(64),
++		},
++		SidechainLength:   10,
++		InvalidIndex:      9,
++		InvalidField:      helper.InvalidStateRoot,
++		EmptyTransactions: true,
++		EmptyWithdrawals:  true,
++	})
+ 	onlyBlobTxsSpec := test.BaseSpec{
+ 		MainFork:            config.Cancun,
+ 		TestTransactionType: helper.BlobTxOnly,
+diff --git a/simulators/ethereum/engine/suites/engine/invalid_ancestor.go b/simulators/ethereum/engine/suites/engine/invalid_ancestor.go
+index 8fa5b18..eb29a6e 100644
+--- a/simulators/ethereum/engine/suites/engine/invalid_ancestor.go
++++ b/simulators/ethereum/engine/suites/engine/invalid_ancestor.go
+@@ -30,6 +30,7 @@ type InvalidMissingAncestorReOrgTest struct {
+ 	InvalidIndex      int
+ 	InvalidField      helper.InvalidPayloadBlockField
+ 	EmptyTransactions bool
++	EmptyWithdrawals  bool
+ }
+ 
+ func (s InvalidMissingAncestorReOrgTest) WithMainFork(fork config.Fork) test.Spec {
+@@ -43,17 +44,37 @@ func (tc InvalidMissingAncestorReOrgTest) GetName() string {
+ 	if tc.EmptyTransactions {
+ 		emptyTxsStatus = "True"
+ 	}
+-	return fmt.Sprintf(
++	name := fmt.Sprintf(
+ 		"Invalid Missing Ancestor ReOrg, %s, EmptyTxs=%s, Invalid P%d",
+ 		tc.InvalidField,
+ 		emptyTxsStatus,
+ 		tc.InvalidIndex,
+ 	)
++	if tc.EmptyWithdrawals {
++		name += ", EmptyWithdrawals=True"
++	}
++	return name
+ }
+ 
+ func (tc InvalidMissingAncestorReOrgTest) Execute(t *test.Env) {
+-	// Produce blocks before starting the test
+-	t.CLMock.ProduceBlocks(5, clmock.BlockProcessCallbacks{})
++	emptyWithdrawals := func() {
++		if tc.EmptyWithdrawals {
++			t.CLMock.SetNextWithdrawals(types.Withdrawals{})
++		}
++	}
++	checkEmptyPayload := func() {
++		if tc.EmptyWithdrawals {
++			payload := t.CLMock.LatestPayloadBuilt
++			if payload.Withdrawals == nil || len(payload.Withdrawals) != 0 || len(payload.Transactions) != 0 {
++				t.Fatalf("expected empty transactions and withdrawals for the Cancun V3 profile")
++			}
++		}
++	}
++	// Produce blocks before starting the test.
++	t.CLMock.ProduceBlocks(5, clmock.BlockProcessCallbacks{
++		OnPayloadProducerSelected: emptyWithdrawals,
++		OnGetPayload:              checkEmptyPayload,
++	})
+ 
+ 	// Save the common ancestor
+ 	cA := t.CLMock.LatestPayloadBuilt
+@@ -71,6 +92,7 @@ func (tc InvalidMissingAncestorReOrgTest) Execute(t *test.Env) {
+ 	t.CLMock.ProduceBlocks(tc.SidechainLength, clmock.BlockProcessCallbacks{
+ 
+ 		OnPayloadProducerSelected: func() {
++			emptyWithdrawals()
+ 			// Function to send at least one transaction each block produced.
+ 			// Empty Txs Payload with invalid stateRoot discovered an issue in geth sync, hence this is customizable.
+ 			if !tc.EmptyTransactions {
+@@ -93,6 +115,7 @@ func (tc InvalidMissingAncestorReOrgTest) Execute(t *test.Env) {
+ 			}
+ 		},
+ 		OnGetPayload: func() {
++			checkEmptyPayload()
+ 			var (
+ 				sidePayload *typ.ExecutableData
+ 				err         error
+@@ -116,9 +139,11 @@ func (tc InvalidMissingAncestorReOrgTest) Execute(t *test.Env) {
+ 		},
+ 	})
+ 	t.CLMock.ProduceSingleBlock(clmock.BlockProcessCallbacks{
++		OnPayloadProducerSelected: emptyWithdrawals,
+ 		// Note: We perform the test in the middle of payload creation by the CL Mock, in order to be able to
+ 		// re-org back into this chain and use the new payload without issues.
+ 		OnGetPayload: func() {
++			checkEmptyPayload()
+ 
+ 			// Now let's send the side chain to the client using newPayload/sync
+ 			for i := 1; i <= tc.SidechainLength; i++ {

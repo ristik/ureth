@@ -1,0 +1,176 @@
+diff --git a/hive.go b/hive.go
+index ddaae45..bba4918 100644
+--- a/hive.go
++++ b/hive.go
+@@ -2,6 +2,7 @@ package main
+ 
+ import (
+ 	"context"
++	"encoding/json"
+ 	"errors"
+ 	"flag"
+ 	"fmt"
+@@ -9,6 +10,7 @@ import (
+ 	"maps"
+ 	"os"
+ 	"os/signal"
++	"path/filepath"
+ 	"regexp"
+ 	"sort"
+ 	"strings"
+@@ -268,6 +270,22 @@ Otherwise, it looks for files in the $HOME directory:
+ 			fatal(err)
+ 		}
+ 		failCount += result.TestsFailed
++		if len(simList) == 1 {
++			// CI selects one simulator and uses a fresh results root for each attempt.
++			// This record is emitted only after a successful simulator process exit.
++			completion, err := json.Marshal(struct {
++				Simulator string `json:"simulator"`
++				Suites    int    `json:"suites"`
++				Tests     int    `json:"tests"`
++				Failed    int    `json:"failed"`
++			}{sim.Simulator, result.Suites, result.Tests, result.TestsFailed})
++			if err != nil {
++				fatal(err)
++			}
++			if err := os.WriteFile(filepath.Join(env.LogDir, "completed.json"), completion, 0644); err != nil {
++				fatal(err)
++			}
++		}
+ 		slog.Info(fmt.Sprintf("simulation %s finished", sim.Simulator), "suites", result.Suites, "tests", result.Tests, "failed", result.TestsFailed)
+ 	}
+ 
+diff --git a/internal/fakes/container.go b/internal/fakes/container.go
+index 27f7414..f2045db 100644
+--- a/internal/fakes/container.go
++++ b/internal/fakes/container.go
+@@ -141,6 +141,9 @@ func (b *fakeBackend) StartContainer(ctx context.Context, containerID string, op
+ 		info.MAC = "00:80:41:ae:fd:7e"
+ 	}
+ 	info.Wait = func() {}
++	if info.ExitError == nil {
++		info.ExitError = func(context.Context) error { return nil }
++	}
+ 	return &info, nil
+ }
+ 
+diff --git a/internal/libdocker/container.go b/internal/libdocker/container.go
+index 344f186..2fb7f6b 100644
+--- a/internal/libdocker/container.go
++++ b/internal/libdocker/container.go
+@@ -152,15 +152,31 @@ func (b *ContainerBackend) StartContainer(ctx context.Context, containerID strin
+ 	// This goroutine waits for the container to end and closes log
+ 	// files when done.
+ 	containerExit := make(chan struct{})
++	var waitErr error
+ 	go func() {
+ 		defer close(containerExit)
+-		err := waiter.Wait()
+-		logger.Debug("container exited", "err", err)
+-		err = waiter.Close()
++		waitErr = waiter.Wait()
++		logger.Debug("container exited", "err", waitErr)
++		err := waiter.Close()
+ 		logger.Debug("container files closed", "err", err)
+ 	}()
+ 	// Set up the wait function.
+ 	info.Wait = func() { <-containerExit }
++	info.ExitError = func(ctx context.Context) error {
++		if waitErr != nil {
++			return fmt.Errorf("wait for container: %w", waitErr)
++		}
++		ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
++		defer cancel()
++		status, err := b.client.WaitContainerWithContext(containerID, ctx)
++		if err != nil {
++			return fmt.Errorf("read container exit status: %w", err)
++		}
++		if status != 0 {
++			return fmt.Errorf("container exit status %d", status)
++		}
++		return nil
++	}
+ 
+ 	// Get the IP. This can only be done after the container has started.
+ 	inspect := docker.InspectContainerOptions{Context: ctx, ID: containerID}
+diff --git a/internal/libhive/dockerface.go b/internal/libhive/dockerface.go
+index 22f2d03..925ea2a 100644
+--- a/internal/libhive/dockerface.go
++++ b/internal/libhive/dockerface.go
+@@ -88,6 +88,9 @@ type ContainerInfo struct {
+ 	// This must be called for all containers that were started
+ 	// to avoid resource leaks.
+ 	Wait func()
++
++	// ExitError reports the container process status after Wait returns.
++	ExitError func(context.Context) error
+ }
+ 
+ // Builder can build docker images of clients and simulators.
+diff --git a/internal/libhive/run.go b/internal/libhive/run.go
+index 74b9327..cd45d9c 100644
+--- a/internal/libhive/run.go
++++ b/internal/libhive/run.go
+@@ -260,6 +260,11 @@ func (r *Runner) run(ctx context.Context, sim string, env SimEnv, hiveInfo HiveI
+ 	// Wait for simulation to end.
+ 	select {
+ 	case <-done:
++		if sc.ExitError == nil {
++			err = errors.New("simulator exit status unavailable")
++		} else if exitErr := sc.ExitError(ctx); exitErr != nil {
++			err = fmt.Errorf("simulator %s did not complete: %w", sim, exitErr)
++		}
+ 	case <-timeout:
+ 		slogger.Info("simulation timed out")
+ 		err = errSimTimeout
+diff --git a/internal/libhive/run_test.go b/internal/libhive/run_test.go
+index 4c7f8bb..8f7674c 100644
+--- a/internal/libhive/run_test.go
++++ b/internal/libhive/run_test.go
+@@ -2,6 +2,7 @@ package libhive_test
+ 
+ import (
+ 	"context"
++	"errors"
+ 	"os"
+ 	"path/filepath"
+ 	"reflect"
+@@ -22,6 +23,7 @@ func TestRunner(t *testing.T) {
+ 
+ 	inv := makeTestInventory()
+ 	b := fakes.NewBuilder(&fakes.BuilderHooks{})
++	var simulatorExit error
+ 	cb := fakes.NewContainerBackend(&fakes.BackendHooks{
+ 		StartContainer: func(image, containerID string, opt libhive.ContainerOptions) (*libhive.ContainerInfo, error) {
+ 			t.Logf("StartContainer(image=%s, id=%s)", image, containerID)
+@@ -37,8 +39,13 @@ func TestRunner(t *testing.T) {
+ 				if names := clientDefinitionNames(defs); !reflect.DeepEqual(names, clientDesignatorNames(simClients)) {
+ 					t.Fatal("wrong client names:", names)
+ 				}
++				if err := hivesim.RunSuite(sim, hivesim.Suite{Name: "first suite", Tests: []hivesim.AnyTest{
++					hivesim.TestSpec{Name: "passing case", Run: func(*hivesim.T) {}},
++				}}); err != nil {
++					t.Fatal(err)
++				}
+ 			}
+-			return new(libhive.ContainerInfo), nil
++			return &libhive.ContainerInfo{ExitError: func(context.Context) error { return simulatorExit }}, nil
+ 		},
+ 	})
+ 
+@@ -57,6 +64,14 @@ func TestRunner(t *testing.T) {
+ 
+ 	content, _ := os.ReadFile(filepath.Join(simOpt.LogDir, "hive.json"))
+ 	t.Logf("hive.json content: %s", content)
++
++	// A crashed simulator with a fully written passing suite must still fail.
++	simulatorExit = errors.New("simulator aborted after its first suite")
++	simOpt.LogDir = t.TempDir()
++	result, err := runner.Run(ctx, "sim-1", simOpt, libhive.HiveInfo{})
++	if result.Tests != 1 || result.TestsFailed != 0 || !errors.Is(err, simulatorExit) {
++		t.Fatalf("Run() accepted a partial passing run: result=%+v err=%v", result, err)
++	}
+ }
+ 
+ func makeTestInventory() libhive.Inventory {

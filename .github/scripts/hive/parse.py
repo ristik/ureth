@@ -8,6 +8,7 @@ parser = argparse.ArgumentParser(description="Check for unexpected test results 
 parser.add_argument("report_json", help="Path to the hive report JSON file.")
 parser.add_argument("--exclusion", required=True, help="Path to the exclusion YAML file.")
 parser.add_argument("--ignored", required=True, help="Path to the ignored tests YAML file.")
+parser.add_argument("--fixture-variant", choices=["amsterdam", "osaka"], help="Fixture matrix used by the simulator.")
 args = parser.parse_args()
 
 # Load hive JSON
@@ -16,13 +17,18 @@ with open(args.report_json, 'r') as file:
 
 # Load exclusion YAML
 with open(args.exclusion, 'r') as file:
-    exclusion_data = yaml.safe_load(file)
-    exclusions = exclusion_data.get(report['name'], [])
+    exclusion_data = yaml.safe_load(file) or {}
+    exclusions = set(exclusion_data.get(report['name'], []))
+    variant_exclusions = exclusion_data.get('fixture_variants', {}).get(args.fixture_variant, {})
+    exclusions.update(variant_exclusions.get(report['name'], []))
 
 # Load ignored tests YAML
 with open(args.ignored, 'r') as file:
-    ignored_data = yaml.safe_load(file)
+    ignored_data = yaml.safe_load(file) or {}
     ignored_tests = ignored_data.get(report['name'], [])
+
+if not report['testCases']:
+    sys.exit('Hive report contains no test cases.')
 
 # Collect unexpected failures and passes
 unexpected_failures = []

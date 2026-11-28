@@ -39,6 +39,13 @@ RUN cargo chef cook --profile $BUILD_PROFILE --features "$FEATURES" --recipe-pat
 #
 # TARGETPLATFORM is set by BuildKit: https://docs.docker.com/reference/dockerfile#automatic-platform-args-in-the-global-scope
 ARG TARGETPLATFORM
+# Bake supplies version metadata because the build context excludes .git.
+ARG VERGEN_GIT_SHA=""
+ARG VERGEN_GIT_DESCRIBE=""
+ARG VERGEN_GIT_DIRTY="false"
+ENV VERGEN_GIT_SHA=$VERGEN_GIT_SHA
+ENV VERGEN_GIT_DESCRIBE=$VERGEN_GIT_DESCRIBE
+ENV VERGEN_GIT_DIRTY=$VERGEN_GIT_DIRTY
 COPY --exclude=dist . .
 RUN if [ -n "$RUSTFLAGS" ]; then \
         export RUSTFLAGS="$RUSTFLAGS"; \

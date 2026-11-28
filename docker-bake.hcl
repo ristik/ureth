@@ -16,6 +16,10 @@ variable "FEATURES" {
   default = ""
 }
 
+variable "DEPOT_BUILD" {
+  default = true
+}
+
 // Git info for vergen (since .git is excluded from Docker context)
 variable "VERGEN_GIT_SHA" {
   default = ""
@@ -49,12 +53,12 @@ target "_base" {
     VERGEN_GIT_DESCRIBE = "${VERGEN_GIT_DESCRIBE}"
     VERGEN_GIT_DIRTY   = "${VERGEN_GIT_DIRTY}"
   }
-  secret = [
+  secret = DEPOT_BUILD ? [
     {
       type = "env"
       id   = "DEPOT_TOKEN"
     }
-  ]
+  ] : []
 }
 target "_base_profiling" {
   inherits = ["_base"]

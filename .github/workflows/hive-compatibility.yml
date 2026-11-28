@@ -1,0 +1,161 @@
+# Diagnostic upstream compatibility runs. The daily Hive gate does not depend on this workflow.
+name: Hive upstream compatibility
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "0 3 * * 0"
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions: {}
+
+jobs:
+  build-upstream:
+    if: github.repository == 'paradigmxyz/reth'
+    permissions:
+      contents: read
+      id-token: write
+    uses: ./.github/workflows/docker-test-depot.yml
+    with:
+      hive_target: hive
+      artifact_name: reth
+    secrets:
+      DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
+
+  build-fork:
+    if: github.repository != 'paradigmxyz/reth'
+    permissions:
+      contents: read
+    uses: ./.github/workflows/docker-test.yml
+    with:
+      hive_target: hive
+      artifact_name: reth
+
+  test:
+    needs: [build-upstream, build-fork]
+    if: >-
+      !cancelled() && (needs.build-upstream.result == 'success' || needs.build-fork.result == 'success')
+    permissions:
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix:
+        variant:
+          - amsterdam
+          - osaka
+        scenario:
+          - sim: smoke/genesis
+          - sim: smoke/network
+          - sim: ethereum/sync
+          - sim: devp2p
+            limit: discv4
+          - sim: devp2p
+            limit: discv5
+            include:
+              - PingLargeRequestID
+          - sim: ethereum/engine
+            limit: engine-exchange-capabilities
+          - sim: ethereum/engine
+            limit: engine-withdrawals
+          - sim: ethereum/engine
+            limit: engine-auth
+          - sim: ethereum/engine
+            limit: engine-api
+          - sim: ethereum/engine
+            limit: cancun
+          - sim: ethereum/rpc-compat
+            include:
+              - eth_blockNumber
+              - eth_call
+              - eth_chainId
+              - eth_createAccessList
+              - eth_estimateGas
+              - eth_feeHistory
+              - eth_getBalance
+              - eth_getBlockBy
+              - eth_getBlockTransactionCountBy
+              - eth_getCode
+              - eth_getProof
+              - eth_getStorage
+              - eth_getTransactionBy
+              - eth_getTransactionCount
+              - eth_getTransactionReceipt
+              - eth_sendRawTransaction
+              - eth_syncing
+              - debug_
+          - sim: ethereum/eels/consume-engine
+            limit: .*tests/osaka.*
+          - sim: ethereum/eels/consume-engine
+            limit: .*tests/prague.*
+          - sim: ethereum/eels/consume-engine
+            limit: .*tests/cancun.*
+            fork_timeout_minutes: 180
+          - sim: ethereum/eels/consume-engine
+            limit: .*tests/shanghai.*
+          - sim: ethereum/eels/consume-engine
+            limit: .*tests/berlin.*
+          - sim: ethereum/eels/consume-engine
+            limit: .*tests/istanbul.*
+          - sim: ethereum/eels/consume-engine
+            limit: .*tests/homestead.*
+          - sim: ethereum/eels/consume-engine
+            limit: .*tests/frontier.*
+          - sim: ethereum/eels/consume-engine
+            limit: .*tests/paris.*
+          - sim: ethereum/eels/consume-rlp
+            limit: .*tests/osaka.*
+          - sim: ethereum/eels/consume-rlp
+            limit: .*tests/prague.*
+          - sim: ethereum/eels/consume-rlp
+            limit: .*tests/cancun.*
+            fork_timeout_minutes: 180
+          - sim: ethereum/eels/consume-rlp
+            limit: .*tests/shanghai.*
+          - sim: ethereum/eels/consume-rlp
+            limit: .*tests/berlin.*
+          - sim: ethereum/eels/consume-rlp
+            limit: .*tests/istanbul.*
+          - sim: ethereum/eels/consume-rlp
+            limit: .*tests/homestead.*
+          - sim: ethereum/eels/consume-rlp
+            limit: .*tests/frontier.*
+          - sim: ethereum/eels/consume-rlp
+            limit: .*tests/paris.*
+          - sim: ethereum/eels/execute-blobs
+            limit: .*tests/osaka.*
+        include:
+          - variant: amsterdam
+            scenario:
+              sim: ethereum/eels/consume-engine
+              limit: .*tests/amsterdam.*
+          - variant: amsterdam
+            scenario:
+              sim: ethereum/eels/consume-rlp
+              limit: .*tests/amsterdam.*
+          - variant: amsterdam
+            scenario:
+              sim: ethereum/eels/execute-blobs
+              limit: .*tests/amsterdam.*
+    name: Hive ${{ matrix.variant }} / ${{ matrix.scenario.sim }}${{ matrix.scenario.limit && format(' - {0}', matrix.scenario.limit) }}
+    uses: ./.github/workflows/hive-simulator.yml
+    with:
+      sim: ${{ matrix.scenario.sim }}
+      limit: ${{ matrix.scenario.include && format('{0}/{1}', matrix.scenario.limit, join(matrix.scenario.include, '|')) || matrix.scenario.limit || '/' }}
+      fixture: ${{ matrix.variant }}
+      timeout: ${{ matrix.scenario.fork_timeout_minutes || (matrix.variant == 'amsterdam' && matrix.scenario.sim == 'ethereum/eels/consume-rlp' && matrix.scenario.limit == '.*tests/frontier.*' && 180) || 120 }}
+      artifact: hive-compatibility-${{ strategy.job-index }}
+
+  notify-on-error:
+    needs: [test]
+    if: failure() && github.repository == 'paradigmxyz/reth'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Slack Webhook Action
+        uses: rtCamp/action-slack-notify@33ca3be66c6f378fe1610fd1d5258632dbed5e58 # v2.4.0
+        env:
+          SLACK_COLOR: ${{ job.status }}
+          SLACK_MESSAGE: "Failed run: https://github.com/paradigmxyz/reth/actions/runs/${{ github.run_id }}"
+          SLACK_WEBHOOK: ${{ secrets.SLACK_HIVE_WEBHOOK_URL }}
