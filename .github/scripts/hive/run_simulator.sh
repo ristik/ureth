@@ -17,14 +17,22 @@ if [[ "${sim}" == *"eels"* ]]; then
 fi
 
 build_args=()
-if [[ "${BUILD_SIMULATOR:-false}" == true && "${sim}" == ethereum/eels/* ]]; then
-    source "$(dirname "${BASH_SOURCE[0]}")/fixture_config.sh"
-    build_args+=(--sim.buildarg branch="${eels_branch}")
-    if [[ "${sim}" == ethereum/eels/execute-blobs ]]; then
-        build_args+=(--sim.buildarg fork="${eels_fork}")
-    else
-        build_args+=(--sim.buildarg fixtures="${eels_fixtures}")
-    fi
+if [[ "${BUILD_SIMULATOR:-false}" == true ]]; then
+    case "${sim}" in
+        ethereum/rpc-compat)
+            # The next execution-apis revision switched the chain to newer Amsterdam rules.
+            build_args+=(--sim.buildarg branch=377333f4de669829cebce8ab63d7466b2504f344)
+            ;;
+        ethereum/eels/*)
+            source "$(dirname "${BASH_SOURCE[0]}")/fixture_config.sh"
+            build_args+=(--sim.buildarg branch="${eels_branch}")
+            if [[ "${sim}" == ethereum/eels/execute-blobs ]]; then
+                build_args+=(--sim.buildarg fork="${eels_fork}")
+            else
+                build_args+=(--sim.buildarg fixtures="${eels_fixtures}")
+            fi
+            ;;
+    esac
 fi
 
 cd hivetests/ || exit 1
