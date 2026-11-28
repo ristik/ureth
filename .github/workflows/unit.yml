@@ -64,6 +64,10 @@ jobs:
             ${{ matrix.exclude_args }} --workspace \
             --exclude ef-tests --no-tests=warn \
             -E "(!kind(test) and not binary(e2e_testsuite)) or package(reth-unicity-b1) or package(reth-unicity-b2)"
+      - name: Unicity execution profile
+        run: |
+          cargo nextest run --locked -p reth-unicity-execution --features test-utils \
+            --test block_adapter --no-tests=fail -E 'test(release_profile_)'
 
   bridge-corpus:
     name: Exact shared Go corpus replay
