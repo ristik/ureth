@@ -16,7 +16,9 @@ use reth_evm::{
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput},
     ConfigureEvm, Evm, EvmEnvFor, NextBlockEnvAttributes,
 };
-use reth_primitives_traits::{transaction::error::InvalidTransactionError, HeaderTy, SealedHeader};
+use reth_primitives_traits::{
+    transaction::error::InvalidTransactionError, HeaderTy, SealedHeader, SealedHeaderFor,
+};
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_rpc_convert::RpcConvert;
 use reth_rpc_eth_types::{
@@ -73,32 +75,27 @@ pub trait LoadPendingBlock:
     fn pending_block_env_and_state(
         &self,
     ) -> Result<(PendingBlockEnv<Self::Evm>, Option<StateProviderBox>), Self::Error> {
-        let provider = self.provider();
-        if let Some(PendingBlockSnapshot { block, receipts, open_state }) = provider
-            .pending_block_snapshot(|hash| provider.state_by_block_hash(hash))
-            .map_err(Self::Error::from_eth_err)?
+        if let Some((BlockAndReceipts { block, receipts }, evm_env, state)) =
+            self.executed_pending_block_env_and_state()?
         {
-            let state = open_state().map_err(Self::Error::from_eth_err)?;
-            // Note: for the PENDING block we assume it is past the known merge block and
-            // thus this will not fail when looking up the total
-            // difficulty value for the blockenv.
-            let evm_env = self
-                .evm_config()
-                .rpc_evm_env(block.header(), None, || Ok(StateProviderDatabase::new(&state)))
-                .map_err(RethError::Other)
-                .map_err(Self::Error::from_eth_err)?;
-
             return Ok((
                 PendingBlockEnv::new(
                     evm_env,
-                    PendingBlockEnvOrigin::ActualPending(block, Arc::new(receipts)),
+                    PendingBlockEnvOrigin::ActualPending(block, receipts),
                 ),
                 Some(state),
             ));
         }
 
-        // no pending block from the CL yet, so we use the latest block and modify the env
-        // values that we can
+        let (latest, evm_env) = self.pending_block_env_from_latest()?;
+        Ok((PendingBlockEnv::new(evm_env, PendingBlockEnvOrigin::DerivedFromLatest(latest)), None))
+    }
+
+    /// Derives a pending environment from the canonical tip without looking up pending again.
+    #[expect(clippy::type_complexity)]
+    fn pending_block_env_from_latest(
+        &self,
+    ) -> Result<(SealedHeaderFor<Self::Primitives>, EvmEnvFor<Self::Evm>), Self::Error> {
         let latest = self
             .provider()
             .latest_header()
@@ -113,7 +110,32 @@ pub trait LoadPendingBlock:
             .map_err(RethError::Other)
             .map_err(Self::Error::from_eth_err)?;
 
-        Ok((PendingBlockEnv::new(evm_env, PendingBlockEnvOrigin::DerivedFromLatest(latest)), None))
+        Ok((latest, evm_env))
+    }
+
+    /// Captures an executed pending block, its environment, and its post-state together.
+    #[expect(clippy::type_complexity)]
+    fn executed_pending_block_env_and_state(
+        &self,
+    ) -> Result<
+        Option<(BlockAndReceipts<Self::Primitives>, EvmEnvFor<Self::Evm>, StateProviderBox)>,
+        Self::Error,
+    > {
+        let provider = self.provider();
+        let Some(PendingBlockSnapshot { block, receipts, open_state }) = provider
+            .pending_block_snapshot(|hash| provider.state_by_block_hash(hash))
+            .map_err(Self::Error::from_eth_err)?
+        else {
+            return Ok(None)
+        };
+        let state = open_state().map_err(Self::Error::from_eth_err)?;
+        let evm_env = self
+            .evm_config()
+            .rpc_evm_env(block.header(), None, || Ok(StateProviderDatabase::new(&state)))
+            .map_err(RethError::Other)
+            .map_err(Self::Error::from_eth_err)?;
+
+        Ok(Some((BlockAndReceipts { block, receipts: Arc::new(receipts) }, evm_env, state)))
     }
 
     /// Returns [`ConfigureEvm::NextBlockEnvCtx`] for building a local pending block.

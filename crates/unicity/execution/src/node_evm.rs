@@ -432,6 +432,11 @@ impl ConfigureEvm for UnicityNodeEvmConfig {
         Ok(env)
     }
 
+    fn rpc_pending_call_fallback_to_latest(&self) -> bool {
+        // A Unicity child requires authenticated execution input to be built from its parent.
+        true
+    }
+
     fn rpc_evm_env<DB: alloy_evm::Database>(
         &self,
         header: &Header,

@@ -27,7 +27,6 @@ use reth_evm::{
     block::BlockExecutor, env::BlockEnvironment, execute::BlockBuilder, ConfigureEvm, Evm,
     EvmEnvFor, EvmFor, HaltReasonFor, InspectorFor, TransactionEnvMut, TxEnvFor,
 };
-use reth_node_api::BlockBody;
 use reth_primitives_traits::Recovered;
 use reth_revm::{
     cancelled::CancelOnDrop,
@@ -316,7 +315,7 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
             let StateContext { transaction_index, block_number } =
                 state_context.unwrap_or_default();
-            let transaction_index = transaction_index.unwrap_or_default();
+            let tx_index = transaction_index.unwrap_or_default().index();
 
             let mut target_block = block_number.unwrap_or_default();
             let is_block_target_pending = target_block.is_pending();
@@ -334,34 +333,9 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                 target_block = block_hash.into();
             }
 
-            let block = self
-                .recovered_block(target_block)
-                .await?
-                .ok_or(EthApiError::HeaderNotFound(target_block))?;
-            let evm_env = self.evm_env_for_header(block.sealed_block().sealed_header())?;
-
-            // we're essentially replaying the transactions in the block here, hence we need the
-            // state that points to the beginning of the block, which is the state at
-            // the parent block
-            let mut at = block.parent_hash();
-            let mut replay_block_txs = true;
-
-            let num_txs =
-                transaction_index.index().unwrap_or_else(|| block.body().transactions().len());
-            // but if all transactions are to be replayed, we can use the state at the block itself,
-            // however only if we're not targeting the pending block, because for pending we can't
-            // rely on the block's state being available
-            if !is_block_target_pending && num_txs == block.body().transactions().len() {
-                at = block.hash();
-                replay_block_txs = false;
-            }
-
-            self.spawn_with_state_at_block(at, move |this, mut db| {
+            let block = self.call_block_at(target_block).await?;
+            self.spawn_with_call_block(block, tx_index, move |this, mut db, evm_env| {
                 let mut all_results = Vec::with_capacity(bundles.len());
-
-                if replay_block_txs {
-                    this.replay_block_until(&mut db, &block, num_txs)?;
-                }
 
                 // transact all bundles
                 for (bundle_index, bundle) in bundles.into_iter().enumerate() {
@@ -376,8 +350,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
 
                     // transact all transactions in the bundle
                     for (tx_index, tx) in transactions.into_iter().enumerate() {
-                        // Apply overrides, state overrides are only applied for the first tx in the
-                        // request
+                        // Apply overrides, state overrides are only applied for the first tx in
+                        // the request
                         let overrides =
                             EvmOverrides::new(state_override.take(), block_overrides.clone());
 
@@ -413,8 +387,8 @@ pub trait EthCall: EstimateCall + Call + LoadPendingBlock + LoadBlock + FullEthA
                             }
                         }
 
-                        // Commit state changes after each transaction to allow subsequent calls to
-                        // see the updates
+                        // Commit state changes after each transaction to allow subsequent calls
+                        // to see the updates
                         db.commit(res.state);
                     }
 

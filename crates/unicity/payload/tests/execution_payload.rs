@@ -5276,6 +5276,38 @@ async fn the_production_bind_sites_resolve_a_prague_rule_across_e() {
 }
 
 #[tokio::test]
+async fn pending_simulation_uses_unicity_genesis_without_an_executed_block() -> eyre::Result<()> {
+    use jsonrpsee::{core::client::ClientT, rpc_params};
+    use reth_node_builder::{NodeBuilder, NodeHandle};
+    use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
+    use reth_tasks::Runtime;
+    use serde_json::{json, Value};
+
+    let (fixture, genesis, _, _, context, _) = seal_fixture();
+    let unicity = UnicityNode::new(SealJobRegistry::new(), context.seal);
+    let config = NodeConfig::test()
+        .with_chain(fixture.chain_spec)
+        .with_unused_ports()
+        .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
+    let NodeHandle { node, node_exit_future: _ } =
+        NodeBuilder::new(config).testing_node(Runtime::test()).node(unicity).launch().await?;
+    assert!(node.provider.pending_block()?.is_none());
+
+    let client = node.add_ons_handle.rpc_server_handles.rpc.http_client().unwrap();
+    let to = Address::repeat_byte(0x42);
+    let bundles = json!([{ "transactions": [{ "to": to }] }]);
+    let overrides = json!({ (format!("{to:#x}")): { "code": "0x4360005260206000f3" } });
+    let full: Value = client
+        .request(
+            "eth_callMany",
+            rpc_params![bundles, json!({ "blockNumber": "pending" }), overrides],
+        )
+        .await?;
+    assert_eq!(full[0][0]["value"], format!("0x{:064x}", genesis.number));
+    Ok(())
+}
+
+#[tokio::test]
 async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyre::Result<()> {
     use alloy_consensus::TxEip7702;
     use alloy_eips::{eip2718::Encodable2718, eip7702::Authorization, BlockId};
@@ -5619,6 +5651,58 @@ async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyr
     assert_eq!(replay.as_array().unwrap().len(), 1);
     assert_eq!(replay[0]["result"]["failed"], false);
     assert_eq!(replay[0]["result"]["gas"], 25_000);
+
+    // The override reads the queried block number and the fee payer's balance. The full
+    // call sees the paid transaction's fee debit, and replay at index zero sees its parent.
+    assert!(node.provider.pending_block()?.is_none());
+    let tip_number = traced.payload.block().header().number;
+    let payer = traced.payload.block().body().transactions[0]
+        .clone()
+        .try_into_recovered()
+        .expect("signed fixture transaction")
+        .signer();
+    let balance = |hash| {
+        node.provider
+            .state_by_block_hash(hash)?
+            .basic_account(&payer)
+            .map(|account| account.expect("funded fixture payer").balance)
+    };
+    let tip_balance = balance(traced_hash)?;
+    let parent_balance = balance(parent_hash)?;
+    assert!(tip_balance < parent_balance);
+    let expected = |balance| format!("0x{tip_number:064x}{balance:064x}");
+    let call = json!({ "to": to });
+    let bundles = json!([{ "transactions": [call.clone()] }]);
+    let code = format!("0x4360005273{}3160205260406000f3", alloy_primitives::hex::encode(payer));
+    let overrides = json!({ (format!("{to:#x}")): { "code": code } });
+    let full: Value = client
+        .request(
+            "eth_callMany",
+            rpc_params![bundles.clone(), json!({ "blockNumber": "pending" }), overrides.clone()],
+        )
+        .await?;
+    assert_eq!(full[0][0]["value"], expected(tip_balance));
+    let traces: Value = client
+        .request(
+            "debug_traceCallMany",
+            rpc_params![
+                bundles,
+                json!({ "blockNumber": "pending", "transactionIndex": 0 }),
+                json!({ "stateOverrides": overrides.clone() })
+            ],
+        )
+        .await?;
+    let indexed: Value = client
+        .request(
+            "debug_traceCall",
+            rpc_params![call, "pending", json!({ "stateOverrides": overrides, "txIndex": "0x0" })],
+        )
+        .await?;
+    for trace in [&traces[0][0], &indexed] {
+        assert_eq!(trace["failed"], false);
+        assert_eq!(trace["returnValue"], expected(parent_balance));
+    }
+
     for byte in 1..=registry.capacity() as u8 {
         let other = bound_input(&root_with_tree_root(&root, B256::repeat_byte(byte)), &genesis);
         registry.insert(other.root_input().input_commitment().unwrap(), other)?;
