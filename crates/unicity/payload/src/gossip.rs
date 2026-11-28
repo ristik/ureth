@@ -35,6 +35,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
     },
+    time::Duration,
 };
 
 use reth_chainspec::Hardforks;
@@ -361,6 +362,10 @@ where
         // Only the peers that were added (the validator set) are connected to; a stranger that
         // dials in or is discovered is not a transaction peer.
         config.peers_config.trusted_nodes_only = true;
+        // Peers in the same generation may register their DNS names after this node starts.
+        // Keep retrying promptly while preserving a shorter configured interval.
+        let interval = &mut config.peers_config.trusted_nodes_resolution_interval;
+        *interval = (*interval).min(Duration::from_secs(10));
         let network = reth_network::NetworkManager::builder(config).await?;
         let handle = ctx.start_network(network, pool);
         tracing::info!(target: "unicity::gossip", enode = %handle.local_node_record(), "transaction-only P2P initialized (block and header downloads refused)");
