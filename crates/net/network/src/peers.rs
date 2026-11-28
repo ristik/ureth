@@ -3626,7 +3626,7 @@ mod tests {
         let peer_id = PeerId::random();
         let stale = NodeRecord::new_with_ports(Ipv4Addr::LOCALHOST.into(), 1234, None, peer_id);
         let mut manager = PeersManager::new(
-            unresolved_trusted_config(peer_id).with_basic_nodes([stale].into_iter().collect()),
+            unresolved_trusted_config(peer_id).with_basic_nodes(std::iter::once(stale).collect()),
         );
         assert_eq!(manager.peer_by_id(peer_id), Some((stale, PeerKind::Basic)));
         assert!(manager.best_unconnected().is_none());
@@ -3648,7 +3648,7 @@ mod tests {
         ] {
             let mut manager = PeersManager::new(
                 unresolved_trusted_config(peer_id)
-                    .with_basic_nodes([stale].into_iter().collect())
+                    .with_basic_nodes(std::iter::once(stale).collect())
                     .with_ban_list(ban_list),
             );
 
@@ -3721,7 +3721,7 @@ mod tests {
             let stale = NodeRecord::new_with_ports(Ipv4Addr::LOCALHOST.into(), 1234, None, peer_id);
             let mut config = unresolved_trusted_config(peer_id);
             if occupied {
-                config = config.with_basic_nodes([stale].into_iter().collect());
+                config = config.with_basic_nodes(std::iter::once(stale).collect());
             }
             let mut manager = PeersManager::new(config);
             manager.remove_peer_from_trusted_set(peer_id);
