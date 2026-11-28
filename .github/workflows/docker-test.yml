@@ -17,7 +17,8 @@ permissions: {}
 
 jobs:
   build:
-    timeout-minutes: 45
+    # Cold builds of the test binary use the standard GitHub runner on the fork.
+    timeout-minutes: ${{ github.repository == 'paradigmxyz/reth' && 45 || 75 }}
     runs-on: ubuntu-latest
     permissions:
       id-token: write
