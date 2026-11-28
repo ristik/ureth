@@ -114,6 +114,7 @@ members = [
     "crates/storage/storage-api/",
     "crates/storage/storage-overlay/",
     "crates/tasks/",
+    "crates/time/",
     "crates/tokio-util/",
     "crates/tracing/",
     "crates/transaction-pool/",
@@ -430,6 +431,7 @@ reth-storage-errors = { path = "crates/storage/errors", default-features = false
 reth-storage-overlay = { path = "crates/storage/storage-overlay" }
 reth-tasks = { path = "crates/tasks" }
 reth-testing-utils = { path = "testing/testing-utils" }
+reth-time = { path = "crates/time" }
 reth-tokio-util = { path = "crates/tokio-util" }
 reth-tracing = { path = "crates/tracing" }
 reth-tracing-otlp = { path = "crates/tracing-otlp" }
@@ -511,9 +513,7 @@ dyn-clone = "1.0.17"
 eyre = "0.6"
 fdlimit = "0.3.0"
 fixed-map = { version = "0.9", default-features = false }
-humantime = "2.1"
 imbl = "7"
-humantime-serde = "1.1"
 itertools = { version = "0.14", default-features = false }
 linked_hash_set = "0.1"
 libc = "0.2"
@@ -551,7 +551,7 @@ fixed-cache = { version = "0.1.10", default-features = false, features = ["alloc
 moka = "0.12"
 tar-no-std = { version = "0.4.2", default-features = false }
 miniz_oxide = { version = "0.9.0", default-features = false }
-chrono = "0.4.41"
+jiff = "1.0"
 
 # metrics
 metrics = "0.24.0"

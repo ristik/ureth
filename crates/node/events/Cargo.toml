@@ -36,5 +36,5 @@ tracing.workspace = true
 
 # misc
 pin-project.workspace = true
-humantime.workspace = true
+reth-time.workspace = true
 derive_more.workspace = true

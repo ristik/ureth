@@ -506,7 +506,7 @@ pub struct EngineArgs {
     /// Set to 0s to disable.
     #[arg(
         long = "engine.state-root-task-timeout",
-        value_parser = humantime::parse_duration,
+        value_parser = reth_time::parse_duration,
         default_value = DefaultEngineValues::get_global().state_root_task_timeout.as_deref().unwrap_or("4s"),
     )]
     pub state_root_task_timeout: Option<Duration>,
@@ -575,7 +575,7 @@ pub struct EngineArgs {
     #[cfg(feature = "trie-debug")]
     #[arg(
         long = "engine.proof-jitter",
-        value_parser = humantime::parse_duration,
+        value_parser = reth_time::parse_duration,
     )]
     pub proof_jitter: Option<Duration>,
 }
@@ -649,7 +649,7 @@ impl Default for EngineArgs {
             disable_sparse_trie_cache_pruning,
             state_root_task_timeout: state_root_task_timeout
                 .as_deref()
-                .map(|s| humantime::parse_duration(s).expect("valid default duration")),
+                .map(|s| reth_time::parse_duration(s).expect("valid default duration")),
             share_execution_cache_with_payload_builder,
             share_sparse_trie_with_payload_builder,
             suppress_persistence_during_build,

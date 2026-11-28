@@ -15,7 +15,7 @@ use reth_primitives_traits::{Block, BlockBody};
 use reth_storage_api::{BlockReader, BlockReaderIdExt, NodePrimitivesProvider};
 use reth_transaction_pool::TransactionPool;
 
-use chrono::Local;
+use jiff::ZonedDateTime;
 use serde_json::Value;
 use std::{
     str::FromStr,
@@ -232,7 +232,19 @@ where
         let ping_time = Instant::now();
         *self.last_ping.lock().await = Some(ping_time);
 
-        let client_time = Local::now().format("%Y-%m-%d %H:%M:%S%.f %:z %Z").to_string();
+        let now = ZonedDateTime::now();
+        let nanos = now.subsec_nanosecond();
+        // Keep the EthStats timestamp's original fractional groups and repeated local offset.
+        let format = if nanos == 0 {
+            "%Y-%m-%d %H:%M:%S %:z %:z"
+        } else if nanos % 1_000_000 == 0 {
+            "%Y-%m-%d %H:%M:%S%.3f %:z %:z"
+        } else if nanos % 1_000 == 0 {
+            "%Y-%m-%d %H:%M:%S%.6f %:z %:z"
+        } else {
+            "%Y-%m-%d %H:%M:%S%.9f %:z %:z"
+        };
+        let client_time = now.strftime(format).to_string();
         let ping_msg = PingMsg { id: self.credentials.node_id.clone(), client_time };
 
         let message = ping_msg.generate_ping_message();

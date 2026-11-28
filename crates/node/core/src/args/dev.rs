@@ -3,8 +3,8 @@
 use std::{num::NonZeroUsize, sync::OnceLock, time::Duration};
 
 use clap::{builder::Resettable, Args};
-use humantime::{format_duration, parse_duration};
 use reth_engine_local::DEFAULT_FINALITY_DEPTH;
+use reth_time::{format_duration, parse_duration};
 
 const DEFAULT_MNEMONIC: &str = "test test test test test test test test test test test junk";
 
@@ -36,7 +36,7 @@ pub struct DevArgs {
 
     /// Interval between blocks.
     ///
-    /// Parses strings using [`humantime::parse_duration`]
+    /// Parses strings using [`reth_time::parse_duration`]
     /// --dev.block-time 12s
     #[arg(
         long = "dev.block-time",
@@ -65,7 +65,7 @@ pub struct DevArgs {
     /// local miner, giving the payload job time for multiple rebuild attempts with
     /// new transactions from the pool.
     ///
-    /// Parses strings using [`humantime::parse_duration`]
+    /// Parses strings using [`reth_time::parse_duration`]
     /// --dev.payload-wait-time 450ms
     #[arg(
         long = "dev.payload-wait-time",
@@ -290,6 +290,20 @@ mod tests {
             "0",
         ])
         .is_err());
+    }
+
+    #[test]
+    fn legacy_duration_flags() {
+        let args = CommandParser::<DevArgs>::parse_from([
+            "reth",
+            "--dev.block-time",
+            "1M2days",
+            "--dev.payload-wait-time",
+            "1.25ms 10µs",
+        ])
+        .args;
+        assert_eq!(args.block_time, Some(Duration::from_secs(2_802_816)));
+        assert_eq!(args.payload_wait_time, Some(Duration::from_micros(1_260)));
     }
 
     #[test]
