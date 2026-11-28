@@ -49,11 +49,11 @@ jobs:
 
       # Depot build (upstream only)
       - name: Set up Depot CLI
-        if: steps.fork.outputs.is_fork == 'false'
+        if: github.repository == 'paradigmxyz/reth' && steps.fork.outputs.is_fork == 'false'
         uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1.7.2
 
       - name: Build reth image (Depot)
-        if: steps.fork.outputs.is_fork == 'false'
+        if: github.repository == 'paradigmxyz/reth' && steps.fork.outputs.is_fork == 'false'
         uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
         env:
           DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
@@ -67,11 +67,11 @@ jobs:
 
       # Docker build (forks)
       - name: Set up Docker Buildx
-        if: steps.fork.outputs.is_fork == 'true'
+        if: github.repository != 'paradigmxyz/reth' || steps.fork.outputs.is_fork == 'true'
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
 
       - name: Build reth image (Docker)
-        if: steps.fork.outputs.is_fork == 'true'
+        if: github.repository != 'paradigmxyz/reth' || steps.fork.outputs.is_fork == 'true'
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         env:
           VERGEN_GIT_SHA: ${{ steps.git.outputs.sha }}

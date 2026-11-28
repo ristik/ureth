@@ -3,22 +3,7 @@ set -eo pipefail
 
 fixture_variant="${1:-amsterdam}"
 
-case "${fixture_variant}" in
-    amsterdam)
-        eels_fixtures="https://github.com/ethereum/execution-specs/releases/download/tests-glamsterdam-devnet@v7.2.1/fixtures_glamsterdam-devnet.tar.gz"
-        eels_branch="devnets/glamsterdam/7"
-        eels_fork="Amsterdam"
-        ;;
-    osaka)
-        eels_fixtures="https://github.com/ethereum/execution-spec-tests/releases/download/v5.3.0/fixtures_develop.tar.gz"
-        eels_branch="mainnet"
-        eels_fork="Osaka"
-        ;;
-    *)
-        echo "unknown hive fixture variant: ${fixture_variant}"
-        exit 1
-        ;;
-esac
+source "$(dirname "${BASH_SOURCE[0]}")/fixture_config.sh"
 
 # Create the hive_assets directory
 mkdir hive_assets/

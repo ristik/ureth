@@ -1,8 +1,6 @@
 #!/usr/bin/env bash
 # set -x
 
-cd hivetests/
-
 sim="${1}"
 limit="${2}"
 fixture_variant="${3:-}"
@@ -18,13 +16,26 @@ if [[ "${sim}" == *"eels"* ]]; then
     parallelism=4
 fi
 
+build_args=()
+if [[ "${BUILD_SIMULATOR:-false}" == true && "${sim}" == ethereum/eels/* ]]; then
+    source "$(dirname "${BASH_SOURCE[0]}")/fixture_config.sh"
+    build_args+=(--sim.buildarg branch="${eels_branch}")
+    if [[ "${sim}" == ethereum/eels/execute-blobs ]]; then
+        build_args+=(--sim.buildarg fork="${eels_fork}")
+    else
+        build_args+=(--sim.buildarg fixtures="${eels_fixtures}")
+    fi
+fi
+
+cd hivetests/ || exit 1
+
 run_hive() {
     hive \
   --sim "${sim}" \
   --sim.limit "${limit}" \
   --sim.limit.exact=false \
   --sim.parallelism "${parallelism}" \
-  --client reth \
+  --client reth "${build_args[@]}" \
   2>&1 | tee /tmp/log || true
 }
 
