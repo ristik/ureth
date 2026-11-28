@@ -97,7 +97,8 @@ jobs:
       !cancelled() && needs.build-reth.result == 'success' &&
       (needs.prepare-hive.result == 'success' ||
         (github.repository != 'paradigmxyz/reth' && needs.prepare-hive.result == 'skipped'))
-    timeout-minutes: 120
+    # The Cancun EELS shard exceeded two hours on a standard GitHub runner.
+    timeout-minutes: ${{ github.repository != 'paradigmxyz/reth' && contains(matrix.scenario.limit, 'tests/cancun') && 180 || 120 }}
     strategy:
       fail-fast: false
       matrix:
@@ -315,7 +316,8 @@ jobs:
       !cancelled() && needs.build-reth.result == 'success' &&
       (needs.prepare-hive.result == 'success' ||
         (github.repository != 'paradigmxyz/reth' && needs.prepare-hive.result == 'skipped'))
-    timeout-minutes: 120
+    # Keep the full Cancun EELS shard on a standard GitHub runner.
+    timeout-minutes: ${{ github.repository != 'paradigmxyz/reth' && contains(matrix.scenario.limit, 'tests/cancun') && 180 || 120 }}
     strategy:
       fail-fast: false
       matrix:
