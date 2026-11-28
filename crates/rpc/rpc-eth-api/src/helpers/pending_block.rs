@@ -92,6 +92,7 @@ pub trait LoadPendingBlock:
     }
 
     /// Derives a pending environment from the canonical tip without looking up pending again.
+    #[expect(clippy::type_complexity)]
     fn pending_block_env_from_latest(
         &self,
     ) -> Result<(SealedHeaderFor<Self::Primitives>, EvmEnvFor<Self::Evm>), Self::Error> {
