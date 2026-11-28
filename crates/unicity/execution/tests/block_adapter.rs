@@ -2,18 +2,25 @@
 
 mod support;
 
-use alloy_consensus::{transaction::Recovered, SignableTransaction, TxEip4844, TxLegacy};
-use alloy_eips::eip4788::BEACON_ROOTS_ADDRESS;
-use alloy_evm::block::BlockExecutor;
+use alloy_consensus::{Header, SignableTransaction, TxEip4844, TxEip7702, TxLegacy};
+use alloy_eips::{
+    eip4788::BEACON_ROOTS_ADDRESS,
+    eip4844::DATA_GAS_PER_BLOB,
+    eip4895::{Withdrawal, Withdrawals},
+    eip7685::EMPTY_REQUESTS_HASH,
+    eip7702::Authorization,
+};
+use alloy_evm::block::{BlockExecutionError, BlockExecutor, BlockValidationError};
 use alloy_genesis::Genesis;
-use alloy_primitives::{Address, Bytes, Signature, TxKind, B256, B64, U256};
-use reth_chainspec::ChainSpec;
+use alloy_primitives::{hex, keccak256, Address, Bytes, TxKind, B256, B64, U256};
+use reth_chainspec::{ChainSpec, EthereumHardforks};
+use reth_consensus::ConsensusError;
 use reth_ethereum_primitives::{Block, Transaction, TransactionSigned};
 use reth_evm::{ConfigureEvm, NextBlockEnvAttributes};
 use reth_primitives_traits::{
     crypto::secp256k1::sign_message, BlockBody, RecoveredBlock, SealedHeader, SignedTransaction,
 };
-use reth_storage_api::{AccountReader, StateProvider};
+use reth_storage_api::{AccountReader, HashedPostStateProvider, StateProvider};
 use reth_unicity_execution::{
     block::{BlockAccountingError, BlockProfile},
     block_executor::{
@@ -26,8 +33,13 @@ use reth_unicity_execution::{
     wire::bind_completed_parent,
     RootInputV2, SEAL_REGISTRY, SYSTEM_CALLER,
 };
-use revm::database::State;
-use std::sync::{Arc, Mutex};
+use revm::{
+    context_interface::result::InvalidTransaction, database::State, primitives::hardfork::SpecId,
+};
+use std::{
+    mem::discriminant,
+    sync::{Arc, Mutex},
+};
 use support::{
     b1::{ack_input, context, genesis_hash, input, profile, sealed},
     provider::FixtureProvider,
@@ -49,7 +61,7 @@ fn signed_call(
     value: U256,
     gas_limit: u64,
 ) -> TransactionSigned {
-    let transaction = Transaction::Legacy(TxLegacy {
+    signed_transaction(Transaction::Legacy(TxLegacy {
         chain_id: Some(chain_id),
         nonce,
         gas_price,
@@ -57,9 +69,11 @@ fn signed_call(
         to: TxKind::Call(to),
         value,
         input: Default::default(),
-    });
-    let key = B256::with_last_byte(1);
-    let signature = sign_message(key, transaction.signature_hash()).unwrap();
+    }))
+}
+
+fn signed_transaction(transaction: Transaction) -> TransactionSigned {
+    let signature = sign_message(B256::with_last_byte(1), transaction.signature_hash()).unwrap();
     TransactionSigned::new_unhashed(transaction, signature)
 }
 
@@ -631,6 +645,8 @@ fn import_fixture() -> ImportFixture {
     let genesis: Genesis = serde_json::from_str(genesis_json).unwrap();
     let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
     let genesis_header = chain_spec.genesis_header().clone();
+    assert!(chain_spec.is_cancun_active_at_timestamp(genesis_header.timestamp));
+    assert!(!chain_spec.is_prague_active_at_timestamp(genesis_header.timestamp));
     let parent = SealedHeader::new(genesis_header.clone(), genesis_hash());
     let mut provider = FixtureProvider::signed_genesis();
     provider.set_block_hash(0, genesis_hash());
@@ -693,22 +709,19 @@ fn with_transactions(
 
 /// A signed EIP-4844 transaction carrying one blob versioned hash.
 fn blob_tx(chain_id: u64) -> TransactionSigned {
-    TransactionSigned::new_unhashed(
-        Transaction::Eip4844(TxEip4844 {
-            chain_id,
-            nonce: 0,
-            gas_limit: 100_000,
-            max_fee_per_gas: 1_000_000_000,
-            max_priority_fee_per_gas: 0,
-            to: Address::repeat_byte(0x42),
-            value: U256::ZERO,
-            access_list: Default::default(),
-            blob_versioned_hashes: vec![B256::repeat_byte(0x01)],
-            max_fee_per_blob_gas: 1,
-            input: Bytes::new(),
-        }),
-        Signature::new(U256::default(), U256::default(), true),
-    )
+    signed_transaction(Transaction::Eip4844(TxEip4844 {
+        chain_id,
+        nonce: 0,
+        gas_limit: 100_000,
+        max_fee_per_gas: 1_000_000_000,
+        max_priority_fee_per_gas: 0,
+        to: Address::repeat_byte(0x42),
+        value: U256::ZERO,
+        access_list: Default::default(),
+        blob_versioned_hashes: vec![B256::repeat_byte(0x01)],
+        max_fee_per_blob_gas: 1,
+        input: Bytes::new(),
+    }))
 }
 
 /// Rule: an ordinary transaction whose signer is `SYSTEM_CALLER` is refused.
@@ -809,21 +822,20 @@ fn executor_refuses_an_ordinary_transaction_before_the_system_prefix() {
 /// blob transaction before execution starts, so the executor's own blob rule only fires when the
 /// executor is driven directly with the prefix already applied.
 #[test]
-fn executor_refuses_a_blob_transaction() {
+fn release_profile_executor_refuses_a_blob_transaction() {
     let fixture = import_fixture();
     let mut state =
         State::builder().with_database(fixture.provider.clone()).with_bundle_update().build();
     let mut executor =
         fixture.config.executor_for_block(&mut state, fixture.first_block.sealed_block()).unwrap();
     executor.apply_pre_execution_changes().unwrap();
-    let blob = Recovered::new_unchecked(
-        blob_tx(fixture.chain_spec.chain.id()),
-        Address::repeat_byte(0x42),
-    );
+    let blob = blob_tx(fixture.chain_spec.chain.id()).try_into_recovered().unwrap();
+    let tx_hash = *blob.tx_hash();
 
     let error = executor.execute_transaction(blob).unwrap_err();
     assert!(
-        error.to_string().contains("blob transactions are unsupported"),
+        matches!(error.as_validation(), Some(BlockValidationError::InvalidTx { hash, error })
+            if *hash == tx_hash && error.to_string() == "blob transactions are unsupported"),
         "expected the blob refusal, got: {error}"
     );
 }
@@ -835,25 +847,252 @@ fn executor_refuses_a_blob_transaction() {
 /// test records which rule actually protects the import path, so the executor-level blob test above
 /// is not mistaken for import-path coverage.
 #[test]
-fn import_rejects_a_blob_transaction_at_the_header_blob_gas_check() {
+fn release_profile_import_rejects_blob_gas_in_the_transaction_body() {
     let fixture = import_fixture();
-    let block = with_transactions(
-        &fixture.first_block,
-        vec![blob_tx(fixture.chain_spec.chain.id())],
-        vec![Address::repeat_byte(0x42)],
-    );
+    let blob = blob_tx(fixture.chain_spec.chain.id()).try_into_recovered().unwrap();
+    let (tx, sender) = blob.into_parts();
+    let block = with_transactions(&fixture.first_block, vec![tx], vec![sender]);
 
     let error =
         replay_complete(&fixture.config, fixture.provider.clone(), &fixture.provider, &block)
             .unwrap_err();
     assert!(
-        error.to_string().contains("blob gas used mismatch"),
+        matches!(consensus_rejection(&error), Some(ConsensusError::BlobGasUsedDiff(diff))
+            if diff.got == 0 && diff.expected == DATA_GAS_PER_BLOB),
         "expected the header blob-gas mismatch to reject the block first, got: {error}"
     );
+}
+
+fn consensus_rejection(error: &BlockExecutionError) -> Option<&ConsensusError> {
+    error.as_internal()?.downcast_other()
+}
+
+#[test]
+fn release_profile_import_rejects_nonempty_withdrawals() {
+    let fixture = import_fixture();
+    let (mut block, senders) = fixture.first_block.split();
+    block.body.withdrawals = Some(Withdrawals::new(vec![Withdrawal {
+        index: 0,
+        validator_index: 0,
+        address: Address::repeat_byte(0x42),
+        amount: 1,
+    }]));
+    block.header.withdrawals_root = block.body.calculate_withdrawals_root();
+    let block = RecoveredBlock::new_unhashed(block, senders);
+
+    let error =
+        replay_complete(&fixture.config, fixture.provider.clone(), &fixture.provider, &block)
+            .unwrap_err();
+    assert!(error.as_internal().is_some(), "{error:?}");
+    assert_eq!(error.to_string(), "withdrawals are unsupported");
+}
+
+#[test]
+fn release_profile_import_rejects_type_4_under_cancun() {
+    let fixture = import_fixture();
+    let chain_id = fixture.chain_spec.chain.id();
+    let auth = Authorization {
+        chain_id: U256::from(chain_id),
+        address: Address::repeat_byte(0xde),
+        nonce: 0,
+    };
+    let auth_signature = sign_message(B256::with_last_byte(2), auth.signature_hash()).unwrap();
+    let tx = signed_transaction(Transaction::Eip7702(TxEip7702 {
+        chain_id,
+        nonce: 0,
+        gas_limit: 100_000,
+        max_fee_per_gas: 10_000_000_000,
+        max_priority_fee_per_gas: 1,
+        to: Address::repeat_byte(0x42),
+        value: U256::ZERO,
+        access_list: Default::default(),
+        authorization_list: vec![auth.into_signed(auth_signature)],
+        input: Bytes::new(),
+    }))
+    .try_into_recovered()
+    .unwrap();
+    let tx_hash = *tx.tx_hash();
+    let (tx, sender) = tx.into_parts();
+    let block = with_transactions(&fixture.first_block, vec![tx], vec![sender]);
+    assert_eq!(fixture.config.evm_env(block.header()).unwrap().cfg_env.spec, SpecId::CANCUN);
+
+    let error =
+        replay_complete(&fixture.config, fixture.provider.clone(), &fixture.provider, &block)
+            .unwrap_err();
     assert!(
-        !error.to_string().contains("blob transactions are unsupported"),
-        "the executor rule must not be the one that fires on the import path, got: {error}"
+        matches!(error.as_validation(), Some(BlockValidationError::InvalidTx { hash, error })
+            if *hash == tx_hash && matches!(error.as_invalid_tx_err(), Some(InvalidTransaction::Eip7702NotSupported))),
+        "expected the Cancun execution rule to refuse the authorization transaction, got: {error}"
     );
+}
+
+#[test]
+fn release_profile_import_rejects_later_fork_header_fields() {
+    let fixture = import_fixture();
+    let (block, senders) = fixture.first_block.split();
+    for (header, expected) in [
+        (
+            Header { requests_hash: Some(EMPTY_REQUESTS_HASH), ..block.header.clone() },
+            ConsensusError::RequestsHashUnexpected,
+        ),
+        (
+            Header {
+                block_access_list_hash: Some(B256::repeat_byte(0x42)),
+                ..block.header.clone()
+            },
+            ConsensusError::BlockAccessListHashUnexpected,
+        ),
+        (
+            Header { slot_number: Some(1), ..block.header.clone() },
+            ConsensusError::SlotNumberUnexpected,
+        ),
+    ] {
+        let block = RecoveredBlock::new_unhashed(
+            Block { header, body: block.body.clone() },
+            senders.clone(),
+        );
+        let error =
+            replay_complete(&fixture.config, fixture.provider.clone(), &fixture.provider, &block)
+                .unwrap_err();
+        assert_eq!(
+            consensus_rejection(&error).map(discriminant),
+            Some(discriminant(&expected)),
+            "expected {expected:?}, got {error:?}"
+        );
+    }
+}
+
+#[test]
+fn release_profile_build_and_replay_agree_after_storage_wipe_and_recreate() {
+    // Init code stores the block number in the slot with that number, then returns
+    // the runtime CALLER SELFDESTRUCT. Its CREATE2 address is the same in both blocks.
+    const CHILD_INIT: [u8; 13] = hex!("4343556133ff5f526002601ef3");
+    let mut factory = vec![0x6c]; // PUSH13
+    factory.extend_from_slice(&CHILD_INIT);
+    factory.extend_from_slice(&hex!(
+        "5f52 5f600d60135ff5" // MSTORE the init code, then CREATE2 with salt zero
+        "8015603257"          // revert if creation returned zero
+        "3615603057"          // empty calldata keeps the child
+        "5f52 5f5f5f5f5f5f515af1 15603257" // otherwise CALL the child in this transaction
+        "5b00 5b5f5ffd"       // stop or revert
+    ));
+    let len = u8::try_from(factory.len()).unwrap();
+    let mut deployment = vec![0x60, len, 0x60, 10, 0x5f, 0x39, 0x60, len, 0x5f, 0xf3];
+    deployment.extend_from_slice(&factory);
+
+    let genesis: Genesis =
+        serde_json::from_str(include_str!("../testdata/signed-beacon-genesis.json")).unwrap();
+    let chain_spec = Arc::new(ChainSpec::from_genesis(genesis));
+    let mut parent = SealedHeader::seal_slow(chain_spec.genesis_header().clone());
+    assert_eq!(parent.hash(), genesis_hash());
+    assert!(chain_spec.is_cancun_active_at_timestamp(parent.timestamp));
+    let tx = |nonce, to, input| {
+        signed_transaction(Transaction::Legacy(TxLegacy {
+            chain_id: Some(chain_spec.chain.id()),
+            nonce,
+            gas_price: 10_000_000_000,
+            gas_limit: 250_000,
+            to,
+            value: U256::ZERO,
+            input,
+        }))
+        .try_into_recovered()
+        .unwrap()
+    };
+    let deploy = tx(0, TxKind::Create, deployment.into());
+    let factory = deploy.signer().create(0);
+    let child = factory.create2(B256::ZERO, keccak256(CHILD_INIT));
+    // Funding the address before CREATE2 gives the wipe an account to remove
+    // from the parent state. The account still has zero nonce and no code.
+    let fund = signed_call(chain_spec.chain.id(), 1, 10_000_000_000, child, U256::from(1), 21_000)
+        .try_into_recovered()
+        .unwrap();
+    let wipe = tx(2, TxKind::Call(factory), Bytes::from_static(&[1]));
+    let recreate = tx(3, TxKind::Call(factory), Bytes::new());
+    let mut builder = FixtureProvider::signed_genesis();
+    builder.set_block_hash(0, parent.hash());
+    let mut follower = builder.clone();
+    let mut completed = None;
+    for transactions in [vec![deploy, fund], vec![wipe], vec![recreate]] {
+        let height = parent.number + 1;
+        let (root, job) = sealed(input(height, height, parent.hash()), parent.number, GENESIS_TAIL);
+        let bound = match completed {
+            Some(accounting) => BoundExecutionInput::from_completed_parent(
+                root.clone(),
+                job,
+                profile(),
+                &parent,
+                accounting,
+                FEE_COLLECTOR,
+            ),
+            None => BoundExecutionInput::from_validated_genesis(
+                root.clone(),
+                job,
+                profile(),
+                &parent,
+                genesis_hash(),
+                FEE_COLLECTOR,
+            ),
+        }
+        .unwrap();
+        let config = UnicityEvmConfig::new(
+            unicity_eth_config(chain_spec.clone(), &context()),
+            Arc::new(bound),
+        );
+        let mut state =
+            State::builder().with_database(builder.clone()).with_bundle_update().build();
+        let expected_receipts = transactions.len();
+        let built = build_complete(
+            &config,
+            &parent,
+            attributes(&root, parent.timestamp),
+            &mut state,
+            builder.clone(),
+            transactions,
+        )
+        .unwrap();
+        let replay =
+            replay_complete(&config, follower.clone(), &follower, &built.outcome.block).unwrap();
+        assert_eq!(replay.output.result, built.outcome.execution_result);
+        assert_eq!(replay.output.result.receipts.len(), expected_receipts);
+        assert!(replay.output.result.receipts.iter().all(|receipt| receipt.success));
+        assert_eq!(replay.parent.for_local_storage(), built.parent.for_local_storage());
+
+        if height == 2 {
+            let account = replay
+                .output
+                .state
+                .state
+                .get(&child)
+                .expect("the Cancun wipe reached the execution bundle");
+            assert!(account.status.was_destroyed());
+            assert!(account.info.is_none());
+            let hashed = follower.hashed_post_state(&replay.output.state).unwrap();
+            assert!(hashed.storages[&keccak256(child)].wiped);
+        }
+        builder.apply_bundle(&state.bundle_state);
+        follower.apply_bundle(&replay.output.state);
+        parent = built.outcome.block.into_sealed_block().into_sealed_header();
+        completed = Some(built.parent);
+        for state in [&mut builder, &mut follower] {
+            state.set_block_hash(height, parent.hash());
+            assert_eq!(state.root(), parent.state_root);
+            let account = state.basic_account(&child).unwrap();
+            if height == 1 {
+                assert_eq!(account.unwrap().balance, U256::from(1));
+            } else if height == 2 {
+                assert!(account.is_none(), "the pre-existing account was deleted");
+            } else {
+                assert_eq!(account.unwrap().bytecode_hash, Some(keccak256(hex!("33ff"))));
+            }
+            let expected = if height < 3 {
+                Default::default()
+            } else {
+                [(U256::from(3), U256::from(3))].into()
+            };
+            assert_eq!(state.storage_of(child), expected);
+        }
+    }
 }
 
 /// The hook-enabled bound block 1: `import` as its records, `hook` as the pinned records hook,
