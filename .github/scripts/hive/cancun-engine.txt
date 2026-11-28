@@ -1,0 +1,8 @@
+# Cancun ordinary execution and the five signature/nonce cases from bft-core#1376.
+tests/frontier/scenarios/test_scenarios.py::test_scenarios[fork_Cancun-blockchain_test_engine-test_program_program_ADDRESS-debug]-reth
+tests/frontier/scenarios/test_scenarios.py::test_scenarios[fork_Cancun-blockchain_test_engine-test_program_program_SUICIDE-debug]-reth
+tests/frontier/validation/test_transaction.py::test_bad_v_r_s[fork_Cancun-tx_type_0-blockchain_test_engine_from_state_test-s=SECP256K1N//2+1]-reth
+tests/frontier/validation/test_transaction.py::test_bad_v_r_s[fork_Cancun-tx_type_0-blockchain_test_engine_from_state_test-s=SECP256K1N]-reth
+tests/frontier/validation/test_transaction.py::test_bad_v_r_s[fork_Cancun-tx_type_0-blockchain_test_engine_from_state_test-v_27-r_115792089237316195423570985008687907852837564279074904382605163141518161494337-s_1]-reth
+tests/frontier/validation/test_transaction.py::test_bad_v_r_s[fork_Cancun-tx_type_0-blockchain_test_engine_from_state_test-v_34-r_1-s_1]-reth
+tests/frontier/validation/test_transaction.py::test_tx_max_nonce[fork_Cancun-blockchain_test_engine_from_state_test]-reth

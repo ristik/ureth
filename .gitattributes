@@ -4,3 +4,6 @@ book/cli/cli.md -linguist-vendored
 crates/storage/libmdbx-rs/mdbx-sys/libmdbx/** linguist-vendored
 
 bun.lock linguist-language=JSON-with-Comments
+
+# The leading spaces in unified diff context are part of the patch format.
+.github/scripts/hive/require_simulator_completion.diff -whitespace

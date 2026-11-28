@@ -17,15 +17,18 @@ with open(args.report_json, 'r') as file:
 
 # Load exclusion YAML
 with open(args.exclusion, 'r') as file:
-    exclusion_data = yaml.safe_load(file)
+    exclusion_data = yaml.safe_load(file) or {}
     exclusions = set(exclusion_data.get(report['name'], []))
     variant_exclusions = exclusion_data.get('fixture_variants', {}).get(args.fixture_variant, {})
     exclusions.update(variant_exclusions.get(report['name'], []))
 
 # Load ignored tests YAML
 with open(args.ignored, 'r') as file:
-    ignored_data = yaml.safe_load(file)
+    ignored_data = yaml.safe_load(file) or {}
     ignored_tests = ignored_data.get(report['name'], [])
+
+if not report['testCases']:
+    sys.exit('Hive report contains no test cases.')
 
 # Collect unexpected failures and passes
 unexpected_failures = []

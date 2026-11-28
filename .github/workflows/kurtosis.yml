@@ -22,16 +22,27 @@ permissions: {}
 
 jobs:
   build-reth:
-    if: github.repository == 'paradigmxyz/reth'
+    if: github.repository == 'paradigmxyz/reth' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
     permissions:
       contents: read
       id-token: write
+    uses: ./.github/workflows/docker-test-depot.yml
+    with:
+      hive_target: kurtosis
+    secrets:
+      DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
+
+  build-reth-fork-pr:
+    if: github.repository == 'paradigmxyz/reth' && github.event_name == 'pull_request' && github.event.pull_request.head.repo.full_name != github.repository
+    permissions:
+      contents: read
     uses: ./.github/workflows/docker-test.yml
     with:
       hive_target: kurtosis
-    secrets: inherit
 
   test:
+    if: >-
+      !cancelled() && (needs.build-reth.result == 'success' || needs.build-reth-fork-pr.result == 'success')
     timeout-minutes: 60
     strategy:
       fail-fast: false
@@ -41,6 +52,7 @@ jobs:
       contents: read
     needs:
       - build-reth
+      - build-reth-fork-pr
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

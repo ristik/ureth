@@ -1,0 +1,53 @@
+name: Build test Docker image on Depot
+
+on:
+  workflow_call:
+    inputs:
+      hive_target:
+        required: true
+        type: string
+        description: "Docker bake target to build (e.g. hive)"
+      artifact_name:
+        required: false
+        type: string
+        default: "artifacts"
+        description: "Name for the uploaded artifact"
+    secrets:
+      DEPOT_TOKEN:
+        required: false
+
+permissions: {}
+
+jobs:
+  depot:
+    if: github.repository == 'paradigmxyz/reth'
+    timeout-minutes: 45
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: mkdir -p artifacts
+      - name: Get Git metadata
+        id: git
+        run: echo "describe=$(git describe --always --tags)" >> "$GITHUB_OUTPUT"
+      - uses: depot/setup-action@91bc8495a33ebfc504ffc89e5674379ccf23c29c # v1.7.2
+      - name: Build reth image (Depot)
+        uses: depot/bake-action@1d58c2668346981089b088b7ef36755b206b20e9 # v1.13.0
+        env:
+          DEPOT_TOKEN: ${{ secrets.DEPOT_TOKEN }}
+          VERGEN_GIT_SHA: ${{ github.sha }}
+          VERGEN_GIT_DESCRIBE: ${{ steps.git.outputs.describe }}
+        with:
+          project: ${{ vars.DEPOT_PROJECT_ID }}
+          files: docker-bake.hcl
+          targets: ${{ inputs.hive_target }}
+          push: false
+      - name: Upload reth image
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: ${{ inputs.artifact_name }}
+          path: ./artifacts

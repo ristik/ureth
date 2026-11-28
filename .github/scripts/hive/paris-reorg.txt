@@ -1,0 +1,3 @@
+# Shared persistence regressions from bft-core#1356.
+Invalid Missing Ancestor ReOrg, StateRoot, EmptyTxs=False, Invalid P9 (Paris) (reth)
+Invalid Missing Ancestor ReOrg, StateRoot, EmptyTxs=False, Invalid P10 (Paris) (reth)
