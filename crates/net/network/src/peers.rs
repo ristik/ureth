@@ -191,7 +191,7 @@ impl PeersManager {
             trusted_peer_ids,
             trusted_peers_resolver: TrustedPeersResolver::new(
                 trusted_nodes,
-                tokio::time::interval(trusted_nodes_resolution_interval), // 1 hour
+                tokio::time::interval(trusted_nodes_resolution_interval),
             ),
             manager_tx,
             handle_rx: UnboundedReceiverStream::new(handle_rx),
@@ -1042,19 +1042,13 @@ impl PeersManager {
     /// Removes the tracked node from the trusted set.
     pub(crate) fn remove_peer_from_trusted_set(&mut self, peer_id: PeerId) {
         self.trusted_peers_resolver.remove(peer_id);
-
-        let Entry::Occupied(mut entry) = self.peers.entry(peer_id) else {
-            self.trusted_peer_ids.remove(&peer_id);
-            return
-        };
-        if !entry.get().is_trusted() {
-            return
-        }
-
-        let peer = entry.get_mut();
-        peer.kind = PeerKind::Basic;
-
         self.trusted_peer_ids.remove(&peer_id);
+
+        if let Some(peer) = self.peers.get_mut(&peer_id) &&
+            peer.is_trusted()
+        {
+            peer.kind = PeerKind::Basic;
+        }
     }
 
     /// Returns the best idle peer to connect to.
@@ -1190,6 +1184,11 @@ impl PeersManager {
             return
         }
 
+        if !self.ip_filter.is_allowed(&new_record.address) {
+            trace!(target: "net::peers", ?peer_id, address=?new_record.address, "Ignoring resolved address outside allowed IP ranges");
+            return
+        }
+
         let new_addr = PeerAddr::new_with_ports(
             new_record.address,
             new_record.tcp_port,
@@ -1197,6 +1196,10 @@ impl PeersManager {
         );
 
         if let Some(peer) = self.peers.get_mut(&peer_id) {
+            // A saved address or an inbound session can create a Basic entry
+            // before the configured trusted hostname first resolves.
+            peer.kind = PeerKind::Trusted;
+            peer.remove_after_disconnect = false;
             if peer.addr != new_addr {
                 peer.addr = new_addr;
                 trace!(target: "net::peers", ?peer_id, addr=?peer.addr, "Updated resolved trusted peer address");
@@ -1534,7 +1537,7 @@ mod tests {
         error::SessionError,
         peers::{
             ConnectionInfo, InboundConnectionError, PeerAction, PeerAddr, PeerBackoffDurations,
-            PeerConnectionState,
+            PeerConnectionState, PeerKind,
         },
         session::PendingSessionHandshakeError,
         PeersConfig,
@@ -3572,80 +3575,135 @@ mod tests {
         assert_eq!(peer.addr.tcp().ip(), "10.0.0.1".parse::<IpAddr>().unwrap());
     }
 
+    fn unresolved_trusted_config(peer_id: PeerId) -> PeersConfig {
+        PeersConfig::test()
+            .with_trusted_nodes(vec![TrustedPeer {
+                host: Host::Domain("example.invalid".to_string()),
+                tcp_port: 30303,
+                udp_port: 30304,
+                id: peer_id,
+            }])
+            .with_trusted_nodes_only(true)
+    }
+
+    fn resolved_trusted_record(peer_id: PeerId) -> NodeRecord {
+        NodeRecord::new_with_ports(Ipv4Addr::new(10, 0, 0, 2).into(), 30303, Some(30304), peer_id)
+    }
+
+    async fn expect_trusted_dial(manager: &mut PeersManager, record: NodeRecord) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let PeerAction::Connect { peer_id, remote_addr } = event!(*manager) {
+                    assert_eq!(peer_id, record.id);
+                    assert_eq!(remote_addr, record.tcp_addr());
+                    break
+                }
+            }
+        })
+        .await
+        .expect("resolved trusted peer must be dialed");
+    }
+
     #[tokio::test]
     async fn test_unresolved_trusted_peer_at_startup_stays_trusted() {
         let peer_id = PeerId::random();
-        let trusted = TrustedPeer {
-            host: url::Host::Domain("example.invalid".to_string()),
-            tcp_port: 30303,
-            udp_port: 30303,
-            id: peer_id,
-        };
-        let config =
-            PeersConfig::test().with_trusted_nodes(vec![trusted]).with_trusted_nodes_only(true);
-        let mut manager = PeersManager::new(config);
-
+        let mut manager = PeersManager::new(unresolved_trusted_config(peer_id));
         assert!(manager.trusted_peer_ids.contains(&peer_id));
         assert!(!manager.peers.contains_key(&peer_id));
 
-        // its inbound session is a trusted one, not an untrusted stranger's
-        let sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 1, 3)), 30303);
-        assert!(manager.on_incoming_pending_session(sock.ip()).is_ok());
-        manager.on_incoming_session_established(peer_id, sock);
+        let resolved = resolved_trusted_record(peer_id);
+        manager.on_resolved_peer(peer_id, resolved);
+        assert_eq!(manager.peer_by_id(peer_id), Some((resolved, PeerKind::Trusted)));
+        expect_trusted_dial(&mut manager, resolved).await;
+    }
+
+    #[tokio::test]
+    async fn test_resolved_trusted_peer_promotes_preloaded_basic_node() {
+        let peer_id = PeerId::random();
+        let stale = NodeRecord::new_with_ports(Ipv4Addr::LOCALHOST.into(), 1234, None, peer_id);
+        let mut manager = PeersManager::new(
+            unresolved_trusted_config(peer_id).with_basic_nodes([stale].into_iter().collect()),
+        );
+        assert_eq!(manager.peer_by_id(peer_id), Some((stale, PeerKind::Basic)));
+        assert!(manager.best_unconnected().is_none());
+
+        let resolved = resolved_trusted_record(peer_id);
+        manager.on_resolved_peer(peer_id, resolved);
+        assert_eq!(manager.peer_by_id(peer_id), Some((resolved, PeerKind::Trusted)));
+        expect_trusted_dial(&mut manager, resolved).await;
+    }
+
+    #[tokio::test]
+    async fn test_resolved_trusted_peer_promotes_basic_node_from_saved_peers_file() {
+        let peer_id = PeerId::random();
+        let stale = NodeRecord::new_with_ports(Ipv4Addr::LOCALHOST.into(), 1234, None, peer_id);
+        let file = std::env::temp_dir().join(format!("reth-trusted-peers-{peer_id}.json"));
+        let reputation = DEFAULT_REPUTATION - 42;
+        std::fs::write(
+            &file,
+            format!(r#"[{{"record":"{stale}","kind":"basic","reputation":{reputation}}}]"#),
+        )
+        .unwrap();
+        let config = unresolved_trusted_config(peer_id).with_basic_nodes_from_file(Some(&file));
+        std::fs::remove_file(file).unwrap();
+        let mut manager = PeersManager::new(config.unwrap());
+
+        assert_eq!(manager.peer_by_id(peer_id), Some((stale, PeerKind::Basic)));
+        assert!(manager.best_unconnected().is_none());
+        let resolved = resolved_trusted_record(peer_id);
+        manager.on_resolved_peer(peer_id, resolved);
+        assert_eq!(manager.peer_by_id(peer_id), Some((resolved, PeerKind::Trusted)));
+        assert_eq!(manager.peers[&peer_id].reputation, reputation);
+        expect_trusted_dial(&mut manager, resolved).await;
+    }
+
+    #[tokio::test]
+    async fn test_resolved_trusted_inbound_peer_keeps_its_address_after_disconnect() {
+        let peer_id = PeerId::random();
+        let mut manager = PeersManager::new(PeersConfig {
+            incoming_ip_throttle_duration: Duration::ZERO,
+            ..unresolved_trusted_config(peer_id)
+        });
+        let inbound = SocketAddr::new(Ipv4Addr::LOCALHOST.into(), 1234);
+        assert!(manager.on_incoming_pending_session(inbound.ip()).is_ok());
+        manager.on_incoming_session_established(peer_id, inbound);
         assert!(!matches!(
             manager.queued_actions.front(),
             Some(PeerAction::DisconnectUntrustedIncoming { .. })
         ));
-        assert!(manager.peers.contains_key(&peer_id));
         assert_eq!(manager.connection_info.num_inbound, 1);
+        assert!(matches!(manager.peers[&peer_id].kind, PeerKind::Basic));
+        assert!(manager.peers[&peer_id].remove_after_disconnect);
 
-        // and a later resolution of a peer not yet known is added as trusted
-        let mut manager = PeersManager::new(
-            PeersConfig::test()
-                .with_trusted_nodes(vec![TrustedPeer {
-                    host: url::Host::Domain("example.invalid".to_string()),
-                    tcp_port: 30303,
-                    udp_port: 30303,
-                    id: peer_id,
-                }])
-                .with_trusted_nodes_only(true),
-        );
-        let resolved = NodeRecord {
-            address: "10.0.0.2".parse::<IpAddr>().unwrap(),
-            tcp_port: 30303,
-            udp_port: 30303,
-            id: peer_id,
-        };
+        let resolved = resolved_trusted_record(peer_id);
         manager.on_resolved_peer(peer_id, resolved);
-        let peer = manager.peers.get(&peer_id).expect("peer should be added after resolution");
-        assert!(peer.kind.is_trusted());
-        assert_eq!(peer.addr.tcp().ip(), "10.0.0.2".parse::<IpAddr>().unwrap());
+        assert_eq!(manager.peers[&peer_id].state, PeerConnectionState::In);
+        assert_eq!(manager.peer_by_id(peer_id), Some((resolved, PeerKind::Trusted)));
+        assert!(!manager.peers[&peer_id].remove_after_disconnect);
+
+        manager.on_active_session_gracefully_closed(peer_id);
+        assert_eq!(manager.connection_info.num_inbound, 0);
+        assert_eq!(manager.peer_by_id(peer_id), Some((resolved, PeerKind::Trusted)));
+        expect_trusted_dial(&mut manager, resolved).await;
     }
 
     #[tokio::test]
     async fn test_removed_trusted_peer_ignores_late_resolution() {
-        let peer_id = PeerId::random();
-        let trusted = TrustedPeer {
-            host: url::Host::Domain("example.invalid".to_string()),
-            tcp_port: 30303,
-            udp_port: 30303,
-            id: peer_id,
-        };
+        for occupied in [false, true] {
+            let peer_id = PeerId::random();
+            let stale = NodeRecord::new_with_ports(Ipv4Addr::LOCALHOST.into(), 1234, None, peer_id);
+            let mut config = unresolved_trusted_config(peer_id);
+            if occupied {
+                config = config.with_basic_nodes([stale].into_iter().collect());
+            }
+            let mut manager = PeersManager::new(config);
+            manager.remove_peer_from_trusted_set(peer_id);
+            manager.on_resolved_peer(peer_id, resolved_trusted_record(peer_id));
 
-        let mut manager = PeersManager::default();
-        manager.add_trusted_peer_node(trusted);
-        manager.remove_peer_from_trusted_set(peer_id);
-
-        let resolved = NodeRecord {
-            address: "10.0.0.1".parse::<IpAddr>().unwrap(),
-            tcp_port: 30303,
-            udp_port: 30303,
-            id: peer_id,
-        };
-        manager.on_resolved_peer(peer_id, resolved);
-
-        assert!(!manager.peers.contains_key(&peer_id));
-        assert!(!manager.trusted_peer_ids.contains(&peer_id));
+            assert_eq!(manager.peer_by_id(peer_id), occupied.then_some((stale, PeerKind::Basic)));
+            assert!(!manager.trusted_peer_ids.contains(&peer_id));
+            assert!(manager.best_unconnected().is_none());
+        }
     }
 
     #[tokio::test]
