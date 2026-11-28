@@ -221,6 +221,12 @@ pub trait ConfigureEvm: Clone + Debug + Send + Sync + Unpin {
     /// Creates a new [`EvmEnv`] for the given header.
     fn evm_env(&self, header: &HeaderTy<Self::Primitives>) -> Result<EvmEnvFor<Self>, Self::Error>;
 
+    /// Whether block-based pending call simulations use the canonical tip when there is no
+    /// executed pending block.
+    fn rpc_pending_call_fallback_to_latest(&self) -> bool {
+        false
+    }
+
     /// Builds an RPC environment, optionally using the queried block's post-state.
     /// Synthetic pending calls pass the parent header and next-block attributes.
     fn rpc_evm_env<DB: Database>(

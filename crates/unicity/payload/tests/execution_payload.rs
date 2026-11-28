@@ -5276,6 +5276,38 @@ async fn the_production_bind_sites_resolve_a_prague_rule_across_e() {
 }
 
 #[tokio::test]
+async fn pending_simulation_uses_unicity_genesis_without_an_executed_block() -> eyre::Result<()> {
+    use jsonrpsee::{core::client::ClientT, rpc_params};
+    use reth_node_builder::{NodeBuilder, NodeHandle};
+    use reth_node_core::{args::RpcServerArgs, node_config::NodeConfig};
+    use reth_tasks::Runtime;
+    use serde_json::{json, Value};
+
+    let (fixture, genesis, _, _, context, _) = seal_fixture();
+    let unicity = UnicityNode::new(SealJobRegistry::new(), context.seal);
+    let config = NodeConfig::test()
+        .with_chain(fixture.chain_spec)
+        .with_unused_ports()
+        .with_rpc(RpcServerArgs::default().with_unused_ports().with_http());
+    let NodeHandle { node, node_exit_future: _ } =
+        NodeBuilder::new(config).testing_node(Runtime::test()).node(unicity).launch().await?;
+    assert!(node.provider.pending_block()?.is_none());
+
+    let client = node.add_ons_handle.rpc_server_handles.rpc.http_client().unwrap();
+    let to = Address::repeat_byte(0x42);
+    let bundles = json!([{ "transactions": [{ "to": to }] }]);
+    let overrides = json!({ (format!("{to:#x}")): { "code": "0x4360005260206000f3" } });
+    let full: Value = client
+        .request(
+            "eth_callMany",
+            rpc_params![bundles, json!({ "blockNumber": "pending" }), overrides],
+        )
+        .await?;
+    assert_eq!(full[0][0]["value"], format!("0x{:064x}", genesis.number));
+    Ok(())
+}
+
+#[tokio::test]
 async fn scheduled_spec_reaches_pool_and_rpc_across_the_acknowledgement() -> eyre::Result<()> {
     use alloy_consensus::TxEip7702;
     use alloy_eips::{eip2718::Encodable2718, eip7702::Authorization, BlockId};

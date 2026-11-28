@@ -1,5 +1,6 @@
 use crate::utils::{eth_payload_attributes, eth_payload_attributes_amsterdam};
-use alloy_primitives::{bytes, Address, U256};
+use alloy_eips::eip2718::Encodable2718;
+use alloy_primitives::{bytes, hex, Address, TxKind, U256};
 use alloy_provider::{network::EthereumWallet, Provider, ProviderBuilder};
 use alloy_rpc_types_engine::PayloadAttributes;
 use alloy_rpc_types_eth::{
@@ -7,10 +8,82 @@ use alloy_rpc_types_eth::{
     state::{AccountOverride, StateOverride, StateOverridesBuilder},
     BlockOverrides, TransactionRequest, TransactionTrait as _,
 };
+use jsonrpsee::{core::client::ClientT, rpc_params};
 use reth_chainspec::{ChainSpec, ChainSpecBuilder, MAINNET};
-use reth_e2e_test_utils::setup_engine;
+use reth_e2e_test_utils::{setup, setup_engine, transaction::TransactionTestContext};
 use reth_node_ethereum::EthereumNode;
+use reth_provider::BlockReader;
+use serde_json::{json, Value};
 use std::sync::Arc;
+
+#[tokio::test]
+async fn pending_simulation_replays_ethereum_pool_transactions() -> eyre::Result<()> {
+    let chain_spec = Arc::new(
+        ChainSpecBuilder::default()
+            .chain(MAINNET.chain)
+            .genesis(serde_json::from_str(include_str!("../assets/genesis.json"))?)
+            .cancun_activated()
+            .build(),
+    );
+    let (mut nodes, wallet) =
+        setup::<EthereumNode>(1, chain_spec, false, eth_payload_attributes).await?;
+    let node = nodes.pop().unwrap();
+    let client = node.rpc_client().unwrap();
+    let recipient = Address::repeat_byte(0x43);
+    let amount = U256::from(100);
+    let tx = TransactionRequest {
+        to: Some(TxKind::Call(recipient)),
+        value: Some(amount),
+        chain_id: Some(1),
+        nonce: Some(0),
+        gas: Some(21_000),
+        gas_price: Some(20_000_000_000),
+        ..Default::default()
+    };
+    let tx = TransactionTestContext::sign_tx(wallet.inner, tx).await;
+    let tx_hash = node.rpc.inject_tx(tx.encoded_2718().into()).await?;
+    assert!(node.inner.provider.pending_block()?.is_none());
+    let pending: Value = client.request("eth_getBlockByNumber", ("pending", false)).await?;
+    assert_eq!(pending["number"], "0x1");
+    assert_eq!(pending["transactions"], json!([tx_hash]));
+
+    // Return the block number and the transfer recipient's balance.
+    let to = Address::repeat_byte(0x42);
+    let code = format!("0x4360005273{}3160205260406000f3", hex::encode(recipient));
+    let overrides = json!({ (format!("{to:#x}")): { "code": code } });
+    let call = json!({ "to": to });
+    let bundles = json!([{ "transactions": [call.clone()] }]);
+    let expected = |balance: U256| format!("0x{:064x}{balance:064x}", 1);
+    let full: Value = client
+        .request(
+            "eth_callMany",
+            rpc_params![bundles.clone(), json!({ "blockNumber": "pending" }), overrides.clone()],
+        )
+        .await?;
+    assert_eq!(full[0][0]["value"], expected(amount));
+
+    let traces: Value = client
+        .request(
+            "debug_traceCallMany",
+            rpc_params![
+                bundles,
+                json!({ "blockNumber": "pending", "transactionIndex": 0 }),
+                json!({ "stateOverrides": overrides.clone() })
+            ],
+        )
+        .await?;
+    let indexed: Value = client
+        .request(
+            "debug_traceCall",
+            rpc_params![call, "pending", json!({ "stateOverrides": overrides, "txIndex": "0x0" })],
+        )
+        .await?;
+    for trace in [&traces[0][0], &indexed] {
+        assert_eq!(trace["failed"], false);
+        assert_eq!(trace["returnValue"], expected(U256::ZERO));
+    }
+    Ok(())
+}
 
 #[tokio::test]
 async fn test_simulate_v1_explicit_gas_uses_remaining_block_gas() -> eyre::Result<()> {

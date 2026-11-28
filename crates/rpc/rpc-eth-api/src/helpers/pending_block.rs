@@ -85,8 +85,15 @@ pub trait LoadPendingBlock:
             ));
         }
 
-        // no pending block from the CL yet, so we use the latest block and modify the env
-        // values that we can
+        let (latest, evm_env) = self.pending_block_env_from_latest()?;
+        Ok((PendingBlockEnv::new(evm_env, PendingBlockEnvOrigin::DerivedFromLatest(latest)), None))
+    }
+
+    /// Derives a pending environment from the canonical tip without looking up pending again.
+    fn pending_block_env_from_latest(
+        &self,
+    ) -> Result<(SealedHeader<ProviderHeader<Self::Provider>>, EvmEnvFor<Self::Evm>), Self::Error>
+    {
         let latest = self
             .provider()
             .latest_header()
@@ -101,7 +108,7 @@ pub trait LoadPendingBlock:
             .map_err(RethError::Other)
             .map_err(Self::Error::from_eth_err)?;
 
-        Ok((PendingBlockEnv::new(evm_env, PendingBlockEnvOrigin::DerivedFromLatest(latest)), None))
+        Ok((latest, evm_env))
     }
 
     /// Captures an executed pending block, its environment, and its post-state together.
