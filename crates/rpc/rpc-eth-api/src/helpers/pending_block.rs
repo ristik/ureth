@@ -16,7 +16,9 @@ use reth_evm::{
     execute::{BlockBuilder, BlockBuilderOutcome, BlockExecutionOutput},
     ConfigureEvm, Evm, EvmEnvFor, NextBlockEnvAttributes,
 };
-use reth_primitives_traits::{transaction::error::InvalidTransactionError, HeaderTy, SealedHeader};
+use reth_primitives_traits::{
+    transaction::error::InvalidTransactionError, HeaderTy, SealedHeader, SealedHeaderFor,
+};
 use reth_revm::{database::StateProviderDatabase, db::State};
 use reth_rpc_convert::RpcConvert;
 use reth_rpc_eth_types::{
@@ -92,8 +94,7 @@ pub trait LoadPendingBlock:
     /// Derives a pending environment from the canonical tip without looking up pending again.
     fn pending_block_env_from_latest(
         &self,
-    ) -> Result<(SealedHeader<ProviderHeader<Self::Provider>>, EvmEnvFor<Self::Evm>), Self::Error>
-    {
+    ) -> Result<(SealedHeaderFor<Self::Primitives>, EvmEnvFor<Self::Evm>), Self::Error> {
         let latest = self
             .provider()
             .latest_header()
