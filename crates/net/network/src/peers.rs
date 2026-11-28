@@ -148,6 +148,12 @@ impl PeersManager {
                     });
                 }
                 Err(err) => {
+                    // The id is known from the enode even when its host does not resolve yet (a
+                    // peer started later under a DNS name). Keep it trusted: with
+                    // `trusted_nodes_only` its inbound sessions are accepted, and the periodic
+                    // resolver adds its address once the name resolves (`on_resolved_peer`
+                    // ignores ids that are not in this set).
+                    trusted_peer_ids.insert(trusted_peer.id);
                     warn!(target: "net::peers", ?err, "Failed to resolve trusted peer");
                 }
             }
@@ -3564,6 +3570,56 @@ mod tests {
         let peer = manager.peers.get(&peer_id).expect("peer should be added after resolution");
         assert!(peer.kind.is_trusted());
         assert_eq!(peer.addr.tcp().ip(), "10.0.0.1".parse::<IpAddr>().unwrap());
+    }
+
+    #[tokio::test]
+    async fn test_unresolved_trusted_peer_at_startup_stays_trusted() {
+        let peer_id = PeerId::random();
+        let trusted = TrustedPeer {
+            host: url::Host::Domain("example.invalid".to_string()),
+            tcp_port: 30303,
+            udp_port: 30303,
+            id: peer_id,
+        };
+        let config =
+            PeersConfig::test().with_trusted_nodes(vec![trusted]).with_trusted_nodes_only(true);
+        let mut manager = PeersManager::new(config);
+
+        assert!(manager.trusted_peer_ids.contains(&peer_id));
+        assert!(!manager.peers.contains_key(&peer_id));
+
+        // its inbound session is a trusted one, not an untrusted stranger's
+        let sock = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(127, 0, 1, 3)), 30303);
+        assert!(manager.on_incoming_pending_session(sock.ip()).is_ok());
+        manager.on_incoming_session_established(peer_id, sock);
+        assert!(!matches!(
+            manager.queued_actions.front(),
+            Some(PeerAction::DisconnectUntrustedIncoming { .. })
+        ));
+        assert!(manager.peers.contains_key(&peer_id));
+        assert_eq!(manager.connection_info.num_inbound, 1);
+
+        // and a later resolution of a peer not yet known is added as trusted
+        let mut manager = PeersManager::new(
+            PeersConfig::test()
+                .with_trusted_nodes(vec![TrustedPeer {
+                    host: url::Host::Domain("example.invalid".to_string()),
+                    tcp_port: 30303,
+                    udp_port: 30303,
+                    id: peer_id,
+                }])
+                .with_trusted_nodes_only(true),
+        );
+        let resolved = NodeRecord {
+            address: "10.0.0.2".parse::<IpAddr>().unwrap(),
+            tcp_port: 30303,
+            udp_port: 30303,
+            id: peer_id,
+        };
+        manager.on_resolved_peer(peer_id, resolved);
+        let peer = manager.peers.get(&peer_id).expect("peer should be added after resolution");
+        assert!(peer.kind.is_trusted());
+        assert_eq!(peer.addr.tcp().ip(), "10.0.0.2".parse::<IpAddr>().unwrap());
     }
 
     #[tokio::test]
