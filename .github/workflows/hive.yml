@@ -298,7 +298,7 @@ jobs:
             echo "::error::Hive produced no test reports"
             exit 1
           fi
-          printf '%s\0' "${reports[@]}" | xargs -0 -I '{}' python .github/scripts/hive/parse.py '{}' --exclusion .github/scripts/hive/expected_failures.yaml --ignored .github/scripts/hive/ignored_tests.yaml
+          printf '%s\0' "${reports[@]}" | xargs -0 -I '{}' python .github/scripts/hive/parse.py '{}' --exclusion .github/scripts/hive/expected_failures.yaml --ignored .github/scripts/hive/ignored_tests.yaml --fixture-variant amsterdam
 
       - name: Print simulator output
         if: ${{ failure() }}
@@ -510,7 +510,7 @@ jobs:
             echo "::error::Hive produced no test reports"
             exit 1
           fi
-          printf '%s\0' "${reports[@]}" | xargs -0 -I '{}' python .github/scripts/hive/parse.py '{}' --exclusion .github/scripts/hive/expected_failures.yaml --ignored .github/scripts/hive/ignored_tests.yaml
+          printf '%s\0' "${reports[@]}" | xargs -0 -I '{}' python .github/scripts/hive/parse.py '{}' --exclusion .github/scripts/hive/expected_failures.yaml --ignored .github/scripts/hive/ignored_tests.yaml --fixture-variant osaka
 
       - name: Print simulator output
         if: ${{ failure() }}
