@@ -4095,9 +4095,7 @@ mod tests {
         map::{AddressMap, B256Map},
         U256,
     };
-    #[cfg(feature = "partial-persistence")]
-    use reth_chain_state::test_utils::TestBlockBuilder;
-    use reth_chain_state::ExecutedBlock;
+    use reth_chain_state::{test_utils::TestBlockBuilder, ExecutedBlock};
     use reth_db_api::models::StorageSettings;
     use reth_ethereum_primitives::Receipt;
     use reth_execution_types::{AccountRevertInit, BlockExecutionOutput, BlockExecutionResult};
@@ -4870,7 +4868,6 @@ mod tests {
         assert_eq!(masked_entries[0].1.nibbles.0, masked_storage_node);
     }
 
-    #[cfg(feature = "partial-persistence")]
     #[test]
     fn test_save_blocks_merges_storage_wipe_in_multi_block_batch() {
         use reth_trie::{
@@ -4936,7 +4933,6 @@ mod tests {
         assert!(storage_entries.is_empty());
     }
 
-    #[cfg(feature = "partial-persistence")]
     #[test]
     fn test_save_blocks_batches_transient_storage_wipe() {
         use alloy_primitives::map::B256Set;
