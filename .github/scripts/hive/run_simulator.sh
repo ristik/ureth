@@ -50,7 +50,7 @@ while [ $attempt -lt $max_attempts ]; do
     run_hive
 
     # Check if no tests were run. sed removes ansi colors
-    if check_log | grep -q "suites=0"; then
+    if check_log | grep -Eq '(^|[[:space:]])(suites|tests)=0([[:space:]]|$)'; then
         echo "no tests were run, retrying in 10 seconds"
         sleep 10
         attempt=$((attempt + 1))

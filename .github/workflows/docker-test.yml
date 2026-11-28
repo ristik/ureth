@@ -74,6 +74,7 @@ jobs:
         if: github.repository != 'paradigmxyz/reth' || steps.fork.outputs.is_fork == 'true'
         uses: docker/bake-action@d3418bd7d0e9324001bca92fa8ba175ea7e6dc9b # v7.3.0
         env:
+          DEPOT_BUILD: "false"
           VERGEN_GIT_SHA: ${{ steps.git.outputs.sha }}
           VERGEN_GIT_DESCRIBE: ${{ steps.git.outputs.describe }}
         with:

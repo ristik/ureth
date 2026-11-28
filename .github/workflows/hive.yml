@@ -259,6 +259,7 @@ jobs:
         if: github.repository != 'paradigmxyz/reth'
         with:
           go-version-file: hivetests/go.mod
+          cache-dependency-path: hivetests/go.sum
 
       - name: Build Hive for this runner
         if: github.repository != 'paradigmxyz/reth'
@@ -470,6 +471,7 @@ jobs:
         if: github.repository != 'paradigmxyz/reth'
         with:
           go-version-file: hivetests/go.mod
+          cache-dependency-path: hivetests/go.sum
 
       - name: Build Hive for this runner
         if: github.repository != 'paradigmxyz/reth'
