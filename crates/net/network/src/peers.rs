@@ -1189,6 +1189,10 @@ impl PeersManager {
             return
         }
 
+        if self.ban_list.is_banned(&peer_id, &new_record.address) {
+            return
+        }
+
         let new_addr = PeerAddr::new_with_ports(
             new_record.address,
             new_record.tcp_port,
@@ -3631,6 +3635,29 @@ mod tests {
         manager.on_resolved_peer(peer_id, resolved);
         assert_eq!(manager.peer_by_id(peer_id), Some((resolved, PeerKind::Trusted)));
         expect_trusted_dial(&mut manager, resolved).await;
+    }
+
+    #[tokio::test]
+    async fn test_resolved_trusted_peer_rejects_banned_address_or_id() {
+        let peer_id = PeerId::random();
+        let stale = NodeRecord::new_with_ports(Ipv4Addr::LOCALHOST.into(), 1234, None, peer_id);
+        let resolved = resolved_trusted_record(peer_id);
+        for (label, ban_list) in [
+            ("address", BanList::new(vec![], vec![resolved.address])),
+            ("peer ID", BanList::new(vec![peer_id], vec![])),
+        ] {
+            let mut manager = PeersManager::new(
+                unresolved_trusted_config(peer_id)
+                    .with_basic_nodes([stale].into_iter().collect())
+                    .with_ban_list(ban_list),
+            );
+
+            manager.on_resolved_peer(peer_id, resolved);
+            manager.fill_outbound_slots();
+            assert_eq!(manager.peer_by_id(peer_id), Some((stale, PeerKind::Basic)), "{label}");
+            assert_eq!(manager.connection_info.num_pending_out, 0, "{label}");
+            assert!(manager.queued_actions.is_empty(), "{label}");
+        }
     }
 
     #[tokio::test]
